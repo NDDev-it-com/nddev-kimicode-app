@@ -5,6 +5,26 @@
   "kimi_code_cli_tested": "0.29.1",
   "kimi_code_cli_package": "@moonshot-ai/kimi-code",
   "kimi_code_cli_command": "kimi",
+  "software_install": {
+    "tool": "bun",
+    "argv": ["add", "--global", "--exact", "--trust", "@moonshot-ai/kimi-code@0.29.1"],
+    "target_owned_env": {
+      "BUN_INSTALL_GLOBAL_DIR": "<stage>/install/global",
+      "BUN_INSTALL_BIN": "<stage>/bin",
+      "BUN_INSTALL_CACHE_DIR": "<stage>/cache",
+      "HOME": "<stage>/home",
+      "XDG_CONFIG_HOME": "<stage>/xdg-config",
+      "TMPDIR": "<stage>/tmp"
+    },
+    "trust_reason": "Official @moonshot-ai/kimi-code@0.29.1 declares postinstall=node scripts/postinstall.mjs"
+  },
+  "software_runtime": {
+    "entrypoint": "bin/kimi",
+    "entrypoint_kind": "node-wrapper",
+    "entrypoint_main": ".nddev-kimicode-software/current/install/global/node_modules/@moonshot-ai/kimi-code/dist/main.mjs",
+    "node_minimum": "22.19.0",
+    "node_recorded_in_stamp": true
+  },
   "setup_ids": ["safe", "balanced", "full-auto"],
   "manager": "cli-tools/nddev_kimicode.py",
   "contract": "config/nddev-contract.json",

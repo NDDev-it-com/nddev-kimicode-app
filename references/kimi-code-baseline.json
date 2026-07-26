@@ -17,13 +17,17 @@
     "integrity": "sha512-c4/Ltsbc9ljEXdUB9EqCWka1raBg+PE0m/mfzcGrONcYghW7lSpG4N+ggfC1fAePwDexy9Dknnm/j3yxMuFtdw==",
     "shasum": "11857306f80af8f46ff80ac1ad573570022bfc94",
     "file_count": 519,
-    "unpacked_size": 36622517
+    "unpacked_size": 36622517,
+    "scripts": {
+      "postinstall": "node scripts/postinstall.mjs"
+    }
   },
   "runtime": {
     "command": "kimi",
     "bin": {"kimi": "dist/main.mjs"},
+    "bin_link_shape_observed": "Bun global bin creates a symlink from bin/kimi to ../install/global/node_modules/@moonshot-ai/kimi-code/dist/main.mjs",
+    "node_engine_runtime": ">=22.19.0",
     "install_script": "curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash",
-    "npm_install": "npm install -g @moonshot-ai/kimi-code",
     "data_root_default": "~/.kimi-code",
     "data_root_env": "KIMI_CODE_HOME",
     "config": "$KIMI_CODE_HOME/config.toml",
@@ -35,6 +39,24 @@
     "plugins": "$KIMI_CODE_HOME/plugins/",
     "credentials": "$KIMI_CODE_HOME/credentials/",
     "sessions": "$KIMI_CODE_HOME/sessions/"
+  },
+  "software_install": {
+    "manager_commands": {
+      "status": "python3 cli-tools/nddev_kimicode.py software-status --target /absolute/target --json",
+      "install": "python3 cli-tools/nddev_kimicode.py install-cli --target /absolute/target --json",
+      "update": "python3 cli-tools/nddev_kimicode.py update-cli --target /absolute/target --json"
+    },
+    "tool": "bun",
+    "argv": ["add", "--global", "--exact", "--trust", "@moonshot-ai/kimi-code@0.29.1"],
+    "trust_required": true,
+    "trust_reason": "Official @moonshot-ai/kimi-code@0.29.1 declares postinstall=node scripts/postinstall.mjs",
+    "persisted_stage_paths": ["install/global", "bin"],
+    "ephemeral_stage_paths": ["home", "xdg-config", "cache", "tmp"],
+    "version_probe": ["bin/kimi", "--version"],
+    "entrypoint_strategy": "manager-generated bin/kimi wrapper bound to persisted dist/main.mjs and absolute node >=22.19.0",
+    "node_minimum": "22.19.0",
+    "live_home_access": false,
+    "credential_inheritance": false
   },
   "permission_model": {
     "config_key": "default_permission_mode",
@@ -71,7 +93,6 @@
   "unsupported": {
     "nddev_plugin_marketplace": null,
     "direct_plugin_install_state_write": null,
-    "bundled_builder_mcp_server": null,
-    "managed_software_install_execution": null
+    "bundled_builder_mcp_server": null
   }
 }

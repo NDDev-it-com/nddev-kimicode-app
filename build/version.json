@@ -4,6 +4,11 @@
   "kimi_code_cli_tested": "0.29.1",
   "kimi_code_cli_package": "@moonshot-ai/kimi-code",
   "kimi_code_cli_command": "kimi",
+  "kimi_code_cli_package_bin": "dist/main.mjs",
+  "kimi_code_cli_postinstall": "node scripts/postinstall.mjs",
+  "kimi_code_cli_node_minimum": "22.19.0",
+  "software_install_tool": "bun",
+  "software_install_argv": ["add", "--global", "--exact", "--trust", "@moonshot-ai/kimi-code@0.29.1"],
   "nddev_builder_projection_version": "0.1.0",
   "runtime_baseline_ref": "references/kimi-code-baseline.json",
   "shared_ci": {

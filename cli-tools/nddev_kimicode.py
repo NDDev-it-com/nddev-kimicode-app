@@ -13,6 +13,7 @@ import re
 import shutil
 import stat
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, NoReturn
@@ -59,6 +60,76 @@ PROVIDER_SECRET_NAMES = {
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
     "AWS_SESSION_TOKEN",
+}
+PACKAGE_MANAGER_SECRET_NAMES = {
+    "NODE_AUTH_TOKEN",
+    "NPM_TOKEN",
+    "BUN_AUTH_TOKEN",
+    "npm_config_userconfig",
+    "npm_config_prefix",
+}
+KIMI_PACKAGE_NAME = "@moonshot-ai/kimi-code"
+KIMI_PACKAGE_VERSION = "0.29.1"
+KIMI_COMMAND = "kimi"
+KIMI_PACKAGE_BIN = "dist/main.mjs"
+KIMI_POSTINSTALL_SCRIPT = "node scripts/postinstall.mjs"
+KIMI_NODE_MIN_VERSION = (22, 19, 0)
+BUN_INSTALL_ARGV = [
+    "add",
+    "--global",
+    "--exact",
+    "--trust",
+    f"{KIMI_PACKAGE_NAME}@{KIMI_PACKAGE_VERSION}",
+]
+SOFTWARE_STAMP_NAME = "NDDEV-KIMICODE-SOFTWARE.json"
+SOFTWARE_DIR_NAME = ".nddev-kimicode-software"
+SOFTWARE_CURRENT_NAME = "current"
+SOFTWARE_STAGE_FRAGMENT = ".nddev-kimicode-software-stage"
+SOFTWARE_MAX_BYTES = 128 * 1024 * 1024
+SOFTWARE_MAX_PATHS = 20000
+PROCESS_OUTPUT_MAX_BYTES = 64 * 1024
+PROCESS_TIMEOUT_SECONDS = 120
+KIMI_MAIN_RELATIVE = "install/global/node_modules/@moonshot-ai/kimi-code/dist/main.mjs"
+SOFTWARE_STAMP_KEYS = {
+    "schema_version",
+    "product_name",
+    "build_version",
+    "canonical_target",
+    "package",
+    "version",
+    "command",
+    "package_bin",
+    "entrypoint",
+    "entrypoint_kind",
+    "entrypoint_main",
+    "installed_tree",
+    "manager",
+    "entrypoint_sha256",
+    "package_main_sha256",
+    "installed_tree_sha256",
+    "node",
+    "version_probe",
+    "official_package_scripts",
+    "installer",
+}
+SOFTWARE_STAMP_NODE_KEYS = {
+    "path",
+    "version",
+    "version_stdout_sha256",
+    "sha256",
+    "min_version",
+    "argv",
+}
+SOFTWARE_STAMP_PROBE_KEYS = {"argv", "environment", "stdout_stderr_sha256"}
+SOFTWARE_STAMP_SCRIPT_KEYS = {"postinstall"}
+SOFTWARE_STAMP_INSTALLER_KEYS = {"tool", "argv", "trust_reason", "env"}
+SOFTWARE_STAMP_INSTALLER_ENV_KEYS = {
+    "BUN_INSTALL_GLOBAL_DIR",
+    "BUN_INSTALL_BIN",
+    "BUN_INSTALL_CACHE_DIR",
+    "HOME",
+    "XDG_CONFIG_HOME",
+    "TMPDIR",
 }
 
 
@@ -192,11 +263,36 @@ def require_existing_managed_file(
     return info
 
 
-def read_existing_file(path: Path, *, max_bytes: int, label: str) -> bytes | None:
+def open_regular_readonly(path: Path, label: str, *, max_bytes: int) -> tuple[int, os.stat_result]:
     info = require_existing_managed_file(path, label, max_bytes=max_bytes)
     if info is None:
+        fail(f"{label} is missing")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        fail(f"{label} could not be opened safely: {exc}")
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode):
+            fail(f"{label} must be a regular file")
+        if opened.st_dev != info.st_dev or opened.st_ino != info.st_ino:
+            fail(f"{label} changed while opening")
+        if opened.st_nlink != 1:
+            fail(f"{label} must not be a hardlink")
+        if opened.st_size > max_bytes:
+            fail(f"{label} is too large")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd, opened
+
+
+def read_existing_file(path: Path, *, max_bytes: int, label: str) -> bytes | None:
+    if stat_existing(path, label) is None:
         return None
-    with path.open("rb") as handle:
+    fd, _ = open_regular_readonly(path, label, max_bytes=max_bytes)
+    with os.fdopen(fd, "rb") as handle:
         data = handle.read(max_bytes + 1)
     if len(data) > max_bytes:
         fail(f"{label} is too large")
@@ -230,6 +326,961 @@ def read_json_file(path: Path, *, max_bytes: int, label: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         fail(f"{label} must contain a JSON object")
     return value
+
+
+def canonical_target_readonly(target: Path) -> str:
+    info = stat_existing(target, "target")
+    if info is not None and not stat.S_ISDIR(info.st_mode):
+        fail("target must be a real directory")
+    return str(target.resolve(strict=False))
+
+
+def software_root(target: Path) -> Path:
+    return target / SOFTWARE_DIR_NAME
+
+
+def software_current(target: Path) -> Path:
+    return software_root(target) / SOFTWARE_CURRENT_NAME
+
+
+def software_stamp_path(target: Path) -> Path:
+    return target / SOFTWARE_STAMP_NAME
+
+
+def software_entrypoint(target: Path) -> Path:
+    return target / "bin" / KIMI_COMMAND
+
+
+def existing_path_label(path: Path, label: str) -> str | None:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return None
+    return label
+
+
+def software_presence(target: Path) -> list[str]:
+    labels = (
+        (software_stamp_path(target), SOFTWARE_STAMP_NAME),
+        (software_root(target), SOFTWARE_DIR_NAME),
+        (software_current(target), f"{SOFTWARE_DIR_NAME}/{SOFTWARE_CURRENT_NAME}"),
+        (software_entrypoint(target), "bin/kimi"),
+    )
+    present = [label for path, label in labels if existing_path_label(path, label) is not None]
+    return sorted(present)
+
+
+def package_manifest_path(root: Path) -> Path:
+    return root / "install" / "global" / "node_modules" / "@moonshot-ai" / "kimi-code" / "package.json"
+
+
+def validate_software_file(path: Path, label: str) -> os.stat_result:
+    info = require_existing_managed_file(path, label, max_bytes=SOFTWARE_MAX_BYTES)
+    if info is None:
+        fail(f"{label} is missing")
+    return info
+
+
+def ensure_private_directory(path: Path, label: str) -> None:
+    info = stat_existing(path, label)
+    if info is None:
+        path.mkdir(mode=OWNER_DIRECTORY_MODE)
+        return
+    if not stat.S_ISDIR(info.st_mode):
+        fail(f"{label} must be a directory")
+    if stat.S_IMODE(info.st_mode) & 0o077:
+        fail(f"{label} must be private")
+
+
+def require_safe_partial_directory(path: Path, label: str) -> None:
+    info = stat_existing(path, label)
+    if info is None:
+        return
+    if not stat.S_ISDIR(info.st_mode):
+        fail(f"{label} must be a directory")
+    if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
+        fail(f"{label} must be private")
+
+
+def require_safe_partial_file(path: Path, label: str, *, max_bytes: int) -> None:
+    info = stat_existing(path, label)
+    if info is None:
+        return
+    if not stat.S_ISREG(info.st_mode):
+        fail(f"{label} must be a regular file")
+    if info.st_nlink != 1:
+        fail(f"{label} must not be a hardlink")
+    if info.st_size > max_bytes:
+        fail(f"{label} is too large")
+
+
+def validate_safe_partial_software_presence(target: Path) -> None:
+    require_safe_partial_directory(software_entrypoint(target).parent, "bin")
+    require_safe_partial_directory(software_root(target), "software root")
+    require_safe_partial_directory(software_current(target), "current software tree")
+    require_safe_partial_file(software_entrypoint(target), "Kimi Code wrapper", max_bytes=SOFTWARE_MAX_BYTES)
+    require_safe_partial_file(software_stamp_path(target), SOFTWARE_STAMP_NAME, max_bytes=METADATA_MAX_BYTES)
+
+
+def validate_pre_network_software_target(target: Path) -> None:
+    require_safe_partial_directory(target, "target")
+    validate_safe_partial_software_presence(target)
+
+
+def exact_keys(value: Any, expected: set[str], label: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        fail(f"{label} must contain a JSON object")
+    keys = set(value)
+    if keys != expected:
+        missing = sorted(expected - keys)
+        extra = sorted(keys - expected)
+        detail = []
+        if missing:
+            detail.append("missing " + ", ".join(missing))
+        if extra:
+            detail.append("extra " + ", ".join(extra))
+        fail(f"{label} schema mismatch: {'; '.join(detail)}")
+    return value
+
+
+def file_sha256(path: Path, *, label: str) -> str:
+    digest = hashlib.sha256()
+    total = 0
+    fd, _ = open_regular_readonly(path, label, max_bytes=SOFTWARE_MAX_BYTES)
+    with os.fdopen(fd, "rb") as handle:
+        while True:
+            chunk = handle.read(1024 * 1024)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > SOFTWARE_MAX_BYTES:
+                fail(f"{label} is too large")
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def tree_sha256(root: Path) -> str:
+    info = stat_existing(root, "software tree")
+    if info is None:
+        fail("software tree is missing")
+    if not stat.S_ISDIR(info.st_mode):
+        fail("software tree must be a directory")
+    digest = hashlib.sha256()
+    total = 0
+    paths = sorted(root.rglob("*"), key=lambda item: item.relative_to(root).as_posix())
+    if len(paths) > SOFTWARE_MAX_PATHS:
+        fail("software tree has too many paths")
+    for path in paths:
+        relative = path.relative_to(root).as_posix()
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            fail(f"software tree entry must not be a symlink: {relative}")
+        if stat.S_ISDIR(info.st_mode):
+            digest.update(f"D {relative} {stat.S_IMODE(info.st_mode):04o}\n".encode("utf-8"))
+            continue
+        if not stat.S_ISREG(info.st_mode):
+            fail(f"software tree entry must be a regular file: {relative}")
+        if info.st_nlink != 1:
+            fail(f"software tree entry must not be a hardlink: {relative}")
+        if info.st_size > SOFTWARE_MAX_BYTES:
+            fail(f"software tree entry is too large: {relative}")
+        total += info.st_size
+        if total > SOFTWARE_MAX_BYTES:
+            fail("software tree is too large")
+        digest.update(f"F {relative} {stat.S_IMODE(info.st_mode):04o} {info.st_size}\n".encode("utf-8"))
+        fd, opened = open_regular_readonly(path, relative, max_bytes=SOFTWARE_MAX_BYTES)
+        if opened.st_size != info.st_size:
+            fail(f"software tree entry changed while hashing: {relative}")
+        with os.fdopen(fd, "rb") as handle:
+            while True:
+                chunk = handle.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def load_package_manifest(root: Path) -> dict[str, Any]:
+    manifest = read_json_file(
+        package_manifest_path(root),
+        max_bytes=METADATA_MAX_BYTES,
+        label="Kimi Code package manifest",
+    )
+    if manifest.get("name") != KIMI_PACKAGE_NAME:
+        fail("staged package name does not match Kimi Code")
+    if manifest.get("version") != KIMI_PACKAGE_VERSION:
+        fail("staged package version does not match the pinned Kimi Code release")
+    package_bin = manifest.get("bin")
+    if not isinstance(package_bin, dict) or package_bin.get(KIMI_COMMAND) != KIMI_PACKAGE_BIN:
+        fail("staged package bin entry does not match the pinned Kimi Code release")
+    scripts = manifest.get("scripts")
+    if not isinstance(scripts, dict) or scripts.get("postinstall") != KIMI_POSTINSTALL_SCRIPT:
+        fail("staged package postinstall script does not match the pinned Kimi Code release")
+    return manifest
+
+
+def is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def private_mode_for_source(info: os.stat_result) -> int:
+    return 0o700 if stat.S_IMODE(info.st_mode) & 0o100 else OWNER_FILE_MODE
+
+
+def copy_file_private(source: Path, destination: Path, label: str) -> None:
+    fd, info = open_regular_readonly(source, label, max_bytes=SOFTWARE_MAX_BYTES)
+    destination.parent.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
+    with os.fdopen(fd, "rb") as source_handle, destination.open("xb") as target_handle:
+        shutil.copyfileobj(source_handle, target_handle, length=1024 * 1024)
+    destination.chmod(private_mode_for_source(info))
+
+
+def materialized_source(path: Path, allowed_roots: tuple[Path, ...], label: str) -> Path:
+    info = path.lstat()
+    if not stat.S_ISLNK(info.st_mode):
+        return path
+    try:
+        resolved = path.resolve(strict=True)
+    except FileNotFoundError:
+        fail(f"staged software symlink is broken: {label}")
+    if not any(is_relative_to(resolved, root) for root in allowed_roots):
+        fail(f"staged software symlink escapes persisted tree: {label}")
+    resolved_info = resolved.lstat()
+    if stat.S_ISLNK(resolved_info.st_mode):
+        resolved = resolved.resolve(strict=True)
+        resolved_info = resolved.lstat()
+    if not stat.S_ISREG(resolved_info.st_mode):
+        fail(f"staged software symlink must resolve to a regular file: {label}")
+    return resolved
+
+
+def copy_tree_sanitized(source: Path, destination: Path, allowed_roots: tuple[Path, ...]) -> None:
+    source_info = stat_existing(source, "staged software tree")
+    if source_info is None:
+        fail("staged software tree is missing")
+    if not stat.S_ISDIR(source_info.st_mode):
+        fail("staged software tree must be a directory")
+    paths = sorted(source.rglob("*"), key=lambda item: item.relative_to(source).as_posix())
+    if len(paths) > SOFTWARE_MAX_PATHS:
+        fail("staged software tree has too many paths")
+    destination.mkdir(mode=OWNER_DIRECTORY_MODE)
+    total = 0
+    for path in paths:
+        relative = path.relative_to(source)
+        target_path = destination / relative
+        info = path.lstat()
+        if stat.S_ISDIR(info.st_mode):
+            target_path.mkdir(mode=OWNER_DIRECTORY_MODE, exist_ok=True)
+            continue
+        if stat.S_ISLNK(info.st_mode):
+            source_file = materialized_source(path, allowed_roots, relative.as_posix())
+            source_info = validate_software_file(source_file, relative.as_posix())
+            total += source_info.st_size
+            if total > SOFTWARE_MAX_BYTES:
+                fail("staged software tree is too large")
+            copy_file_private(source_file, target_path, relative.as_posix())
+            continue
+        if not stat.S_ISREG(info.st_mode):
+            fail(f"staged software entry must be a regular file: {relative.as_posix()}")
+        if info.st_nlink != 1:
+            fail(f"staged software entry must not be a hardlink: {relative.as_posix()}")
+        total += info.st_size
+        if total > SOFTWARE_MAX_BYTES:
+            fail("staged software tree is too large")
+        copy_file_private(path, target_path, relative.as_posix())
+
+
+def materialize_persisted_install(stage_workspace: Path, stage_current: Path) -> None:
+    allowed_roots = (
+        (stage_workspace / "install" / "global").resolve(strict=False),
+        (stage_workspace / "bin").resolve(strict=False),
+    )
+    stage_current.mkdir(mode=OWNER_DIRECTORY_MODE)
+    (stage_current / "install").mkdir(mode=OWNER_DIRECTORY_MODE)
+    copy_tree_sanitized(
+        stage_workspace / "install" / "global",
+        stage_current / "install" / "global",
+        allowed_roots,
+    )
+    copy_tree_sanitized(stage_workspace / "bin", stage_current / "bin", allowed_roots)
+
+
+def parse_node_version(value: str) -> tuple[int, int, int] | None:
+    match = re.search(r"v?(\d+)\.(\d+)\.(\d+)", value)
+    if match is None:
+        return None
+    return tuple(int(part) for part in match.groups())
+
+
+def resolve_node_runtime(stage_workspace: Path) -> dict[str, str]:
+    node = shutil.which("node", path=os.environ.get("PATH", "/usr/bin:/bin"))
+    if node is None:
+        fail("node >=22.19.0 is required to run Kimi Code CLI")
+    node_path = str(Path(node).resolve(strict=False))
+    home = stage_workspace / "node-probe-home"
+    tmp = stage_workspace / "node-probe-tmp"
+    home.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
+    tmp.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(home),
+        "TMPDIR": str(tmp),
+    }
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        try:
+            completed = subprocess.run(
+                [node_path, "--version"],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout,
+                stderr=stderr,
+                check=False,
+                timeout=20,
+            )
+        except FileNotFoundError:
+            fail("node executable was not found")
+        except subprocess.TimeoutExpired:
+            fail("node version probe timed out")
+        stdout_text = read_process_output(stdout, "stdout").strip()
+        stderr_text = read_process_output(stderr, "stderr").strip()
+        if completed.returncode != 0:
+            fail(f"node version probe failed with exit code {completed.returncode}: {stderr_text or stdout_text}")
+        parsed = parse_node_version(stdout_text or stderr_text)
+        if parsed is None or parsed < KIMI_NODE_MIN_VERSION:
+            fail("node >=22.19.0 is required to run Kimi Code CLI")
+    return {
+        "path": node_path,
+        "version": stdout_text or stderr_text,
+        "version_stdout_sha256": sha256_bytes((stdout_text or stderr_text).encode("utf-8")),
+        "sha256": file_sha256(Path(node_path), label="node runtime"),
+        "min_version": ".".join(str(part) for part in KIMI_NODE_MIN_VERSION),
+        "argv": [node_path, "--version"],
+    }
+
+
+def sh_single_quote(value: str) -> str:
+    return "'" + value.replace("'", "'\"'\"'") + "'"
+
+
+def wrapper_bytes(*, node_path: str, main_path: Path) -> bytes:
+    return (
+        "#!/bin/sh\n"
+        "set -eu\n"
+        f"exec {sh_single_quote(node_path)} {sh_single_quote(str(main_path))} \"$@\"\n"
+    ).encode("utf-8")
+
+
+def write_wrapper(path: Path, *, node_path: str, main_path: Path, target: Path) -> str:
+    ensure_real_parent(path, target)
+    require_existing_managed_file(path, "Kimi Code wrapper", max_bytes=METADATA_MAX_BYTES)
+    data = wrapper_bytes(node_path=node_path, main_path=main_path)
+    temporary = path.with_name(f".{path.name}.nddev.tmp.{os.getpid()}.{time.time_ns()}")
+    with temporary.open("xb") as handle:
+        handle.write(data)
+    temporary.chmod(0o700)
+    os.replace(temporary, path)
+    return file_sha256(path, label="Kimi Code wrapper")
+
+
+def safe_process_env(stage_workspace: Path) -> dict[str, str]:
+    home = stage_workspace / "home"
+    xdg_config = stage_workspace / "xdg-config"
+    cache = stage_workspace / "cache"
+    tmp = stage_workspace / "tmp"
+    for directory in (home, xdg_config, cache, tmp, stage_workspace / "install" / "global", stage_workspace / "bin"):
+        directory.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
+    env: dict[str, str] = {
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+        "HOME": str(home),
+        "XDG_CONFIG_HOME": str(xdg_config),
+        "TMPDIR": str(tmp),
+        "BUN_INSTALL_GLOBAL_DIR": str(stage_workspace / "install" / "global"),
+        "BUN_INSTALL_BIN": str(stage_workspace / "bin"),
+        "BUN_INSTALL_CACHE_DIR": str(cache),
+    }
+    return env
+
+
+def read_process_output(handle: Any, label: str) -> str:
+    handle.seek(0, os.SEEK_END)
+    size = handle.tell()
+    handle.seek(0)
+    data = handle.read(PROCESS_OUTPUT_MAX_BYTES + 1)
+    if isinstance(data, str):
+        text = data
+    else:
+        text = data.decode("utf-8", errors="replace")
+    if size > PROCESS_OUTPUT_MAX_BYTES:
+        return text[:PROCESS_OUTPUT_MAX_BYTES] + f"\n[{label} truncated]\n"
+    return text
+
+
+def run_bun_install(stage_current: Path) -> None:
+    command = ["bun", *BUN_INSTALL_ARGV]
+    env = safe_process_env(stage_current)
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        try:
+            completed = subprocess.run(
+                command,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout,
+                stderr=stderr,
+                check=False,
+                timeout=PROCESS_TIMEOUT_SECONDS,
+            )
+        except FileNotFoundError:
+            fail("bun command was not found on PATH")
+        except subprocess.TimeoutExpired:
+            fail("bun install timed out")
+        if completed.returncode != 0:
+            stderr_text = read_process_output(stderr, "stderr")
+            stdout_text = read_process_output(stdout, "stdout")
+            detail = (stderr_text or stdout_text).strip()
+            fail(f"bun install failed with exit code {completed.returncode}: {detail}")
+
+
+def run_stage_version_probe(
+    stage_current: Path, stage_workspace: Path, node_runtime: dict[str, str]
+) -> str:
+    home = stage_workspace / "smoke-home"
+    kimi_home = stage_workspace / "smoke-kimi-home"
+    tmp = stage_workspace / "smoke-tmp"
+    for directory in (home, kimi_home, tmp):
+        directory.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
+    env = {
+        "HOME": str(home),
+        "KIMI_CODE_HOME": str(kimi_home),
+        "KIMI_DISABLE_TELEMETRY": "1",
+        "KIMI_CODE_NO_AUTO_UPDATE": "1",
+        "KIMI_DISABLE_CRON": "1",
+        "PATH": "/usr/bin:/bin",
+        "TMPDIR": str(tmp),
+    }
+    wrapper = stage_workspace / "stage-wrapper" / KIMI_COMMAND
+    wrapper.parent.mkdir(mode=OWNER_DIRECTORY_MODE)
+    wrapper.write_bytes(
+        wrapper_bytes(
+            node_path=node_runtime["path"],
+            main_path=stage_current / KIMI_MAIN_RELATIVE,
+        )
+    )
+    wrapper.chmod(0o700)
+    command = [str(wrapper), "--version"]
+    with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+        try:
+            completed = subprocess.run(
+                command,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=stdout,
+                stderr=stderr,
+                check=False,
+                timeout=PROCESS_TIMEOUT_SECONDS,
+            )
+        except FileNotFoundError:
+            fail("staged kimi wrapper is missing")
+        except subprocess.TimeoutExpired:
+            fail("staged kimi version probe timed out")
+        stdout_text = read_process_output(stdout, "stdout")
+        stderr_text = read_process_output(stderr, "stderr")
+        if completed.returncode != 0:
+            detail = (stderr_text or stdout_text).strip()
+            fail(f"staged kimi version probe failed with exit code {completed.returncode}: {detail}")
+        output = (stdout_text + stderr_text).strip()
+        if KIMI_PACKAGE_VERSION not in output:
+            fail("staged kimi version probe did not report the pinned release")
+        return sha256_bytes(output.encode("utf-8"))
+
+
+def software_stamp(
+    target: Path,
+    *,
+    entrypoint_digest: str,
+    installed_tree_digest: str,
+    package_main_digest: str,
+    version_probe_digest: str,
+    node_runtime: dict[str, str],
+) -> dict[str, Any]:
+    return {
+        "schema_version": 1,
+        "product_name": PRODUCT_NAME,
+        "build_version": VERSION,
+        "canonical_target": str(validate_target(target, create=False)),
+        "package": KIMI_PACKAGE_NAME,
+        "version": KIMI_PACKAGE_VERSION,
+        "command": KIMI_COMMAND,
+        "package_bin": KIMI_PACKAGE_BIN,
+        "entrypoint": "bin/kimi",
+        "entrypoint_kind": "node-wrapper",
+        "entrypoint_main": f"{SOFTWARE_DIR_NAME}/{SOFTWARE_CURRENT_NAME}/{KIMI_MAIN_RELATIVE}",
+        "installed_tree": f"{SOFTWARE_DIR_NAME}/{SOFTWARE_CURRENT_NAME}",
+        "manager": "cli-tools/nddev_kimicode.py",
+        "entrypoint_sha256": entrypoint_digest,
+        "package_main_sha256": package_main_digest,
+        "installed_tree_sha256": installed_tree_digest,
+        "node": {
+            "path": node_runtime["path"],
+            "version": node_runtime["version"],
+            "version_stdout_sha256": node_runtime["version_stdout_sha256"],
+            "sha256": node_runtime["sha256"],
+            "min_version": node_runtime["min_version"],
+            "argv": node_runtime["argv"],
+        },
+        "version_probe": {
+            "argv": ["bin/kimi", "--version"],
+            "environment": {
+                "HOME": "<stage>/smoke-home",
+                "KIMI_CODE_HOME": "<stage>/smoke-kimi-home",
+                "PATH": "/usr/bin:/bin",
+                "TMPDIR": "<stage>/smoke-tmp",
+            },
+            "stdout_stderr_sha256": version_probe_digest,
+        },
+        "official_package_scripts": {
+            "postinstall": KIMI_POSTINSTALL_SCRIPT,
+        },
+        "installer": {
+            "tool": "bun",
+            "argv": BUN_INSTALL_ARGV,
+            "trust_reason": "official package @moonshot-ai/kimi-code@0.29.1 declares postinstall=node scripts/postinstall.mjs",
+            "env": {
+                "BUN_INSTALL_GLOBAL_DIR": "<stage>/install/global",
+                "BUN_INSTALL_BIN": "<stage>/bin",
+                "BUN_INSTALL_CACHE_DIR": "<stage>/cache",
+                "HOME": "<stage>/home",
+                "XDG_CONFIG_HOME": "<stage>/xdg-config",
+                "TMPDIR": "<stage>/tmp",
+            },
+        },
+    }
+
+
+def read_software_stamp(target: Path) -> dict[str, Any] | None:
+    path = software_stamp_path(target)
+    info = stat_existing(path, SOFTWARE_STAMP_NAME)
+    if info is None:
+        return None
+    if not stat.S_ISREG(info.st_mode):
+        fail("software stamp must be a regular file")
+    if stat.S_IMODE(info.st_mode) != OWNER_FILE_MODE:
+        fail("software stamp mode must be 0600")
+    stamp = read_json_file(path, max_bytes=METADATA_MAX_BYTES, label=SOFTWARE_STAMP_NAME)
+    exact_keys(stamp, SOFTWARE_STAMP_KEYS, SOFTWARE_STAMP_NAME)
+    exact_keys(stamp["node"], SOFTWARE_STAMP_NODE_KEYS, "software stamp node")
+    exact_keys(stamp["version_probe"], SOFTWARE_STAMP_PROBE_KEYS, "software stamp version_probe")
+    exact_keys(
+        stamp["official_package_scripts"],
+        SOFTWARE_STAMP_SCRIPT_KEYS,
+        "software stamp official_package_scripts",
+    )
+    installer = exact_keys(stamp["installer"], SOFTWARE_STAMP_INSTALLER_KEYS, "software stamp installer")
+    exact_keys(installer["env"], SOFTWARE_STAMP_INSTALLER_ENV_KEYS, "software stamp installer env")
+    if stamp.get("product_name") != PRODUCT_NAME:
+        fail("software stamp belongs to another product")
+    if stamp.get("canonical_target") != canonical_target_readonly(target):
+        fail("software stamp is bound to a different canonical target")
+    return stamp
+
+
+def software_status_payload(target: Path) -> dict[str, Any]:
+    canonical = canonical_target_readonly(target)
+    payload: dict[str, Any] = {
+        "installed": False,
+        "current": False,
+        "package": KIMI_PACKAGE_NAME,
+        "version": None,
+        "expected_version": KIMI_PACKAGE_VERSION,
+        "command": KIMI_COMMAND,
+        "executable": str(software_entrypoint(target)),
+        "installed_tree": str(software_current(target)),
+        "drift": [],
+        "present": False,
+        "presence": [],
+        "canonical_target": canonical,
+    }
+    if not target.exists():
+        return payload
+    require_real_directory(target, "target")
+    presence = software_presence(target)
+    payload["present"] = bool(presence)
+    payload["presence"] = presence
+    stamp = read_software_stamp(target)
+    if stamp is None:
+        return payload
+    payload["installed"] = True
+    payload["version"] = stamp.get("version")
+    drift: list[str] = []
+    try:
+        root_info = stat_existing(software_root(target), "software root")
+        if root_info is None:
+            drift.append(SOFTWARE_DIR_NAME)
+        elif not stat.S_ISDIR(root_info.st_mode):
+            drift.append(SOFTWARE_DIR_NAME)
+        elif stat.S_IMODE(root_info.st_mode) != OWNER_DIRECTORY_MODE:
+            drift.append("software_root_mode")
+        current_info = stat_existing(software_current(target), "current software tree")
+        if current_info is None:
+            drift.append(SOFTWARE_CURRENT_NAME)
+        elif not stat.S_ISDIR(current_info.st_mode):
+            drift.append(SOFTWARE_CURRENT_NAME)
+        elif stat.S_IMODE(current_info.st_mode) != OWNER_DIRECTORY_MODE:
+            drift.append("software_current_mode")
+        entrypoint_info = validate_software_file(software_entrypoint(target), "Kimi Code wrapper")
+        if stat.S_IMODE(entrypoint_info.st_mode) != 0o700:
+            drift.append("entrypoint_mode")
+        if stamp.get("schema_version") != 1:
+            drift.append("schema_version")
+        if stamp.get("product_name") != PRODUCT_NAME:
+            drift.append("product_name")
+        if stamp.get("build_version") != VERSION:
+            drift.append("build_version")
+        if stamp.get("canonical_target") != canonical:
+            drift.append("canonical_target")
+        load_package_manifest(software_current(target))
+        entrypoint_digest = file_sha256(software_entrypoint(target), label="Kimi Code wrapper")
+        package_main = software_current(target) / KIMI_MAIN_RELATIVE
+        package_main_digest = file_sha256(package_main, label="Kimi Code package main")
+        installed_tree_digest = tree_sha256(software_current(target))
+        if stamp.get("package") != KIMI_PACKAGE_NAME:
+            drift.append("package")
+        if stamp.get("version") != KIMI_PACKAGE_VERSION:
+            drift.append("version")
+        if stamp.get("command") != KIMI_COMMAND:
+            drift.append("command")
+        if stamp.get("package_bin") != KIMI_PACKAGE_BIN:
+            drift.append("package_bin")
+        if stamp.get("entrypoint") != "bin/kimi":
+            drift.append("entrypoint")
+        if stamp.get("entrypoint_kind") != "node-wrapper":
+            drift.append("entrypoint_kind")
+        if stamp.get("entrypoint_main") != f"{SOFTWARE_DIR_NAME}/{SOFTWARE_CURRENT_NAME}/{KIMI_MAIN_RELATIVE}":
+            drift.append("entrypoint_main")
+        if stamp.get("installed_tree") != f"{SOFTWARE_DIR_NAME}/{SOFTWARE_CURRENT_NAME}":
+            drift.append("installed_tree")
+        if stamp.get("manager") != "cli-tools/nddev_kimicode.py":
+            drift.append("manager")
+        if stamp.get("entrypoint_sha256") != entrypoint_digest:
+            drift.append("entrypoint_sha256")
+        if stamp.get("package_main_sha256") != package_main_digest:
+            drift.append("package_main_sha256")
+        if stamp.get("installed_tree_sha256") != installed_tree_digest:
+            drift.append("installed_tree_sha256")
+        installer = stamp.get("installer")
+        expected_env = {
+            "BUN_INSTALL_GLOBAL_DIR": "<stage>/install/global",
+            "BUN_INSTALL_BIN": "<stage>/bin",
+            "BUN_INSTALL_CACHE_DIR": "<stage>/cache",
+            "HOME": "<stage>/home",
+            "XDG_CONFIG_HOME": "<stage>/xdg-config",
+            "TMPDIR": "<stage>/tmp",
+        }
+        if (
+            not isinstance(installer, dict)
+            or installer.get("tool") != "bun"
+            or installer.get("argv") != BUN_INSTALL_ARGV
+            or installer.get("env") != expected_env
+            or installer.get("trust_reason")
+            != "official package @moonshot-ai/kimi-code@0.29.1 declares postinstall=node scripts/postinstall.mjs"
+        ):
+            drift.append("installer")
+        scripts = stamp.get("official_package_scripts")
+        if not isinstance(scripts, dict) or scripts.get("postinstall") != KIMI_POSTINSTALL_SCRIPT:
+            drift.append("official_package_scripts")
+        probe = stamp.get("version_probe")
+        expected_probe_env = {
+            "HOME": "<stage>/smoke-home",
+            "KIMI_CODE_HOME": "<stage>/smoke-kimi-home",
+            "PATH": "/usr/bin:/bin",
+            "TMPDIR": "<stage>/smoke-tmp",
+        }
+        if (
+            not isinstance(probe, dict)
+            or probe.get("argv") != ["bin/kimi", "--version"]
+            or probe.get("environment") != expected_probe_env
+            or not isinstance(probe.get("stdout_stderr_sha256"), str)
+        ):
+            drift.append("version_probe")
+        node = stamp.get("node")
+        if not isinstance(node, dict):
+            drift.append("node")
+        else:
+            parsed = parse_node_version(str(node.get("version", "")))
+            path = node.get("path")
+            if (
+                not isinstance(path, str)
+                or not Path(path).is_absolute()
+                or parsed is None
+                or parsed < KIMI_NODE_MIN_VERSION
+                or node.get("min_version") != "22.19.0"
+                or node.get("argv") != [path, "--version"]
+                or not isinstance(node.get("version_stdout_sha256"), str)
+                or not isinstance(node.get("sha256"), str)
+            ):
+                drift.append("node")
+            else:
+                try:
+                    node_digest = file_sha256(Path(path), label="node runtime")
+                except KimicodeSetupError:
+                    node_digest = ""
+                if node_digest != node.get("sha256"):
+                    drift.append("node_sha256")
+                expected_wrapper = sha256_bytes(
+                    wrapper_bytes(node_path=path, main_path=package_main)
+                )
+                if expected_wrapper != entrypoint_digest:
+                    drift.append("entrypoint_wrapper")
+    except KimicodeSetupError as exc:
+        drift.append(str(exc))
+    payload["drift"] = drift
+    payload["current"] = not drift and stamp.get("version") == KIMI_PACKAGE_VERSION
+    return payload
+
+
+def software_precondition_state(target: Path) -> dict[str, Any]:
+    validate_pre_network_software_target(target)
+    try:
+        payload = software_status_payload(target)
+        if payload["present"] and not payload["current"]:
+            validate_safe_partial_software_presence(target)
+        return payload
+    except KimicodeSetupError as exc:
+        info = stat_existing(target, "target")
+        if info is None or not stat.S_ISDIR(info.st_mode):
+            raise
+        presence = software_presence(target)
+        if not presence:
+            raise
+        validate_pre_network_software_target(target)
+        return {
+            "installed": False,
+            "current": False,
+            "present": True,
+            "presence": presence,
+            "drift": [str(exc)],
+            "package": KIMI_PACKAGE_NAME,
+            "version": None,
+            "expected_version": KIMI_PACKAGE_VERSION,
+            "command": KIMI_COMMAND,
+            "executable": str(software_entrypoint(target)),
+            "installed_tree": str(software_current(target)),
+            "canonical_target": canonical_target_readonly(target),
+        }
+
+
+def snapshot_software_entrypoint(target: Path) -> tuple[bytes | None, int | None]:
+    path = software_entrypoint(target)
+    info = require_existing_managed_file(path, "Kimi Code entrypoint", max_bytes=SOFTWARE_MAX_BYTES)
+    if info is None:
+        return None, None
+    fd, opened = open_regular_readonly(path, "Kimi Code entrypoint", max_bytes=SOFTWARE_MAX_BYTES)
+    with os.fdopen(fd, "rb") as handle:
+        data = handle.read(SOFTWARE_MAX_BYTES + 1)
+    if len(data) > SOFTWARE_MAX_BYTES:
+        fail("Kimi Code entrypoint is too large")
+    return data, private_mode_for_source(opened)
+
+
+def restore_software_entrypoint(
+    target: Path, data: bytes | None, mode: int | None, *, remove_empty_parent: bool
+) -> None:
+    path = software_entrypoint(target)
+    if data is None:
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+        if remove_empty_parent:
+            with contextlib.suppress(OSError):
+                path.parent.rmdir()
+        return
+    ensure_real_parent(path, target)
+    temporary = path.with_name(f".{path.name}.nddev.tmp.{os.getpid()}.{time.time_ns()}")
+    with temporary.open("xb") as handle:
+        handle.write(data)
+    temporary.chmod(mode or 0o700)
+    os.replace(temporary, path)
+
+
+def snapshot_software_stamp(target: Path) -> tuple[bytes | None, int | None]:
+    path = software_stamp_path(target)
+    info = require_existing_managed_file(path, SOFTWARE_STAMP_NAME, max_bytes=METADATA_MAX_BYTES)
+    if info is None:
+        return None, None
+    fd, opened = open_regular_readonly(path, SOFTWARE_STAMP_NAME, max_bytes=METADATA_MAX_BYTES)
+    with os.fdopen(fd, "rb") as handle:
+        data = handle.read(METADATA_MAX_BYTES + 1)
+    if len(data) > METADATA_MAX_BYTES:
+        fail(f"{SOFTWARE_STAMP_NAME} is too large")
+    return data, stat.S_IMODE(opened.st_mode)
+
+
+def restore_software_stamp(target: Path, data: bytes | None, mode: int | None) -> None:
+    path = software_stamp_path(target)
+    if data is None:
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+        return
+    ensure_real_parent(path, target)
+    require_existing_managed_file(path, SOFTWARE_STAMP_NAME, max_bytes=METADATA_MAX_BYTES)
+    temporary = path.with_name(f".{path.name}.nddev.tmp.{os.getpid()}.{time.time_ns()}")
+    restore_mode = mode if mode is not None else OWNER_FILE_MODE
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, restore_mode)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+        os.replace(temporary, path)
+        path.chmod(restore_mode)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            temporary.unlink()
+        raise
+
+
+def atomic_copy_executable(source: Path, destination: Path, target: Path) -> str:
+    info = validate_software_file(source, "staged Kimi Code entrypoint")
+    require_existing_managed_file(destination, "Kimi Code entrypoint", max_bytes=SOFTWARE_MAX_BYTES)
+    ensure_real_parent(destination, target)
+    temporary = destination.with_name(f".{destination.name}.nddev.tmp.{os.getpid()}.{time.time_ns()}")
+    fd, _ = open_regular_readonly(source, "staged Kimi Code entrypoint", max_bytes=SOFTWARE_MAX_BYTES)
+    with os.fdopen(fd, "rb") as source_handle, temporary.open("xb") as target_handle:
+        shutil.copyfileobj(source_handle, target_handle, length=1024 * 1024)
+    temporary.chmod(private_mode_for_source(info))
+    os.replace(temporary, destination)
+    return file_sha256(destination, label="Kimi Code entrypoint")
+
+
+def install_or_update_software(target: Path, *, update: bool) -> dict[str, Any]:
+    preflight = software_precondition_state(target)
+    if preflight["current"]:
+        return {
+            "changed": False,
+            "package": KIMI_PACKAGE_NAME,
+            "version": KIMI_PACKAGE_VERSION,
+            "command": KIMI_COMMAND,
+            "executable": str(software_entrypoint(target)),
+            "installed_tree": str(software_current(target)),
+            "target": canonical_target_readonly(target),
+        }
+    if update and not preflight["present"]:
+        fail("update-cli requires existing target-owned Kimi Code software presence")
+    if not update and preflight["present"]:
+        fail("install-cli found partial or non-current target-owned Kimi Code software; use update-cli")
+
+    with target_lock(target):
+        validate_target(target, create=True)
+        status = software_precondition_state(target)
+        if status["current"]:
+            return {
+                "changed": False,
+                "package": KIMI_PACKAGE_NAME,
+                "version": KIMI_PACKAGE_VERSION,
+                "command": KIMI_COMMAND,
+                "executable": str(software_entrypoint(target)),
+                "installed_tree": str(software_current(target)),
+                "target": str(validate_target(target, create=False)),
+            }
+        if update and not status["present"]:
+            fail("update-cli requires existing target-owned Kimi Code software presence")
+        if not update and status["present"]:
+            fail("install-cli found partial or non-current target-owned Kimi Code software; use update-cli")
+
+        parent = target.parent
+        with tempfile.TemporaryDirectory(
+            prefix=f".{target.name}{SOFTWARE_STAGE_FRAGMENT}.", dir=str(parent)
+        ) as stage_raw, tempfile.TemporaryDirectory(
+            prefix=f".{target.name}.nddev-kimicode-software-rollback.", dir=str(parent)
+        ) as rollback_raw:
+            stage_root = Path(stage_raw)
+            rollback_root = Path(rollback_raw)
+            stage_install = stage_root / "install-output"
+            stage_current = stage_root / SOFTWARE_CURRENT_NAME
+            run_bun_install(stage_install)
+            load_package_manifest(stage_install)
+            materialize_persisted_install(stage_install, stage_current)
+            staged_entrypoint = stage_current / "bin" / KIMI_COMMAND
+            validate_software_file(staged_entrypoint, "staged Kimi Code entrypoint")
+            package_main = stage_current / KIMI_MAIN_RELATIVE
+            validate_software_file(package_main, "staged Kimi Code package main")
+            node_runtime = resolve_node_runtime(stage_root)
+            version_probe_digest = run_stage_version_probe(stage_current, stage_root, node_runtime)
+            package_main_digest = file_sha256(package_main, label="staged Kimi Code package main")
+            installed_tree_digest = tree_sha256(stage_current)
+
+            software_root_was_present = existing_path_label(software_root(target), SOFTWARE_DIR_NAME) is not None
+            entrypoint_parent_was_present = (
+                existing_path_label(software_entrypoint(target).parent, "bin") is not None
+            )
+            ensure_private_directory(software_root(target), "software root")
+            current = software_current(target)
+            rollback_current = rollback_root / SOFTWARE_CURRENT_NAME
+            previous_entrypoint, previous_entrypoint_mode = snapshot_software_entrypoint(target)
+            previous_stamp, previous_stamp_mode = snapshot_software_stamp(target)
+            current_moved = False
+            new_current_installed = False
+            snapshot = {
+                "entrypoint": previous_entrypoint,
+                "entrypoint_mode": previous_entrypoint_mode,
+                "stamp": previous_stamp,
+                "stamp_mode": previous_stamp_mode,
+            }
+            try:
+                current_info = stat_existing(current, "current software tree")
+                if current_info is not None:
+                    if not stat.S_ISDIR(current_info.st_mode):
+                        fail("current software tree must be a directory")
+                    current.rename(rollback_current)
+                    current_moved = True
+                stage_current.rename(current)
+                new_current_installed = True
+                entrypoint_digest = write_wrapper(
+                    software_entrypoint(target),
+                    node_path=node_runtime["path"],
+                    main_path=current / KIMI_MAIN_RELATIVE,
+                    target=target,
+                )
+                if os.environ.get("NDDEV_KIMICODE_TEST_FAIL_AFTER_ENTRYPOINT") == "1":
+                    fail("injected software swap failure after entrypoint")
+                stamp = software_stamp(
+                    target,
+                    entrypoint_digest=entrypoint_digest,
+                    installed_tree_digest=installed_tree_digest,
+                    package_main_digest=package_main_digest,
+                    version_probe_digest=version_probe_digest,
+                    node_runtime=node_runtime,
+                )
+                atomic_write(software_stamp_path(target), canonical_json(stamp), target)
+                verified = software_status_payload(target)
+                if not verified["current"]:
+                    fail(f"installed software failed status verification: {', '.join(verified['drift'])}")
+            except BaseException:
+                if new_current_installed:
+                    shutil.rmtree(current, ignore_errors=True)
+                if current_moved:
+                    rollback_current.rename(current)
+                restore_software_entrypoint(
+                    target,
+                    snapshot["entrypoint"],
+                    snapshot["entrypoint_mode"],
+                    remove_empty_parent=not entrypoint_parent_was_present,
+                )
+                restore_software_stamp(target, snapshot["stamp"], snapshot["stamp_mode"])
+                if not software_root_was_present:
+                    with contextlib.suppress(OSError):
+                        software_root(target).rmdir()
+                raise
+            return {
+                "changed": True,
+                "package": KIMI_PACKAGE_NAME,
+                "version": KIMI_PACKAGE_VERSION,
+                "command": KIMI_COMMAND,
+                "executable": str(software_entrypoint(target)),
+                "installed_tree": str(software_current(target)),
+                "target": str(validate_target(target, create=False)),
+            }
 
 
 def load_setup(setup_id: str) -> dict[str, Any]:
@@ -690,34 +1741,40 @@ def plan_payload(target: Path, setup: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def prepare_launch_invocation(target: Path, child_args: list[str]) -> tuple[list[str], dict[str, str]]:
+    with target_lock(target):
+        status = status_payload(target)
+        if not status["managed"]:
+            fail("launch requires a managed target")
+        if status["drift"]:
+            fail(f"managed target has drift: {', '.join(status['drift'])}")
+        software = software_status_payload(target)
+        if not software["current"]:
+            drift = software.get("drift") or ["target-owned Kimi Code package is not installed"]
+            fail(f"launch requires current target-owned Kimi Code package: {', '.join(drift)}")
+        canonical = validate_target(target, create=False)
+        runtime = canonical / ".nddev-kimicode-runtime"
+        home = runtime / "home"
+        ensure_private_directory(runtime, "runtime root")
+        ensure_private_directory(home, "runtime home")
+        executable = software_entrypoint(canonical)
+        child_env: dict[str, str] = {
+            "HOME": str(home),
+            "KIMI_CODE_HOME": str(canonical),
+            "KIMI_DISABLE_TELEMETRY": "1",
+            "KIMI_CODE_NO_AUTO_UPDATE": "1",
+            "KIMI_DISABLE_CRON": "1",
+            "PATH": "/usr/bin:/bin",
+        }
+        return [str(executable), *child_args], child_env
+
+
 def launch(target: Path, child_args: list[str]) -> int:
-    status = status_payload(target)
-    if not status["managed"]:
-        fail("launch requires a managed target")
-    if status["drift"]:
-        fail(f"managed target has drift: {', '.join(status['drift'])}")
-    canonical = validate_target(target, create=False)
-    runtime = canonical / ".nddev-kimicode-runtime"
-    home = runtime / "home"
-    home.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
-    child_env: dict[str, str] = {
-        "HOME": str(home),
-        "KIMI_CODE_HOME": str(canonical),
-        "KIMI_DISABLE_TELEMETRY": "1",
-        "KIMI_CODE_NO_AUTO_UPDATE": "1",
-        "KIMI_DISABLE_CRON": "1",
-        "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-    }
-    for name in ("TERM", "COLORTERM", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "SYSTEMROOT"):
-        value = os.environ.get(name)
-        if value:
-            child_env[name] = value
-    for name in PROVIDER_SECRET_NAMES:
-        child_env.pop(name, None)
+    command, child_env = prepare_launch_invocation(target, child_args)
     try:
-        completed = subprocess.run(["kimi", *child_args], env=child_env, check=False)
+        completed = subprocess.run(command, env=child_env, check=False)
     except FileNotFoundError:
-        fail("kimi command was not found on PATH")
+        fail("target-owned kimi executable is missing")
     return int(completed.returncode)
 
 
@@ -727,6 +1784,13 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     list_parser = subparsers.add_parser("list")
     list_parser.add_argument("--json", action="store_true")
     for name in ("status", "remove"):
+        command = subparsers.add_parser(name)
+        command.add_argument("--target", required=True)
+        command.add_argument("--json", action="store_true")
+    software_status = subparsers.add_parser("software-status")
+    software_status.add_argument("--target", required=True)
+    software_status.add_argument("--json", action="store_true")
+    for name in ("install-cli", "update-cli"):
         command = subparsers.add_parser(name)
         command.add_argument("--target", required=True)
         command.add_argument("--json", action="store_true")
@@ -756,6 +1820,21 @@ def dispatch(args: argparse.Namespace) -> int:
         return 0
     if args.command == "status":
         emit(status_payload(require_absolute_target(args.target)), as_json=args.json)
+        return 0
+    if args.command == "software-status":
+        emit(software_status_payload(require_absolute_target(args.target)), as_json=args.json)
+        return 0
+    if args.command == "install-cli":
+        emit(
+            install_or_update_software(require_absolute_target(args.target), update=False),
+            as_json=args.json,
+        )
+        return 0
+    if args.command == "update-cli":
+        emit(
+            install_or_update_software(require_absolute_target(args.target), update=True),
+            as_json=args.json,
+        )
         return 0
     if args.command == "plan":
         target = require_absolute_target(args.target)
