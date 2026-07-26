@@ -373,7 +373,9 @@ def desired_files(target: Path, setup: dict[str, Any]) -> dict[str, bytes]:
         target / "AGENTS.md", max_bytes=MANAGED_MAX_BYTES, label="AGENTS.md"
     )
     return {
-        "config.toml": merge_managed_block("config.toml", existing_config, render_config(target, setup)),
+        "config.toml": merge_managed_block(
+            "config.toml", existing_config, render_config(target, setup)
+        ),
         "tui.toml": merge_managed_block("tui.toml", existing_tui, render_tui(setup)),
         "AGENTS.md": merge_managed_block("AGENTS.md", existing_agents, render_agents_block(setup)),
         "mcp.json": canonical_json({"mcpServers": {}}),
