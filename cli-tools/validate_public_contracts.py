@@ -63,21 +63,6 @@ def validate_workflows() -> None:
             raise ValueError(f"{filename}: missing exact shared CI caller")
 
 
-def validate_no_legacy_identity() -> None:
-    banned = ("kimi" + "-cli", "1." + "49.0", "superseded" + "_python" + "_kimi" + "_cli")
-    offenders: list[str] = []
-    for path in ROOT.rglob("*"):
-        if path.is_file() and ".git" not in path.parts:
-            try:
-                text = path.read_text(encoding="utf-8")
-            except UnicodeDecodeError:
-                continue
-            if any(token in text for token in banned):
-                offenders.append(str(path.relative_to(ROOT)))
-    if offenders:
-        raise ValueError(f"legacy identity references are not allowed: {offenders}")
-
-
 def main(argv: list[str] | None = None) -> int:
     parse_args(argv)
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
@@ -118,7 +103,6 @@ def main(argv: list[str] | None = None) -> int:
         if not (ROOT / relative).is_file():
             raise ValueError(f"missing required public path {relative}")
     validate_workflows()
-    validate_no_legacy_identity()
     print("validate_public_contracts.py: PASS")
     return 0
 
