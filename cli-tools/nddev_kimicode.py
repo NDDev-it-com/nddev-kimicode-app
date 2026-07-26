@@ -15,6 +15,7 @@ import stat
 import subprocess
 import tempfile
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -74,6 +75,10 @@ KIMI_COMMAND = "kimi"
 KIMI_PACKAGE_BIN = "dist/main.mjs"
 KIMI_POSTINSTALL_SCRIPT = "node scripts/postinstall.mjs"
 KIMI_NODE_MIN_VERSION = (22, 19, 0)
+KIMI_NPM_INTEGRITY = "sha512-c4/Ltsbc9ljEXdUB9EqCWka1raBg+PE0m/mfzcGrONcYghW7lSpG4N+ggfC1fAePwDexy9Dknnm/j3yxMuFtdw=="
+KIMI_NPM_SHASUM = "11857306f80af8f46ff80ac1ad573570022bfc94"
+KIMI_NPM_UNPACKED_SIZE = 36622517
+KIMI_NPM_FILE_COUNT = 519
 BUN_INSTALL_ARGV = [
     "add",
     "--global",
@@ -97,6 +102,10 @@ SOFTWARE_STAMP_KEYS = {
     "canonical_target",
     "package",
     "version",
+    "npm_integrity",
+    "npm_shasum",
+    "npm_unpacked_size",
+    "npm_file_count",
     "command",
     "package_bin",
     "entrypoint",
@@ -131,10 +140,40 @@ SOFTWARE_STAMP_INSTALLER_ENV_KEYS = {
     "XDG_CONFIG_HOME",
     "TMPDIR",
 }
+FORBIDDEN_LAUNCH_FLAGS = {
+    "--auto",
+    "--auto-approve",
+    "--plan",
+    "--yolo",
+    "--yes",
+    "-p",
+    "-y",
+}
+FORBIDDEN_LAUNCH_VALUE_FLAGS = {
+    "--add-dir",
+    "--agent",
+    "--agent-file",
+    "--model",
+    "--output-format",
+    "--prompt",
+    "--skills-dir",
+    "-m",
+}
+FORBIDDEN_LAUNCH_SUBCOMMANDS = {"upgrade"}
 
 
 class KimicodeSetupError(Exception):
     """Safe user-facing lifecycle failure."""
+
+
+@dataclass
+class DirectoryTransaction:
+    created: list[Path]
+
+    def cleanup(self) -> None:
+        for path in reversed(self.created):
+            with contextlib.suppress(OSError):
+                path.rmdir()
 
 
 def fail(message: str) -> NoReturn:
@@ -170,6 +209,40 @@ def require_absolute_target(raw: str) -> Path:
     return target
 
 
+def path_exists_no_follow(path: Path) -> bool:
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return False
+    return True
+
+
+def reject_symlink_ancestors(path: Path) -> None:
+    current = Path(path.anchor)
+    for part in path.parts[1:-1]:
+        current = current / part
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            break
+        if stat.S_ISLNK(info.st_mode):
+            fail(f"target path must not contain symlink ancestors: {current}")
+        if not stat.S_ISDIR(info.st_mode):
+            fail(f"target path ancestor must be a directory: {current}")
+
+
+def is_current_owner(info: os.stat_result) -> bool:
+    return not hasattr(os, "getuid") or info.st_uid == os.getuid()
+
+
+def is_owner_private_directory(info: os.stat_result) -> bool:
+    return (
+        stat.S_ISDIR(info.st_mode)
+        and is_current_owner(info)
+        and stat.S_IMODE(info.st_mode) == OWNER_DIRECTORY_MODE
+    )
+
+
 def stat_existing(path: Path, label: str) -> os.stat_result | None:
     try:
         info = path.lstat()
@@ -189,19 +262,73 @@ def require_real_directory(path: Path, label: str) -> os.stat_result:
     return info
 
 
-def validate_target(target: Path, *, create: bool = False) -> Path:
+def require_owner_private_directory(path: Path, label: str) -> os.stat_result:
+    info = require_real_directory(path, label)
+    if not is_current_owner(info):
+        fail(f"{label} must be owned by the current user")
+    if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
+        fail(f"{label} must be private with mode 0700")
+    return info
+
+
+def ensure_directory_chain(path: Path, transaction: DirectoryTransaction, label: str) -> None:
+    missing: list[Path] = []
+    current = path
+    while True:
+        try:
+            info = current.lstat()
+        except FileNotFoundError:
+            missing.append(current)
+            parent = current.parent
+            if parent == current:
+                fail(f"{label} parent is missing")
+            current = parent
+            continue
+        if stat.S_ISLNK(info.st_mode):
+            fail(f"{label} must not contain symlink ancestors: {current}")
+        if not stat.S_ISDIR(info.st_mode):
+            fail(f"{label} must be a real directory: {current}")
+        break
+    for directory in reversed(missing):
+        directory.mkdir(mode=OWNER_DIRECTORY_MODE)
+        directory.chmod(OWNER_DIRECTORY_MODE)
+        transaction.created.append(directory)
+
+
+def validate_target(
+    target: Path,
+    *,
+    create: bool = False,
+    transaction: DirectoryTransaction | None = None,
+) -> Path:
+    reject_symlink_ancestors(target)
     parent = target.parent
-    parent.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
-    require_real_directory(parent, "target parent")
     info = stat_existing(target, "target")
     if info is None:
+        canonical = target.resolve(strict=False)
+        reject_symlink_ancestors(canonical)
         if not create:
-            return target.resolve(strict=False)
-        target.mkdir(mode=OWNER_DIRECTORY_MODE)
-        return target.resolve()
+            return canonical
+        local_transaction = transaction or DirectoryTransaction([])
+        try:
+            ensure_directory_chain(parent, local_transaction, "target parent")
+            require_owner_private_directory(parent, "target parent")
+            target.mkdir(mode=OWNER_DIRECTORY_MODE)
+            target.chmod(OWNER_DIRECTORY_MODE)
+            local_transaction.created.append(target)
+            canonical = target.resolve(strict=True)
+            reject_symlink_ancestors(canonical)
+            return canonical
+        except BaseException:
+            if transaction is None:
+                local_transaction.cleanup()
+            raise
     if not stat.S_ISDIR(info.st_mode):
         fail("target must be a real directory")
-    return target.resolve()
+    require_owner_private_directory(target, "target")
+    canonical = target.resolve(strict=True)
+    reject_symlink_ancestors(canonical)
+    return canonical
 
 
 def backup_pool(target: Path) -> Path:
@@ -213,19 +340,50 @@ def lock_path(target: Path) -> Path:
 
 
 @contextlib.contextmanager
-def target_lock(target: Path):
-    target.parent.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
-    require_real_directory(target.parent, "target parent")
+def target_lock(target: Path, *, create_parent: bool = False):
+    transaction = DirectoryTransaction([])
+    reject_symlink_ancestors(target)
+    if create_parent:
+        ensure_directory_chain(target.parent, transaction, "target parent")
+    try:
+        require_owner_private_directory(target.parent, "target parent")
+    except BaseException:
+        transaction.cleanup()
+        raise
     path = lock_path(target)
+    owner = path / "owner.json"
     try:
         path.mkdir(mode=OWNER_DIRECTORY_MODE)
+        path.chmod(OWNER_DIRECTORY_MODE)
+        owner.write_bytes(
+            canonical_json({"schema_version": 1, "pid": os.getpid(), "target": str(target)})
+        )
+        owner.chmod(OWNER_FILE_MODE)
     except FileExistsError:
+        transaction.cleanup()
         fail(f"target is locked: {path}")
-    try:
-        yield
-    finally:
-        with contextlib.suppress(FileNotFoundError):
+    except BaseException:
+        with contextlib.suppress(OSError):
+            if path_exists_no_follow(owner) and not owner.is_symlink():
+                owner.unlink()
             path.rmdir()
+        transaction.cleanup()
+        raise
+    failed = False
+    try:
+        yield transaction
+    except BaseException:
+        failed = True
+        raise
+    finally:
+        try:
+            if path_exists_no_follow(owner) and not owner.is_symlink():
+                owner.unlink()
+            path.rmdir()
+        except OSError as exc:
+            raise KimicodeSetupError(f"target lock cleanup failed: {path}") from exc
+        if failed:
+            transaction.cleanup()
 
 
 def safe_target_path(target: Path, relative: str) -> Path:
@@ -246,6 +404,8 @@ def ensure_real_parent(path: Path, target: Path) -> None:
             continue
         if not stat.S_ISDIR(info.st_mode):
             fail(f"managed parent is not a directory: {current}")
+        if not is_owner_private_directory(info):
+            fail(f"managed parent must be private and owned by the current user: {current}")
 
 
 def require_existing_managed_file(
@@ -329,10 +489,15 @@ def read_json_file(path: Path, *, max_bytes: int, label: str) -> dict[str, Any]:
 
 
 def canonical_target_readonly(target: Path) -> str:
+    reject_symlink_ancestors(target)
     info = stat_existing(target, "target")
     if info is not None and not stat.S_ISDIR(info.st_mode):
         fail("target must be a real directory")
-    return str(target.resolve(strict=False))
+    if info is not None:
+        require_owner_private_directory(target, "target")
+    canonical = target.resolve(strict=False)
+    reject_symlink_ancestors(canonical)
+    return str(canonical)
 
 
 def software_root(target: Path) -> Path:
@@ -381,15 +546,26 @@ def validate_software_file(path: Path, label: str) -> os.stat_result:
     return info
 
 
-def ensure_private_directory(path: Path, label: str) -> None:
+def ensure_private_directory(
+    path: Path,
+    label: str,
+    *,
+    transaction: DirectoryTransaction | None = None,
+) -> None:
     info = stat_existing(path, label)
     if info is None:
+        require_owner_private_directory(path.parent, f"{label} parent")
         path.mkdir(mode=OWNER_DIRECTORY_MODE)
+        path.chmod(OWNER_DIRECTORY_MODE)
+        if transaction is not None:
+            transaction.created.append(path)
         return
     if not stat.S_ISDIR(info.st_mode):
         fail(f"{label} must be a directory")
-    if stat.S_IMODE(info.st_mode) & 0o077:
-        fail(f"{label} must be private")
+    if not is_current_owner(info):
+        fail(f"{label} must be owned by the current user")
+    if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
+        fail(f"{label} must be private with mode 0700")
 
 
 def require_safe_partial_directory(path: Path, label: str) -> None:
@@ -398,8 +574,10 @@ def require_safe_partial_directory(path: Path, label: str) -> None:
         return
     if not stat.S_ISDIR(info.st_mode):
         fail(f"{label} must be a directory")
+    if not is_current_owner(info):
+        fail(f"{label} must be owned by the current user")
     if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
-        fail(f"{label} must be private")
+        fail(f"{label} must be private with mode 0700")
 
 
 def require_safe_partial_file(path: Path, label: str, *, max_bytes: int) -> None:
@@ -798,6 +976,13 @@ def run_stage_version_probe(
         return sha256_bytes(output.encode("utf-8"))
 
 
+def test_override_enabled(name: str) -> bool:
+    return (
+        os.environ.get("NDDEV_KIMICODE_ENABLE_TEST_OVERRIDES") == "1"
+        and os.environ.get(name) == "1"
+    )
+
+
 def software_stamp(
     target: Path,
     *,
@@ -814,6 +999,10 @@ def software_stamp(
         "canonical_target": str(validate_target(target, create=False)),
         "package": KIMI_PACKAGE_NAME,
         "version": KIMI_PACKAGE_VERSION,
+        "npm_integrity": KIMI_NPM_INTEGRITY,
+        "npm_shasum": KIMI_NPM_SHASUM,
+        "npm_unpacked_size": KIMI_NPM_UNPACKED_SIZE,
+        "npm_file_count": KIMI_NPM_FILE_COUNT,
         "command": KIMI_COMMAND,
         "package_bin": KIMI_PACKAGE_BIN,
         "entrypoint": "bin/kimi",
@@ -904,9 +1093,12 @@ def software_status_payload(target: Path) -> dict[str, Any]:
         "presence": [],
         "canonical_target": canonical,
     }
-    if not target.exists():
+    target_info = stat_existing(target, "target")
+    if target_info is None:
         return payload
-    require_real_directory(target, "target")
+    if not stat.S_ISDIR(target_info.st_mode):
+        fail("target must be a real directory")
+    require_owner_private_directory(target, "target")
     presence = software_presence(target)
     payload["present"] = bool(presence)
     payload["presence"] = presence
@@ -951,6 +1143,14 @@ def software_status_payload(target: Path) -> dict[str, Any]:
             drift.append("package")
         if stamp.get("version") != KIMI_PACKAGE_VERSION:
             drift.append("version")
+        if stamp.get("npm_integrity") != KIMI_NPM_INTEGRITY:
+            drift.append("npm_integrity")
+        if stamp.get("npm_shasum") != KIMI_NPM_SHASUM:
+            drift.append("npm_shasum")
+        if stamp.get("npm_unpacked_size") != KIMI_NPM_UNPACKED_SIZE:
+            drift.append("npm_unpacked_size")
+        if stamp.get("npm_file_count") != KIMI_NPM_FILE_COUNT:
+            drift.append("npm_file_count")
         if stamp.get("command") != KIMI_COMMAND:
             drift.append("command")
         if stamp.get("package_bin") != KIMI_PACKAGE_BIN:
@@ -1170,8 +1370,8 @@ def install_or_update_software(target: Path, *, update: bool) -> dict[str, Any]:
     if not update and preflight["present"]:
         fail("install-cli found partial or non-current target-owned Kimi Code software; use update-cli")
 
-    with target_lock(target):
-        validate_target(target, create=True)
+    with target_lock(target, create_parent=not update) as transaction:
+        validate_target(target, create=not update, transaction=transaction)
         status = software_precondition_state(target)
         if status["current"]:
             return {
@@ -1242,7 +1442,7 @@ def install_or_update_software(target: Path, *, update: bool) -> dict[str, Any]:
                     main_path=current / KIMI_MAIN_RELATIVE,
                     target=target,
                 )
-                if os.environ.get("NDDEV_KIMICODE_TEST_FAIL_AFTER_ENTRYPOINT") == "1":
+                if test_override_enabled("NDDEV_KIMICODE_TEST_FAIL_AFTER_ENTRYPOINT"):
                     fail("injected software swap failure after entrypoint")
                 stamp = software_stamp(
                     target,
@@ -1462,8 +1662,13 @@ def stamp_path(target: Path) -> Path:
 
 def read_stamp(target: Path) -> dict[str, Any] | None:
     path = stamp_path(target)
-    if not path.exists():
+    info = stat_existing(path, STAMP_NAME)
+    if info is None:
         return None
+    if not stat.S_ISREG(info.st_mode):
+        fail("stamp must be a regular file")
+    if info.st_nlink != 1:
+        fail("stamp must not be a hardlink")
     stamp = read_json_file(path, max_bytes=METADATA_MAX_BYTES, label=STAMP_NAME)
     if stamp.get("product_name") != PRODUCT_NAME:
         fail("stamp belongs to another product")
@@ -1489,7 +1694,7 @@ def drift_for_stamp(target: Path, stamp: dict[str, Any]) -> list[str]:
 
 def status_payload(target: Path) -> dict[str, Any]:
     canonical = validate_target(target, create=False)
-    if not target.exists():
+    if stat_existing(target, "target") is None:
         return {
             "state": "absent",
             "managed": False,
@@ -1497,7 +1702,7 @@ def status_payload(target: Path) -> dict[str, Any]:
             "setup_id": None,
             "drift": [],
         }
-    require_real_directory(target, "target")
+    require_owner_private_directory(target, "target")
     stamp = read_stamp(target)
     if stamp is None:
         return {
@@ -1539,18 +1744,21 @@ def restore_snapshot(target: Path, snapshot: dict[str, bytes | None]) -> None:
 
 
 def choose_backup_slot(pool: Path) -> int:
-    pool.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True, exist_ok=True)
+    ensure_private_directory(pool, "backup pool")
     for slot in range(10):
-        if not (pool / str(slot)).exists():
+        if not path_exists_no_follow(pool / str(slot)):
             return slot
-    return min(range(10), key=lambda item: (pool / str(item)).stat().st_mtime_ns)
+    return min(range(10), key=lambda item: (pool / str(item)).lstat().st_mtime_ns)
 
 
 def create_backup(target: Path, stamp: dict[str, Any]) -> int:
     pool = backup_pool(target)
     slot = choose_backup_slot(pool)
     slot_dir = pool / str(slot)
-    if slot_dir.exists():
+    slot_info = stat_existing(slot_dir, f"backup slot {slot}")
+    if slot_info is not None:
+        if not stat.S_ISDIR(slot_info.st_mode):
+            fail(f"backup slot {slot} must be a directory")
         shutil.rmtree(slot_dir)
     slot_dir.mkdir(mode=OWNER_DIRECTORY_MODE)
     files: dict[str, Any] = {}
@@ -1590,8 +1798,8 @@ def build_stamp(target: Path, setup_id: str, files: dict[str, bytes]) -> dict[st
 def write_setup(
     target: Path, setup: dict[str, Any], *, require_existing: bool = False
 ) -> dict[str, Any]:
-    with target_lock(target):
-        validate_target(target, create=True)
+    with target_lock(target, create_parent=not require_existing) as transaction:
+        validate_target(target, create=not require_existing, transaction=transaction)
         current = read_stamp(target)
         if require_existing and current is None:
             fail("switch requires an already managed target")
@@ -1628,8 +1836,8 @@ def write_setup(
 def restore_backup(target: Path, slot: int) -> dict[str, Any]:
     if slot < 0 or slot > 9:
         fail("backup slot must be between 0 and 9")
-    with target_lock(target):
-        validate_target(target, create=True)
+    with target_lock(target, create_parent=True) as transaction:
+        validate_target(target, create=True, transaction=transaction)
         envelope_path = backup_pool(target) / str(slot) / BACKUP_NAME
         envelope = read_json_file(envelope_path, max_bytes=METADATA_MAX_BYTES, label=BACKUP_NAME)
         if envelope.get("product_name") != PRODUCT_NAME:
@@ -1741,7 +1949,26 @@ def plan_payload(target: Path, setup: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def reject_managed_launch_overrides(child_args: list[str]) -> None:
+    index = 0
+    while index < len(child_args):
+        arg = child_args[index]
+        if index == 0 and arg in FORBIDDEN_LAUNCH_SUBCOMMANDS:
+            fail(f"launch argument is managed by nddev-kimicode-app: {arg}")
+        if arg in FORBIDDEN_LAUNCH_FLAGS:
+            fail(f"launch flag is managed by nddev-kimicode-app: {arg}")
+        if arg in FORBIDDEN_LAUNCH_VALUE_FLAGS:
+            fail(f"launch flag is managed by nddev-kimicode-app: {arg}")
+        for flag in FORBIDDEN_LAUNCH_VALUE_FLAGS:
+            if flag.startswith("--") and arg.startswith(flag + "="):
+                fail(f"launch flag is managed by nddev-kimicode-app: {flag}")
+        if arg.startswith("-m") and arg != "-m":
+            fail("launch flag is managed by nddev-kimicode-app: -m")
+        index += 1
+
+
 def prepare_launch_invocation(target: Path, child_args: list[str]) -> tuple[list[str], dict[str, str]]:
+    reject_managed_launch_overrides(child_args)
     with target_lock(target):
         status = status_payload(target)
         if not status["managed"]:

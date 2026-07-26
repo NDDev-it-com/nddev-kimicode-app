@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "observed_at": "2026-07-26",
+  "observed_at": "2026-07-27",
   "product": {
     "vendor": "Moonshot AI",
     "name": "Kimi Code CLI",
@@ -87,8 +87,9 @@
     "https://www.kimi.com/code/docs/en/kimi-code-cli/customization/hooks.html",
     "https://www.kimi.com/code/docs/en/kimi-code-cli/customization/plugins.html",
     "https://www.kimi.com/code/docs/en/kimi-code-cli/release-notes/changelog.html",
-    "https://registry.npmjs.org/@moonshot-ai%2fkimi-code",
-    "https://raw.githubusercontent.com/MoonshotAI/kimi-code/main/apps/kimi-code/package.json"
+    "https://registry.npmjs.org/@moonshot-ai%2fkimi-code/latest",
+    "https://api.github.com/repos/MoonshotAI/kimi-code/releases/latest",
+    "https://github.com/MoonshotAI/kimi-code/releases/tag/%40moonshot-ai/kimi-code%400.29.1"
   ],
   "unsupported": {
     "nddev_plugin_marketplace": null,

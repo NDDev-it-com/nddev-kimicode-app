@@ -27,7 +27,26 @@ KIMI_VERSION = "0.29.1"
 KIMI_COMMAND = "kimi"
 KIMI_BIN = "dist/main.mjs"
 KIMI_POSTINSTALL = "node scripts/postinstall.mjs"
+KIMI_NPM_INTEGRITY = "sha512-c4/Ltsbc9ljEXdUB9EqCWka1raBg+PE0m/mfzcGrONcYghW7lSpG4N+ggfC1fAePwDexy9Dknnm/j3yxMuFtdw=="
+KIMI_NPM_SHASUM = "11857306f80af8f46ff80ac1ad573570022bfc94"
+KIMI_NPM_UNPACKED_SIZE = 36622517
+KIMI_NPM_FILE_COUNT = 519
 BUN_INSTALL_ARGV = ["add", "--global", "--exact", "--trust", f"{KIMI_PACKAGE}@{KIMI_VERSION}"]
+CONTRACT_KEYS = {
+    "contract_version",
+    "product_name",
+    "github_repository",
+    "license",
+    "manifest_ref",
+    "version_ref",
+    "managed_state",
+    "setup_system",
+    "safety",
+    "runtime_compatibility",
+    "software_lifecycle",
+    "runtime_launch",
+    "plugin_marketplace",
+}
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -85,8 +104,8 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("contract version_ref must point at build/version.json")
     if contract.get("manifest_ref") != "build/manifest.json":
         raise ValueError("contract manifest_ref must point at build/manifest.json")
-    if "skeleton" in contract:
-        raise ValueError("contract must not expose skeleton status")
+    if set(contract) != CONTRACT_KEYS:
+        raise ValueError("contract top-level keys are not exact")
     if manifest.get("setup_ids") != ids or contract["setup_system"]["setup_ids"] != ids:
         raise ValueError("setup ids are not synchronized")
     if build.get("kimi_code_cli_tested") != baseline["release"]["npm_version"]:
@@ -101,6 +120,14 @@ def main(argv: list[str] | None = None) -> int:
         raise ValueError("baseline package bin must match official manifest")
     if baseline["release"]["scripts"].get("postinstall") != KIMI_POSTINSTALL:
         raise ValueError("baseline must record the official postinstall script")
+    if baseline["release"].get("integrity") != KIMI_NPM_INTEGRITY:
+        raise ValueError("baseline must record the official npm integrity")
+    if baseline["release"].get("shasum") != KIMI_NPM_SHASUM:
+        raise ValueError("baseline must record the official npm shasum")
+    if baseline["release"].get("unpacked_size") != KIMI_NPM_UNPACKED_SIZE:
+        raise ValueError("baseline must record the official unpacked size")
+    if baseline["release"].get("file_count") != KIMI_NPM_FILE_COUNT:
+        raise ValueError("baseline must record the official file count")
     if baseline["runtime"].get("node_engine_runtime") != ">=22.19.0":
         raise ValueError("baseline must record Kimi Code Node runtime requirement")
     if "npm_install" in baseline["runtime"]:

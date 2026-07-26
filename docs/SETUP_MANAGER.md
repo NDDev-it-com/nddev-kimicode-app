@@ -45,6 +45,8 @@ and atomically swaps the target tree with rollback.
 The final target `bin/kimi` is a generated private wrapper. It invokes the persisted
 `dist/main.mjs` with the absolute Node path and Node version recorded at install or
 update time, so launch does not depend on finding `node` through `PATH`.
+The software receipt also records the official npm integrity, shasum, unpacked size,
+and file count for the pinned `@moonshot-ai/kimi-code` package.
 
 `install-cli` is only for fresh targets or already-current idempotency. If any partial
 target-owned software artifact is present, it fails closed and directs repair through
@@ -57,3 +59,6 @@ partial or stale software state transactionally.
 `/absolute/target/bin/kimi` with `PATH=/usr/bin:/bin`, sets `KIMI_CODE_HOME` to the
 target, sets a target-local `HOME`, disables telemetry, auto-update preflight, and
 cron tools, and constructs a fresh child environment without provider credentials.
+Child arguments that override managed model, permission, prompt/autopilot, Skill,
+agent, update, or extra workspace scope are rejected before the target-owned binary is
+spawned.
