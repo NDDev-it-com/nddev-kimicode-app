@@ -1,0 +1,18 @@
+{
+  "name": "nddev-builder",
+  "version": "0.1.0",
+  "description": "NDDev setup artifact builder for Kimi Code CLI",
+  "skills": "./skills/",
+  "sessionStart": {
+    "skill": "nddev-builder"
+  },
+  "hooks": [
+    {
+      "event": "PreToolUse",
+      "matcher": "Bash",
+      "command": "node ./hooks/nddev-builder-pretooluse.mjs",
+      "timeout": 5
+    }
+  ],
+  "mcpServers": {}
+}

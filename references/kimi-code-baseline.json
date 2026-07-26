@@ -1,0 +1,77 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-07-26",
+  "product": {
+    "vendor": "Moonshot AI",
+    "name": "Kimi Code CLI",
+    "official_site": "https://www.kimi.com/code/"
+  },
+  "release": {
+    "npm_package": "@moonshot-ai/kimi-code",
+    "npm_version": "0.29.1",
+    "published_at": "2026-07-24T05:27:08.545Z",
+    "repository": "https://github.com/MoonshotAI/kimi-code",
+    "repository_directory": "apps/kimi-code",
+    "node_engine": ">=22.19.0",
+    "tarball": "https://registry.npmjs.org/@moonshot-ai/kimi-code/-/kimi-code-0.29.1.tgz",
+    "integrity": "sha512-c4/Ltsbc9ljEXdUB9EqCWka1raBg+PE0m/mfzcGrONcYghW7lSpG4N+ggfC1fAePwDexy9Dknnm/j3yxMuFtdw==",
+    "shasum": "11857306f80af8f46ff80ac1ad573570022bfc94",
+    "file_count": 519,
+    "unpacked_size": 36622517
+  },
+  "runtime": {
+    "command": "kimi",
+    "bin": {"kimi": "dist/main.mjs"},
+    "install_script": "curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash",
+    "npm_install": "npm install -g @moonshot-ai/kimi-code",
+    "data_root_default": "~/.kimi-code",
+    "data_root_env": "KIMI_CODE_HOME",
+    "config": "$KIMI_CODE_HOME/config.toml",
+    "tui_config": "$KIMI_CODE_HOME/tui.toml",
+    "global_instructions": "$KIMI_CODE_HOME/AGENTS.md",
+    "mcp_config": "$KIMI_CODE_HOME/mcp.json",
+    "skills": "$KIMI_CODE_HOME/skills/",
+    "agents": "$KIMI_CODE_HOME/agents/",
+    "plugins": "$KIMI_CODE_HOME/plugins/",
+    "credentials": "$KIMI_CODE_HOME/credentials/",
+    "sessions": "$KIMI_CODE_HOME/sessions/"
+  },
+  "permission_model": {
+    "config_key": "default_permission_mode",
+    "modes": ["manual", "yolo", "auto"],
+    "safe": "manual with plan mode enabled",
+    "balanced": "yolo with explicit deny rules for dangerous Bash patterns",
+    "full_auto": "auto with isolated target and no inherited credentials"
+  },
+  "native_surfaces": {
+    "AGENTS": true,
+    "skills": true,
+    "agents": true,
+    "hooks": true,
+    "MCP": true,
+    "plugins": true,
+    "plugin_marketplace": null
+  },
+  "sources": [
+    "https://www.kimi.com/code/",
+    "https://www.kimi.com/code/docs/en/kimi-code-cli/guides/getting-started.html",
+    "https://www.kimi.com/code/docs/en/kimi-code-cli/reference/kimi-command.html",
+    "https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/config-files.html",
+    "https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/data-locations.html",
+    "https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/env-vars",
+    "https://www.kimi.com/code/docs/en/kimi-code-cli/customization/skills.html",
+    "https://www.kimi.com/code/docs/en/kimi-code-cli/customization/agents.html",
+    "https://www.kimi.com/code/docs/en/kimi-code-cli/customization/mcp.html",
+    "https://www.kimi.com/code/docs/en/kimi-code-cli/customization/hooks.html",
+    "https://www.kimi.com/code/docs/en/kimi-code-cli/customization/plugins.html",
+    "https://www.kimi.com/code/docs/en/kimi-code-cli/release-notes/changelog.html",
+    "https://registry.npmjs.org/@moonshot-ai%2fkimi-code",
+    "https://raw.githubusercontent.com/MoonshotAI/kimi-code/main/apps/kimi-code/package.json"
+  ],
+  "unsupported": {
+    "nddev_plugin_marketplace": null,
+    "direct_plugin_install_state_write": null,
+    "bundled_builder_mcp_server": null,
+    "managed_software_install_execution": null
+  }
+}

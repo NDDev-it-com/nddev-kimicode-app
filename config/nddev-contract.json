@@ -1,10 +1,81 @@
 {
-  "contract_version": 1,
+  "contract_version": 2,
   "product_name": "nddev-kimicode-app",
   "github_repository": "NDDev-it-com/nddev-kimicode-app",
   "license": "AGPL-3.0-or-later",
-  "skeleton": {
-    "status": "skeleton",
-    "harness_id": "kimicode"
+  "manifest_ref": "build/manifest.json",
+  "version_ref": "build/version.json",
+  "managed_state": {
+    "stamp_file": "NDDEV-KIMICODE-SETUP.json",
+    "stamp_schema": 1,
+    "default_target": null,
+    "environment_variable": "NDDEV_KIMICODE_TARGET",
+    "managed_directory_mode": "0700",
+    "managed_file_mode": "0600",
+    "preserve_other_state": true,
+    "co_owned_config_strategy": "Marked block merge for config.toml, tui.toml, and AGENTS.md; JSON merge for mcp.json; exact managed files for nddev-builder skills, agents, hooks, and plugin projection"
+  },
+  "setup_system": {
+    "catalog_root": "setups",
+    "setup_ids": ["safe", "balanced", "full-auto"],
+    "identity_source": "official Kimi Code CLI docs, npm package manifest, and MoonshotAI source/release metadata",
+    "list_command": "python3 cli-tools/nddev_kimicode.py list --json",
+    "status_command": "python3 cli-tools/nddev_kimicode.py status --target /absolute/target --json",
+    "plan_command": "python3 cli-tools/nddev_kimicode.py plan --setup safe --target /absolute/target --json",
+    "install_command": "python3 cli-tools/nddev_kimicode.py install --setup safe --target /absolute/target --json",
+    "switch_command": "python3 cli-tools/nddev_kimicode.py switch --setup balanced --target /absolute/target --json",
+    "restore_command": "python3 cli-tools/nddev_kimicode.py restore --backup 0 --target /absolute/target --json",
+    "remove_command": "python3 cli-tools/nddev_kimicode.py remove --target /absolute/target --json",
+    "launch_command": "python3 cli-tools/nddev_kimicode.py launch --target /absolute/target --"
+  },
+  "safety": {
+    "absolute_target_required": true,
+    "relative_target_rejected": true,
+    "target_symlinks_rejected": true,
+    "managed_symlinks_rejected": true,
+    "managed_hardlinks_rejected": true,
+    "bounded_managed_reads": true,
+    "canonical_target_binding": true,
+    "rollback_on_failure": true,
+    "max_backups": 10,
+    "launch_requires_clean_managed_target": true,
+    "launch_strips_provider_credentials": true
+  },
+  "runtime_compatibility": {
+    "baseline_ref": "references/kimi-code-baseline.json",
+    "command": "kimi",
+    "npm_package": "@moonshot-ai/kimi-code",
+    "tested_release": "0.29.1",
+    "node_engine": ">=22.19.0",
+    "exact_package_hashes_available": true
+  },
+  "runtime_launch": {
+    "command": "kimi",
+    "direct_command": ["kimi"],
+    "manager_command": "python3 cli-tools/nddev_kimicode.py launch --target /absolute/target --",
+    "required_version": "0.29.1",
+    "environment_variable": "NDDEV_KIMICODE_TARGET",
+    "forwards_arguments": true,
+    "forwards_child_exit_code": true,
+    "streams_child_stdio": true,
+    "json_manager_errors_supported": true,
+    "target_environment_scope": "isolated HOME plus KIMI_CODE_HOME, credentials, sessions, logs, skills, agents, plugins, hooks, MCP, and runtime data under the explicit target"
+  },
+  "plugin_marketplace": {
+    "plugin_id": "nddev-builder",
+    "plugin_manifest": "builder/nddev-builder/kimi.plugin.json",
+    "marketplace_manifest": null,
+    "external_marketplace_published": null,
+    "default_on_in_all_setups": true,
+    "builder_enabled_in_base_config": true,
+    "native_projection": {
+      "AGENTS": "AGENTS.md under KIMI_CODE_HOME",
+      "skills": "skills/nddev-builder/SKILL.md plus extra_skill_dirs",
+      "agents": "agents/nddev-builder.md plus extra_agent_dirs",
+      "hooks": "hooks/nddev-builder-pretooluse.mjs via [[hooks]] in config.toml",
+      "MCP": "mcp.json managed without bundled servers or secrets",
+      "plugins": "builder/nddev-builder/kimi.plugin.json copied into plugins/managed/nddev-builder for native plugin shape"
+    },
+    "unsupported_reason": "No NDDev Kimi Code plugin marketplace is published; plugin install-state schema is not written directly. Builder is default-on through AGENTS, skills, agents, hooks, and config-managed locations."
   }
 }
