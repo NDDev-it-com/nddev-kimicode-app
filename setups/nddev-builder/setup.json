@@ -1,0 +1,14 @@
+{
+  "id": "nddev-builder",
+  "display_name": "NDDev Builder",
+  "description": "Canonical NDDev setup content projected through documented Kimi Code native files.",
+  "nddev_builder_default": true,
+  "managed_surfaces": [
+    "AGENTS.md",
+    "skills",
+    "agents",
+    "hooks",
+    "mcp",
+    "plugin_source"
+  ]
+}

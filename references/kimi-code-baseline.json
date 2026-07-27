@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "observed_at": "2026-07-27",
   "product": {
     "vendor": "Moonshot AI",
@@ -8,26 +8,54 @@
   },
   "release": {
     "npm_package": "@moonshot-ai/kimi-code",
-    "npm_version": "0.29.1",
-    "published_at": "2026-07-24T05:27:08.545Z",
+    "npm_version": "0.29.2",
+    "published_at": "2026-07-27T06:31:21.638Z",
     "repository": "https://github.com/MoonshotAI/kimi-code",
     "repository_directory": "apps/kimi-code",
+    "github_release_url": "https://github.com/MoonshotAI/kimi-code/releases/tag/%40moonshot-ai/kimi-code%400.29.2",
+    "github_release_id": 360239506,
+    "git_tag": "@moonshot-ai/kimi-code@0.29.2",
+    "git_tag_object": "57503c7c4d854f2c66ea32e10cba28b2c5715e9c",
+    "git_commit": "8a45f10eddbb35c317047e82e567cdb59a220b4f",
     "node_engine": ">=22.19.0",
-    "tarball": "https://registry.npmjs.org/@moonshot-ai/kimi-code/-/kimi-code-0.29.1.tgz",
-    "integrity": "sha512-c4/Ltsbc9ljEXdUB9EqCWka1raBg+PE0m/mfzcGrONcYghW7lSpG4N+ggfC1fAePwDexy9Dknnm/j3yxMuFtdw==",
-    "shasum": "11857306f80af8f46ff80ac1ad573570022bfc94",
+    "tarball": "https://registry.npmjs.org/@moonshot-ai/kimi-code/-/kimi-code-0.29.2.tgz",
+    "integrity": "sha512-NmID/2+rCbZXvnQIBZxZlLzeUjETjb1BPzfkUoVs6AhQv9xuGKLzQvcUJB+yksRZnWE+ikLMWyIn75rVfMMP4w==",
+    "shasum": "9e8da7ca4e822048a28d1e12ff46c8ea5ecb23ac",
+    "npm_metadata_sha256": "38afbc3a2ddc0c5d0e4b4a3067c3ad82f1a749ad917ec7adcaea1129cd0e036f",
     "file_count": 519,
-    "unpacked_size": 36622517,
+    "unpacked_size": 38348444,
+    "bin": {"kimi": "dist/main.mjs"},
     "scripts": {
       "postinstall": "node scripts/postinstall.mjs"
     }
   },
+  "official_binary_install": {
+    "install_script_url": "https://code.kimi.com/kimi-code/install.sh",
+    "install_script_sha256": "638927825e96825edbb563de5e0cb06f8a0551c53e026ade8b717b0f25cb83d2",
+    "latest_url": "https://code.kimi.com/kimi-code/latest",
+    "manifest_url": "https://code.kimi.com/kimi-code/binaries/0.29.2/manifest.json",
+    "manifest_sha256": "6057703f6430964741198c81617737bcec917082d1ce4aadd7a1b8c29787ae9b",
+    "platforms": {
+      "darwin-arm64": {
+        "filename": "kimi-code-darwin-arm64",
+        "checksum": "25dc8b14f8bb5ef98470577265b1e9c95892c168f34e9639c5f63b48d4ece6fb"
+      },
+      "darwin-x64": {
+        "filename": "kimi-code-darwin-x64",
+        "checksum": "fe59f14cab74971768377e586bf3be30c1ca04079c058d4b492827ca4dfd6b16"
+      },
+      "linux-arm64": {
+        "filename": "kimi-code-linux-arm64",
+        "checksum": "5fb64e74eeec0b3900732cfbc3679cc505beb51aa323f486154fd79b0e20b26a"
+      },
+      "linux-x64": {
+        "filename": "kimi-code-linux-x64",
+        "checksum": "f9977d259ed36019793cadf04b1f0343f12aaebfa76f90fa26cd3b02be671231"
+      }
+    }
+  },
   "runtime": {
     "command": "kimi",
-    "bin": {"kimi": "dist/main.mjs"},
-    "bin_link_shape_observed": "Bun global bin creates a symlink from bin/kimi to ../install/global/node_modules/@moonshot-ai/kimi-code/dist/main.mjs",
-    "node_engine_runtime": ">=22.19.0",
-    "install_script": "curl -fsSL https://code.kimi.com/kimi-code/install.sh | bash",
     "data_root_default": "~/.kimi-code",
     "data_root_env": "KIMI_CODE_HOME",
     "config": "$KIMI_CODE_HOME/config.toml",
@@ -36,34 +64,17 @@
     "mcp_config": "$KIMI_CODE_HOME/mcp.json",
     "skills": "$KIMI_CODE_HOME/skills/",
     "agents": "$KIMI_CODE_HOME/agents/",
-    "plugins": "$KIMI_CODE_HOME/plugins/",
+    "plugins_installed_state": "$KIMI_CODE_HOME/plugins/installed.json",
+    "plugins_managed_runtime": "$KIMI_CODE_HOME/plugins/managed/",
     "credentials": "$KIMI_CODE_HOME/credentials/",
-    "sessions": "$KIMI_CODE_HOME/sessions/"
-  },
-  "software_install": {
-    "manager_commands": {
-      "status": "python3 cli-tools/nddev_kimicode.py software-status --target /absolute/target --json",
-      "install": "python3 cli-tools/nddev_kimicode.py install-cli --target /absolute/target --json",
-      "update": "python3 cli-tools/nddev_kimicode.py update-cli --target /absolute/target --json"
-    },
-    "tool": "bun",
-    "argv": ["add", "--global", "--exact", "--trust", "@moonshot-ai/kimi-code@0.29.1"],
-    "trust_required": true,
-    "trust_reason": "Official @moonshot-ai/kimi-code@0.29.1 declares postinstall=node scripts/postinstall.mjs",
-    "persisted_stage_paths": ["install/global", "bin"],
-    "ephemeral_stage_paths": ["home", "xdg-config", "cache", "tmp"],
-    "version_probe": ["bin/kimi", "--version"],
-    "entrypoint_strategy": "manager-generated bin/kimi wrapper bound to persisted dist/main.mjs and absolute node >=22.19.0",
-    "node_minimum": "22.19.0",
-    "live_home_access": false,
-    "credential_inheritance": false
+    "sessions": "$KIMI_CODE_HOME/sessions/",
+    "logs": "$KIMI_CODE_HOME/logs/",
+    "updates": "$KIMI_CODE_HOME/updates/"
   },
   "permission_model": {
-    "config_key": "default_permission_mode",
-    "modes": ["manual", "yolo", "auto"],
     "safe": "manual with plan mode enabled",
-    "balanced": "yolo with explicit deny rules for dangerous Bash patterns",
-    "full_auto": "auto with isolated target and no inherited credentials"
+    "full_auto": "auto with plan mode disabled",
+    "yolo": "documented native mode reserved for a possible future supervised profile"
   },
   "native_surfaces": {
     "AGENTS": true,
@@ -71,16 +82,16 @@
     "agents": true,
     "hooks": true,
     "MCP": true,
-    "plugins": true,
-    "plugin_marketplace": null
+    "plugins": "source only unless Kimi native plugin management installs it",
+    "direct_plugin_install_state_write": false
   },
   "sources": [
     "https://www.kimi.com/code/",
-    "https://www.kimi.com/code/docs/en/kimi-code-cli/guides/getting-started.html",
+    "https://moonshotai.github.io/kimi-code/en/guides/getting-started",
     "https://www.kimi.com/code/docs/en/kimi-code-cli/reference/kimi-command.html",
     "https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/config-files.html",
     "https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/data-locations.html",
-    "https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/env-vars",
+    "https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/env-vars.html",
     "https://www.kimi.com/code/docs/en/kimi-code-cli/customization/skills.html",
     "https://www.kimi.com/code/docs/en/kimi-code-cli/customization/agents.html",
     "https://www.kimi.com/code/docs/en/kimi-code-cli/customization/mcp.html",
@@ -89,11 +100,13 @@
     "https://www.kimi.com/code/docs/en/kimi-code-cli/release-notes/changelog.html",
     "https://registry.npmjs.org/@moonshot-ai%2fkimi-code/latest",
     "https://api.github.com/repos/MoonshotAI/kimi-code/releases/latest",
-    "https://github.com/MoonshotAI/kimi-code/releases/tag/%40moonshot-ai/kimi-code%400.29.1"
+    "https://code.kimi.com/kimi-code/latest",
+    "https://code.kimi.com/kimi-code/binaries/0.29.2/manifest.json"
   ],
   "unsupported": {
-    "nddev_plugin_marketplace": null,
-    "direct_plugin_install_state_write": null,
+    "windows": true,
+    "musl_linux": true,
+    "direct_plugin_install_state_write": true,
     "bundled_builder_mcp_server": null
   }
 }

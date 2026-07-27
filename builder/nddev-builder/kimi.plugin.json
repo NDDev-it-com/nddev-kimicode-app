@@ -1,18 +1,16 @@
 {
   "name": "nddev-builder",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "NDDev setup artifact builder for Kimi Code CLI",
+  "interface": {
+    "displayName": "NDDev Builder",
+    "shortDescription": "Kimi-native setup artifact workflows for NDDev modules",
+    "developerName": "NDDev"
+  },
   "skills": "./skills/",
   "sessionStart": {
     "skill": "nddev-builder"
   },
-  "hooks": [
-    {
-      "event": "PreToolUse",
-      "matcher": "Bash",
-      "command": "node ./hooks/nddev-builder-pretooluse.mjs",
-      "timeout": 5
-    }
-  ],
+  "skillInstructions": "Use the target-owned KIMI_CODE_HOME state. Do not write plugins/installed.json directly.",
   "mcpServers": {}
 }

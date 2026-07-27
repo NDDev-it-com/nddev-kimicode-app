@@ -1,0 +1,10 @@
+{
+  "id": "full-auto",
+  "display_name": "Full Auto",
+  "description": "Kimi auto permission mode for fully unattended operation with maximum documented native approval resolution.",
+  "native_permission_mode": "auto",
+  "plan_mode": false,
+  "max_steps_per_turn": 80,
+  "max_running_tasks": 4,
+  "permission_rules": []
+}

@@ -1,6 +1,6 @@
 ---
 name: nddev-builder
-description: Build and review Kimi Code CLI setup artifacts inside an isolated NDDev target.
+description: Route Kimi Code setup artifact work to the focused NDDev builder skills for native config, profiles, permissions, agents, skills, plugins, hooks, MCP, installation, and release validation.
 type: prompt
 whenToUse: When creating, switching, validating, or reviewing Kimi Code CLI setup artifacts
 disableModelInvocation: false
@@ -8,15 +8,24 @@ disableModelInvocation: false
 
 # NDDev Builder
 
-Use this skill for Kimi Code CLI setup artifact work managed by
-`nddev-kimicode-app`.
+Use this entry skill as the router for `nddev-kimicode-app` setup artifact work.
+Load the focused skill for the surface you are changing before editing.
 
-Operate only through confirmed Kimi Code CLI surfaces: `$KIMI_CODE_HOME/AGENTS.md`,
-`$KIMI_CODE_HOME/skills/`, `$KIMI_CODE_HOME/agents/`, `$KIMI_CODE_HOME/mcp.json`,
-`[[hooks]]` in `config.toml`, and native plugin manifests. Treat direct plugin
-install-state writes and external marketplace publication as unavailable until the
-public contract records a confirmed manifest.
+- Configuration and profile rendering: use `kimicode-config-profile`.
+- Permission and sandbox posture: use `kimicode-permissions-sandbox`.
+- AGENTS.md, Agent Skills, and custom agents/subagents: use `kimicode-instructions-agents-skills`.
+- Plugin source and native marketplace boundaries: use `kimicode-plugins-marketplace`.
+- Hooks: use `kimicode-hooks`.
+- MCP: use `kimicode-mcp`.
+- Official binary installation, update, rollback, and legacy migration: use `kimicode-install-lifecycle`.
+- Creator/checker/release validation workflow: use `kimicode-create-check-release`.
 
-Keep credentials, OAuth state, sessions, logs, and live user configuration outside the
-managed target. Prefer explicit absolute paths, bounded reads, reversible writes, and
-target-bound backups.
+Reference files in this skill directory:
+
+- `references/native-surfaces.md` records the native Kimi paths and schema owners.
+- `references/public-validation.md` records public-only validation commands.
+
+Do not copy version pins, release checksums, or current module SHAs into prompts or
+docs. Those facts are owned by `references/kimi-code-baseline.json`,
+`build/manifest.json`, `build/version.json`, `config/nddev-contract.json`, and
+`cli-tools/nddev_kimicode.py`.

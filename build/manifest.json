@@ -1,34 +1,45 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "product_name": "nddev-kimicode-app",
-  "build_version": "0.1.0",
-  "kimi_code_cli_tested": "0.29.1",
+  "build_version": "0.2.0",
+  "kimi_code_cli_tested": "0.29.2",
   "kimi_code_cli_package": "@moonshot-ai/kimi-code",
   "kimi_code_cli_command": "kimi",
-  "software_install": {
-    "tool": "bun",
-    "argv": ["add", "--global", "--exact", "--trust", "@moonshot-ai/kimi-code@0.29.1"],
-    "target_owned_env": {
-      "BUN_INSTALL_GLOBAL_DIR": "<stage>/install/global",
-      "BUN_INSTALL_BIN": "<stage>/bin",
-      "BUN_INSTALL_CACHE_DIR": "<stage>/cache",
-      "HOME": "<stage>/home",
-      "XDG_CONFIG_HOME": "<stage>/xdg-config",
-      "TMPDIR": "<stage>/tmp"
+  "content_setup_ids": ["nddev-builder"],
+  "permission_profile_ids": ["safe", "full-auto"],
+  "default_content_setup": "nddev-builder",
+  "default_permission_profile": "full-auto",
+  "permission_policy": {
+    "safe": {
+      "native_permission_mode": "manual",
+      "plan_mode": true
     },
-    "trust_reason": "Official @moonshot-ai/kimi-code@0.29.1 declares postinstall=node scripts/postinstall.mjs"
+    "full-auto": {
+      "native_permission_mode": "auto",
+      "plan_mode": false
+    },
+    "yolo": {
+      "shipped": false,
+      "future_profile_only": true
+    }
+  },
+  "software_install": {
+    "channel": "official-binary",
+    "manifest_url": "https://code.kimi.com/kimi-code/binaries/0.29.2/manifest.json",
+    "manifest_sha256": "6057703f6430964741198c81617737bcec917082d1ce4aadd7a1b8c29787ae9b",
+    "target_owned": true,
+    "status_executes_binary": false
   },
   "software_runtime": {
     "entrypoint": "bin/kimi",
-    "entrypoint_kind": "node-wrapper",
-    "entrypoint_main": ".nddev-kimicode-software/current/install/global/node_modules/@moonshot-ai/kimi-code/dist/main.mjs",
-    "node_minimum": "22.19.0",
-    "node_recorded_in_stamp": true
+    "entrypoint_kind": "official-binary",
+    "installed_tree": ".nddev-kimicode-software/current",
+    "supported_platforms": ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"],
+    "unsupported_platforms": ["windows", "musl-linux"]
   },
-  "setup_ids": ["safe", "balanced", "full-auto"],
   "manager": "cli-tools/nddev_kimicode.py",
   "contract": "config/nddev-contract.json",
   "runtime_baseline": "references/kimi-code-baseline.json",
-  "nddev_builder_projection_version": "0.1.0",
+  "nddev_builder_projection_version": "0.2.0",
   "public_validator": "cli-tools/validate_public_contracts.py"
 }

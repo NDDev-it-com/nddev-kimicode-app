@@ -1,0 +1,41 @@
+{
+  "id": "safe",
+  "display_name": "Safe",
+  "description": "Manual Kimi permission mode with plan-first behavior and conservative documented permission rules.",
+  "native_permission_mode": "manual",
+  "plan_mode": true,
+  "max_steps_per_turn": 20,
+  "max_running_tasks": 1,
+  "permission_rules": [
+    {
+      "decision": "allow",
+      "pattern": "Read",
+      "reason": "Read-only inspection is allowed in safe mode."
+    },
+    {
+      "decision": "allow",
+      "pattern": "Grep",
+      "reason": "Read-only search is allowed in safe mode."
+    },
+    {
+      "decision": "allow",
+      "pattern": "Glob",
+      "reason": "Read-only file discovery is allowed in safe mode."
+    },
+    {
+      "decision": "deny",
+      "pattern": "Bash(rm -rf*)",
+      "reason": "Destructive shell patterns are not part of the safe profile."
+    },
+    {
+      "decision": "deny",
+      "pattern": "Bash(sudo*)",
+      "reason": "Privilege escalation is outside target-owned setup management."
+    },
+    {
+      "decision": "ask",
+      "pattern": "Bash",
+      "reason": "Shell execution remains supervised in safe mode."
+    }
+  ]
+}

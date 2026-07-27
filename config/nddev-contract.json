@@ -1,5 +1,5 @@
 {
-  "contract_version": 2,
+  "contract_version": 3,
   "product_name": "nddev-kimicode-app",
   "github_repository": "NDDev-it-com/nddev-kimicode-app",
   "license": "AGPL-3.0-or-later",
@@ -7,23 +7,31 @@
   "version_ref": "build/version.json",
   "managed_state": {
     "stamp_file": "NDDEV-KIMICODE-SETUP.json",
-    "stamp_schema": 1,
+    "stamp_schema": 2,
     "default_target": null,
     "environment_variable": "NDDEV_KIMICODE_TARGET",
     "managed_directory_mode": "0700",
     "managed_file_mode": "0600",
     "preserve_other_state": true,
-    "co_owned_config_strategy": "Marked block merge for config.toml, tui.toml, and AGENTS.md; JSON merge for mcp.json; exact managed files for nddev-builder skills, agents, hooks, and plugin projection"
+    "co_owned_config_strategy": "Marked block merge for config.toml, tui.toml, and AGENTS.md; exact managed files for nddev-builder skills, agents, hooks, and mcp.json",
+    "legacy_schema_policy": "schema-1 setup state is readable for status, migrate, restore, and remove; launch refuses it"
   },
   "setup_system": {
-    "catalog_root": "setups",
-    "setup_ids": ["safe", "balanced", "full-auto"],
-    "identity_source": "official Kimi Code CLI docs, npm package manifest, and MoonshotAI source/release metadata",
+    "content_catalog_root": "setups",
+    "content_setup_ids": ["nddev-builder"],
+    "permission_profile_root": "profiles",
+    "permission_profile_ids": ["safe", "full-auto"],
+    "default_content_setup": "nddev-builder",
+    "default_permission_profile": "full-auto",
+    "safe_native_permission_mode": "manual",
+    "full_auto_native_permission_mode": "auto",
+    "yolo_profile_shipped": false,
     "list_command": "python3 cli-tools/nddev_kimicode.py list --json",
     "status_command": "python3 cli-tools/nddev_kimicode.py status --target /absolute/target --json",
-    "plan_command": "python3 cli-tools/nddev_kimicode.py plan --setup safe --target /absolute/target --json",
-    "install_command": "python3 cli-tools/nddev_kimicode.py install --setup safe --target /absolute/target --json",
-    "switch_command": "python3 cli-tools/nddev_kimicode.py switch --setup balanced --target /absolute/target --json",
+    "plan_command": "python3 cli-tools/nddev_kimicode.py plan --setup nddev-builder --profile full-auto --target /absolute/target --json",
+    "install_command": "python3 cli-tools/nddev_kimicode.py install --setup nddev-builder --profile full-auto --target /absolute/target --json",
+    "switch_profile_command": "python3 cli-tools/nddev_kimicode.py switch-profile --profile safe --target /absolute/target --json",
+    "migrate_command": "python3 cli-tools/nddev_kimicode.py migrate --setup nddev-builder --profile full-auto --target /absolute/target --json",
     "restore_command": "python3 cli-tools/nddev_kimicode.py restore --backup 0 --target /absolute/target --json",
     "remove_command": "python3 cli-tools/nddev_kimicode.py remove --target /absolute/target --json",
     "launch_command": "python3 cli-tools/nddev_kimicode.py launch --target /absolute/target --"
@@ -39,56 +47,42 @@
     "rollback_on_failure": true,
     "max_backups": 10,
     "launch_requires_clean_managed_target": true,
-    "launch_strips_provider_credentials": true
+    "launch_filters_live_credentials": true,
+    "launch_blocks_managed_mode_overrides": true,
+    "full_auto_active_blocking_hooks": false
   },
   "runtime_compatibility": {
     "baseline_ref": "references/kimi-code-baseline.json",
     "command": "kimi",
     "npm_package": "@moonshot-ai/kimi-code",
-    "tested_release": "0.29.1",
-    "node_engine": ">=22.19.0",
-    "exact_package_hashes_available": true,
-    "package_bin": "dist/main.mjs",
-    "postinstall": "node scripts/postinstall.mjs",
-    "minimum_node_version": "22.19.0"
+    "tested_release": "0.29.2",
+    "official_install_channel": "official-binary",
+    "npm_alternative_recorded": true,
+    "windows_supported": false,
+    "macos_supported": true,
+    "ubuntu_linux_glibc_supported": true
   },
   "software_lifecycle": {
     "stamp_file": "NDDEV-KIMICODE-SOFTWARE.json",
-    "stamp_schema": 1,
+    "stamp_schema": 2,
+    "legacy_stamp_schema": 1,
     "status_command": "python3 cli-tools/nddev_kimicode.py software-status --target /absolute/target --json",
     "install_command": "python3 cli-tools/nddev_kimicode.py install-cli --target /absolute/target --json",
     "update_command": "python3 cli-tools/nddev_kimicode.py update-cli --target /absolute/target --json",
+    "migrate_command": "python3 cli-tools/nddev_kimicode.py migrate-cli --target /absolute/target --json",
     "presence_signal": "software-status JSON exposes present=true and presence entries for NDDEV-KIMICODE-SOFTWARE.json, .nddev-kimicode-software, .nddev-kimicode-software/current, or bin/kimi",
-    "install_precondition": "install-cli refuses any existing target-owned software presence unless it is already current",
-    "update_precondition": "update-cli repairs existing target-owned software presence and refuses absent software state",
-    "package_manager": "bun",
-    "install_argv": ["add", "--global", "--exact", "--trust", "@moonshot-ai/kimi-code@0.29.1"],
-    "trust_required": true,
-    "trust_reason": "Official @moonshot-ai/kimi-code@0.29.1 declares postinstall=node scripts/postinstall.mjs",
+    "install_precondition": "install-cli refuses existing target-owned software presence unless current",
+    "update_precondition": "update-cli repairs non-legacy official-binary target-owned software presence and refuses absent or legacy software state",
+    "migrate_precondition": "migrate-cli is the only transition from legacy Bun schema to official-binary schema",
+    "channel": "official-binary",
+    "manifest_url": "https://code.kimi.com/kimi-code/binaries/0.29.2/manifest.json",
+    "manifest_sha256": "6057703f6430964741198c81617737bcec917082d1ce4aadd7a1b8c29787ae9b",
     "target_owned": true,
     "software_root": ".nddev-kimicode-software/current",
     "entrypoint": "bin/kimi",
-    "entrypoint_kind": "node-wrapper",
-    "entrypoint_main": ".nddev-kimicode-software/current/install/global/node_modules/@moonshot-ai/kimi-code/dist/main.mjs",
-    "node_runtime": {
-      "resolution": "absolute node path resolved during install/update",
-      "minimum_version": "22.19.0",
-      "recorded_in_stamp": true
-    },
-    "persisted_stage_paths": ["install/global", "bin"],
-    "ephemeral_stage_paths": ["home", "xdg-config", "cache", "tmp"],
-    "stage_env": {
-      "BUN_INSTALL_GLOBAL_DIR": "<stage>/install/global",
-      "BUN_INSTALL_BIN": "<stage>/bin",
-      "BUN_INSTALL_CACHE_DIR": "<stage>/cache",
-      "HOME": "<stage>/home",
-      "XDG_CONFIG_HOME": "<stage>/xdg-config",
-      "TMPDIR": "<stage>/tmp"
-    },
+    "entrypoint_kind": "official-binary",
     "status_executes_binary": false,
     "staged_version_probe": ["bin/kimi", "--version"],
-    "safe_internal_symlinks_materialized": true,
-    "escaping_symlinks_rejected": true,
     "private_modes": {
       "directories": "0700",
       "owner_executable_files": "0700",
@@ -101,29 +95,28 @@
     "command": "kimi",
     "direct_command": ["/absolute/target/bin/kimi"],
     "manager_command": "python3 cli-tools/nddev_kimicode.py launch --target /absolute/target --",
-    "required_version": "0.29.1",
+    "required_version": "0.29.2",
     "environment_variable": "NDDEV_KIMICODE_TARGET",
     "forwards_arguments": true,
     "forwards_child_exit_code": true,
     "streams_child_stdio": true,
     "json_manager_errors_supported": true,
-    "target_environment_scope": "target-owned /absolute/target/bin/kimi with isolated HOME plus KIMI_CODE_HOME; credentials, sessions, logs, skills, agents, plugins, hooks, MCP, and runtime data stay under the explicit target"
+    "target_environment_scope": "target-owned /absolute/target/bin/kimi with isolated HOME, TMPDIR, and KIMI_CODE_HOME; credentials, sessions, logs, skills, agents, plugins, MCP, updates, and runtime data stay under the explicit target",
+    "pre_login_supported": true
   },
-  "plugin_marketplace": {
+  "builder_toolkit": {
     "plugin_id": "nddev-builder",
     "plugin_manifest": "builder/nddev-builder/kimi.plugin.json",
     "marketplace_manifest": null,
     "external_marketplace_published": null,
-    "default_on_in_all_setups": true,
-    "builder_enabled_in_base_config": true,
+    "runtime_plugin_install_state_written": false,
     "native_projection": {
       "AGENTS": "AGENTS.md under KIMI_CODE_HOME",
-      "skills": "skills/nddev-builder/SKILL.md plus extra_skill_dirs",
+      "skills": "all files under builder/nddev-builder/skills/ projected to KIMI_CODE_HOME/skills/",
       "agents": "agents/nddev-builder.md plus extra_agent_dirs",
-      "hooks": "hooks/nddev-builder-pretooluse.mjs via [[hooks]] in config.toml",
+      "hooks": "hook source projected; active blocking hook only in safe profile",
       "MCP": "mcp.json managed without bundled servers or secrets",
-      "plugins": "builder/nddev-builder/kimi.plugin.json copied into plugins/managed/nddev-builder for native plugin shape"
-    },
-    "unsupported_reason": "No NDDev Kimi Code plugin marketplace is published; plugin install-state schema is not written directly. Builder is default-on through AGENTS, skills, agents, hooks, and config-managed locations."
+      "plugins": "builder/nddev-builder/kimi.plugin.json remains source packaging only unless Kimi native plugin management installs it"
+    }
   }
 }
