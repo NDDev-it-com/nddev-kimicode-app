@@ -7,6 +7,8 @@ import argparse
 import base64
 import binascii
 import contextlib
+import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -38,6 +40,7 @@ DEFAULT_PROFILE = "full-auto"
 
 STAMP_NAME = "NDDEV-KIMICODE-SETUP.json"
 BACKUP_NAME = "NDDEV-KIMICODE-BACKUP.json"
+LOCK_NAME = ".nddev-kimicode.lock"
 CURRENT_SETUP_SCHEMA = 2
 LEGACY_SETUP_SCHEMA = 1
 MANAGED_BEGIN = "# BEGIN NDDEV-KIMICODE MANAGED"
@@ -181,6 +184,27 @@ class DirectoryTransaction:
         for path in reversed(self.created):
             with contextlib.suppress(OSError):
                 path.rmdir()
+
+
+@dataclass
+class VerifiedLaunchExecutable:
+    path: Path
+    fd: int
+    digest: str
+    st_dev: int
+    st_ino: int
+
+    def close(self) -> None:
+        os.close(self.fd)
+
+
+@dataclass
+class LaunchInvocation:
+    target: Path
+    command: list[str]
+    child_env: dict[str, str]
+    expected_entrypoint_digest: str
+    stamp_entrypoint_digest: str
 
 
 def fail(message: str) -> NoReturn:
@@ -355,7 +379,69 @@ def backup_pool(target: Path) -> Path:
 
 
 def lock_path(target: Path) -> Path:
-    return target.parent / f".{target.name}.nddev-kimicode.lock"
+    return target / LOCK_NAME
+
+
+def bootstrap_lock_path(target: Path) -> Path:
+    return target.parent / f".{target.name}.nddev-kimicode.bootstrap.lock"
+
+
+def open_lock_file(path: Path, label: str) -> int:
+    flags = os.O_RDWR | os.O_CREAT
+    if not hasattr(os, "O_NOFOLLOW"):
+        fail("lifecycle lock requires O_NOFOLLOW support")
+    flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags, OWNER_FILE_MODE)
+    except OSError as exc:
+        fail(f"{label} could not be opened safely: {exc}")
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            fail(f"{label} must be a regular file")
+        if not is_current_owner(info):
+            fail(f"{label} must be owned by the current user")
+        if info.st_nlink != 1:
+            fail(f"{label} must not be a hardlink")
+        os.fchmod(fd, OWNER_FILE_MODE)
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def acquire_lock_file(path: Path, label: str) -> int:
+    fd = open_lock_file(path, label)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        os.close(fd)
+        if exc.errno in {errno.EACCES, errno.EAGAIN}:
+            fail(f"target is locked: {path}")
+        fail(f"{label} could not be locked: {exc}")
+    try:
+        payload = canonical_json({"schema_version": 2, "pid": os.getpid(), "target": str(path.parent)})
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        os.write(fd, payload)
+        os.fsync(fd)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+        raise
+    return fd
+
+
+def release_lock_file(fd: int, path: Path) -> None:
+    try:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+    finally:
+        with contextlib.suppress(OSError):
+            if path_exists_no_follow(path) and not path.is_symlink():
+                path.unlink()
 
 
 @contextlib.contextmanager
@@ -369,38 +455,41 @@ def target_lock(target: Path, *, create_parent: bool = False):
     except BaseException:
         transaction.cleanup()
         raise
-    path = lock_path(target)
-    owner = path / "owner.json"
+    bootstrap_path = bootstrap_lock_path(target)
+    bootstrap_fd = acquire_lock_file(bootstrap_path, "bootstrap lifecycle lock")
+    internal_path: Path | None = None
+    internal_fd: int | None = None
     try:
-        path.mkdir(mode=OWNER_DIRECTORY_MODE)
-        path.chmod(OWNER_DIRECTORY_MODE)
-        owner.write_bytes(canonical_json({"schema_version": 1, "pid": os.getpid(), "target": str(target)}))
-        owner.chmod(OWNER_FILE_MODE)
-    except FileExistsError:
-        transaction.cleanup()
-        fail(f"target is locked: {path}")
-    except BaseException:
-        with contextlib.suppress(OSError):
-            if path_exists_no_follow(owner) and not owner.is_symlink():
-                owner.unlink()
-            path.rmdir()
-        transaction.cleanup()
-        raise
-    failed = False
-    try:
-        yield transaction
-    except BaseException:
-        failed = True
-        raise
-    finally:
+        target_info = stat_existing(target, "target")
+        if target_info is None and create_parent:
+            target.mkdir(mode=OWNER_DIRECTORY_MODE)
+            target.chmod(OWNER_DIRECTORY_MODE)
+            transaction.created.append(target)
+            target_info = stat_existing(target, "target")
+        if target_info is not None:
+            if not stat.S_ISDIR(target_info.st_mode):
+                fail("target must be a real directory")
+            if not is_owner_private_directory(target_info):
+                fail("target must be private and owned by the current user")
+            internal_path = lock_path(target)
+            internal_fd = acquire_lock_file(internal_path, "target lifecycle lock")
+        failed = False
         try:
-            if path_exists_no_follow(owner) and not owner.is_symlink():
-                owner.unlink()
-            path.rmdir()
-        except OSError as exc:
-            raise KimicodeSetupError(f"target lock cleanup failed: {path}") from exc
-        if failed:
-            transaction.cleanup()
+            yield transaction
+        except BaseException:
+            failed = True
+            raise
+        finally:
+            if internal_fd is not None and internal_path is not None:
+                release_lock_file(internal_fd, internal_path)
+            release_lock_file(bootstrap_fd, bootstrap_path)
+            if failed:
+                transaction.cleanup()
+    except BaseException:
+        if internal_fd is None:
+            release_lock_file(bootstrap_fd, bootstrap_path)
+        transaction.cleanup()
+        raise
 
 
 def safe_target_path(target: Path, relative: str) -> Path:
@@ -1890,7 +1979,64 @@ def ensure_launch_runtime_directories(canonical: Path) -> tuple[Path, Path, Path
     return runtime, home, tmp
 
 
-def revalidate_launch_executable(target: Path) -> Path:
+def require_owner_directory_mode(path: Path, label: str, mode: int) -> None:
+    info = stat_existing(path, label)
+    if info is None:
+        fail(f"{label} is missing")
+    if not stat.S_ISDIR(info.st_mode):
+        fail(f"{label} must be a directory")
+    if not is_current_owner(info):
+        fail(f"{label} must be owned by the current user")
+    if stat.S_IMODE(info.st_mode) != mode:
+        fail(f"{label} mode must be {mode:04o}")
+
+
+def require_protected_launch_directory(path: Path, label: str) -> None:
+    require_owner_directory_mode(path, label, 0o500)
+
+
+def chmod_restore(path: Path, mode: int) -> None:
+    with contextlib.suppress(FileNotFoundError):
+        path.chmod(mode)
+
+
+@contextlib.contextmanager
+def protected_launch_path(target: Path):
+    directories = (
+        target,
+        software_entrypoint(target).parent,
+        software_root(target),
+        software_current(target),
+        software_current_binary(target).parent,
+    )
+    original_modes: list[tuple[Path, int]] = []
+    for path in dict.fromkeys(directories):
+        info = stat_existing(path, f"launch protected directory {path}")
+        if info is None:
+            fail(f"launch protected directory is missing: {path}")
+        if not stat.S_ISDIR(info.st_mode):
+            fail(f"launch protected path must be a directory: {path}")
+        if not is_current_owner(info):
+            fail(f"launch protected directory must be owned by the current user: {path}")
+        mode = stat.S_IMODE(info.st_mode)
+        original_modes.append((path, mode))
+        if mode != 0o500:
+            path.chmod(0o500)
+    try:
+        for path, _mode in original_modes:
+            require_protected_launch_directory(path, f"launch protected directory {path}")
+        yield
+    finally:
+        for path, mode in reversed(original_modes):
+            chmod_restore(path, mode)
+
+
+def revalidate_launch_executable(
+    target: Path,
+    *,
+    expected_digest: str | None = None,
+    expected_stamp_digest: str | None = None,
+) -> VerifiedLaunchExecutable:
     executable = software_entrypoint(target)
     label = "target-owned Kimi Code entrypoint"
     info = validate_software_file(executable, label)
@@ -1898,15 +2044,8 @@ def revalidate_launch_executable(target: Path) -> Path:
         fail(f"{label} must be owned by the current user")
     if stat.S_IMODE(info.st_mode) != 0o700:
         fail(f"{label} mode must be 0700")
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd, opened = open_regular_readonly(executable, label, max_bytes=SOFTWARE_MAX_BYTES)
     try:
-        fd = os.open(executable, flags)
-    except FileNotFoundError:
-        fail("target-owned kimi executable is missing")
-    except OSError as exc:
-        fail(f"{label} could not be opened safely: {exc}")
-    try:
-        opened = os.fstat(fd)
         if opened.st_dev != info.st_dev or opened.st_ino != info.st_ino:
             fail(f"{label} changed while opening")
         if not stat.S_ISREG(opened.st_mode):
@@ -1921,26 +2060,36 @@ def revalidate_launch_executable(target: Path) -> Path:
         after = os.fstat(fd)
         if after.st_dev != opened.st_dev or after.st_ino != opened.st_ino or after.st_size != opened.st_size:
             fail(f"{label} changed while hashing")
-    finally:
+
+        if expected_digest is None or expected_stamp_digest is None:
+            stamp = read_software_stamp(target)
+            if stamp is None:
+                fail("launch requires current target-owned Kimi Code binary: software stamp is missing")
+            if software_is_legacy(stamp):
+                fail("launch refuses legacy Bun software state; run migrate-cli first")
+            platform_key = stamp.get("platform")
+            expected_binary = KIMI_BINARY_PLATFORMS.get(str(platform_key))
+            if expected_binary is None:
+                fail("launch requires current target-owned Kimi Code binary: platform")
+            expected_digest = expected_binary["checksum"]
+            expected_stamp_digest = stamp.get("entrypoint_sha256")
+        if digest != expected_digest:
+            fail("target-owned Kimi Code entrypoint digest does not match pinned binary")
+        if expected_stamp_digest != digest:
+            fail("target-owned Kimi Code entrypoint digest does not match software stamp")
+        return VerifiedLaunchExecutable(
+            path=executable,
+            fd=fd,
+            digest=digest,
+            st_dev=opened.st_dev,
+            st_ino=opened.st_ino,
+        )
+    except BaseException:
         os.close(fd)
-
-    stamp = read_software_stamp(target)
-    if stamp is None:
-        fail("launch requires current target-owned Kimi Code binary: software stamp is missing")
-    if software_is_legacy(stamp):
-        fail("launch refuses legacy Bun software state; run migrate-cli first")
-    platform_key = stamp.get("platform")
-    expected_binary = KIMI_BINARY_PLATFORMS.get(str(platform_key))
-    if expected_binary is None:
-        fail("launch requires current target-owned Kimi Code binary: platform")
-    if digest != expected_binary["checksum"]:
-        fail("target-owned Kimi Code entrypoint digest does not match pinned binary")
-    if stamp.get("entrypoint_sha256") != digest:
-        fail("target-owned Kimi Code entrypoint digest does not match software stamp")
-    return executable
+        raise
 
 
-def prepare_launch_invocation_locked(target: Path, child_args: list[str]) -> tuple[list[str], dict[str, str]]:
+def prepare_launch_invocation_locked(target: Path, child_args: list[str]) -> LaunchInvocation:
     status = status_payload(target)
     if not status["managed"]:
         fail("launch requires a managed target")
@@ -1955,8 +2104,17 @@ def prepare_launch_invocation_locked(target: Path, child_args: list[str]) -> tup
         drift = software.get("drift") or ["target-owned Kimi Code binary is not installed"]
         fail(f"launch requires current target-owned Kimi Code binary: {', '.join(drift)}")
     canonical = validate_target(target, create=False)
+    stamp = read_software_stamp(canonical)
+    if stamp is None:
+        fail("launch requires current target-owned Kimi Code binary: software stamp is missing")
+    platform_key = stamp.get("platform")
+    expected_binary = KIMI_BINARY_PLATFORMS.get(str(platform_key))
+    if expected_binary is None:
+        fail("launch requires current target-owned Kimi Code binary: platform")
+    stamp_digest = stamp.get("entrypoint_sha256")
+    if not isinstance(stamp_digest, str):
+        fail("launch requires current target-owned Kimi Code binary: entrypoint stamp digest")
     runtime, home, tmp = ensure_launch_runtime_directories(canonical)
-    executable = revalidate_launch_executable(canonical)
     require_owner_private_directory(runtime, "runtime root")
     require_owner_private_directory(home, "runtime home")
     require_owner_private_directory(tmp, "runtime tmp")
@@ -1968,24 +2126,40 @@ def prepare_launch_invocation_locked(target: Path, child_args: list[str]) -> tup
         "PATH": "/usr/bin:/bin",
         "TMPDIR": str(tmp),
     }
-    return [str(executable), *child_args], child_env
+    return LaunchInvocation(
+        target=canonical,
+        command=[str(software_entrypoint(canonical)), *child_args],
+        child_env=child_env,
+        expected_entrypoint_digest=expected_binary["checksum"],
+        stamp_entrypoint_digest=stamp_digest,
+    )
 
 
 def prepare_launch_invocation(target: Path, child_args: list[str]) -> tuple[list[str], dict[str, str]]:
     reject_managed_launch_overrides(child_args)
     with target_lock(target):
-        return prepare_launch_invocation_locked(target, child_args)
+        invocation = prepare_launch_invocation_locked(target, child_args)
+        return invocation.command, invocation.child_env
 
 
 def launch(target: Path, child_args: list[str]) -> int:
     reject_managed_launch_overrides(child_args)
     with target_lock(target):
-        command, child_env = prepare_launch_invocation_locked(target, child_args)
-        try:
-            completed = subprocess.run(command, env=child_env, check=False)
-        except FileNotFoundError:
-            fail("target-owned kimi executable is missing")
-        return int(completed.returncode)
+        invocation = prepare_launch_invocation_locked(target, child_args)
+        with protected_launch_path(invocation.target):
+            executable = revalidate_launch_executable(
+                invocation.target,
+                expected_digest=invocation.expected_entrypoint_digest,
+                expected_stamp_digest=invocation.stamp_entrypoint_digest,
+            )
+            try:
+                try:
+                    completed = subprocess.run(invocation.command, env=invocation.child_env, check=False)
+                except FileNotFoundError:
+                    fail("target-owned kimi executable is missing")
+                return int(completed.returncode)
+            finally:
+                executable.close()
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

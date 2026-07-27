@@ -48,10 +48,15 @@ behavior is owned by `cli-tools/nddev_kimicode.py`.
 `update-cli`, and `migrate-cli` are the only commands that acquire target-owned
 Kimi software.
 
-`launch` holds the target lifecycle lock until the child process exits. It
-revalidates `bin/kimi` immediately before spawning, including non-symlink
-regular-file status, current-user ownership, private executable mode, stable
-inode, and pinned official-binary digest.
+`launch` holds a target-local `fcntl.flock` lifecycle lock until the child
+process exits. Immediately before spawning, it temporarily makes the executable
+and software parent chain read/execute-only, reopens `bin/kimi` without
+following symlinks, checks regular-file status, current-user ownership, private
+executable mode, stable inode, and pinned official-binary digest, then launches
+the verified path while the protection and lock are still held. This is a
+portable write-protected verified-path handoff, not exact-inode fd execution.
+Deliberate same-UID `chmod` or tampering outside the manager is outside the
+enforceable isolation boundary.
 
 ## Builder Toolkit
 

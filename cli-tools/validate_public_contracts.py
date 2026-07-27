@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -459,6 +460,10 @@ def validate_metadata() -> None:
         raise ValueError("contract must state full-auto has no active blocking hooks")
     if contract["safety"].get("launch_holds_lifecycle_lock") is not True:
         raise ValueError("contract must state launch holds the lifecycle lock")
+    if contract["safety"].get("launch_uses_stable_fcntl_flock") is not True:
+        raise ValueError("contract must state launch uses a stable fcntl flock")
+    if contract["safety"].get("launch_protects_executable_parent_chain") is not True:
+        raise ValueError("contract must state launch protects executable parent chain")
     if contract["safety"].get("launch_revalidates_executable_before_handoff") is not True:
         raise ValueError("contract must state launch revalidates the executable before handoff")
     runtime_launch = contract["runtime_launch"]
@@ -466,11 +471,24 @@ def validate_metadata() -> None:
         raise ValueError("contract must keep pre-login launch supported")
     if "child process completion" not in runtime_launch.get("lifecycle_lock_scope", ""):
         raise ValueError("contract must document launch lock scope through child completion")
+    if "read/execute-only" not in runtime_launch.get("pre_handoff_executable_revalidation", ""):
+        raise ValueError("contract must document launch parent-chain protection")
     if "pinned official-binary digest" not in runtime_launch.get("pre_handoff_executable_revalidation", ""):
         raise ValueError("contract must document pinned digest revalidation before launch handoff")
+    if "write-protected verified-path handoff" not in runtime_launch.get("portable_handoff_mechanism", ""):
+        raise ValueError("contract must document portable verified-path handoff")
+    if "exact-inode fd execution is not the portable macOS contract" not in runtime_launch.get("portable_handoff_mechanism", ""):
+        raise ValueError("contract must not overclaim portable exact-inode execution")
+    if "fcntl.flock" not in runtime_launch.get("lifecycle_lock_mechanism", ""):
+        raise ValueError("contract must document the stable flock mechanism")
+    if "same-UID" not in runtime_launch.get("same_uid_tamper_boundary", ""):
+        raise ValueError("contract must document the same-UID tamper boundary")
     if manifest.get("runtime_launch") != {
         "holds_lifecycle_lock_through_child": True,
+        "stable_fcntl_flock_lifecycle_lock": True,
+        "write_protected_verified_path_handoff": True,
         "pre_handoff_executable_revalidation": True,
+        "exact_inode_exec": False,
         "runtime_dirs_private": True,
     }:
         raise ValueError("manifest must expose launch lock and executable revalidation facts")
@@ -492,9 +510,10 @@ def make_isolated_target(label: str) -> tuple[tempfile.TemporaryDirectory[str], 
     return temp, parent / "target"
 
 
-def write_stub_software(manager: Any, target: Path) -> None:
+def write_stub_software(manager: Any, target: Path, binary_bytes: bytes | None = None) -> None:
     platform_key = "linux-x64"
-    binary_bytes = b"#!/bin/sh\nprintf 'kimi-code 0.29.2\\n'\n"
+    if binary_bytes is None:
+        binary_bytes = b"#!/bin/sh\nprintf 'kimi-code 0.29.2\\n'\n"
     binary_sha = manager.sha256_bytes(binary_bytes)
     patched_platforms = dict(manager.KIMI_BINARY_PLATFORMS)
     patched_platforms[platform_key] = {
@@ -602,7 +621,10 @@ def validate_runtime_regressions() -> None:
         if forbidden in manager_text:
             raise ValueError("manager must not expose public test environment switches")
     for required in (
-        "with target_lock(target):\n        command, child_env = prepare_launch_invocation_locked",
+        "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)",
+        "path.chmod(0o500)",
+        "with protected_launch_path(invocation.target):",
+        "expected_digest=invocation.expected_entrypoint_digest",
         "is_current_owner(opened)",
         "opened.st_dev != info.st_dev or opened.st_ino != info.st_ino",
         "target-owned Kimi Code entrypoint digest does not match pinned binary",
@@ -613,6 +635,7 @@ def validate_runtime_regressions() -> None:
     validate_corrupt_backup_regression(manager)
     validate_launch_lock_concurrency_regression(manager)
     validate_launch_pre_handoff_swap_regression(manager)
+    validate_launch_protected_verified_path_regression(manager)
     validate_launch_executable_error_regression(manager)
     validate_launch_boundary_regression(manager)
 
@@ -630,16 +653,62 @@ def validate_launch_lock_concurrency_regression(manager: Any) -> None:
         try:
             write_stub_software(manager, target)
             lock = manager.lock_path(target)
-            observed_mutation_failure: str | None = None
 
             def fake_run(command: list[str], *, env: dict[str, str], check: bool) -> SimpleNamespace:
-                nonlocal observed_mutation_failure
-                if not lock.is_dir():
+                if not lock.is_file():
                     raise ValueError("launch lifecycle lock was not held during child execution")
                 if command[0] != str(target / "bin" / manager.KIMI_COMMAND):
                     raise ValueError("launch did not hand off to the target-owned executable")
                 if env.get("KIMI_CODE_HOME") != str(target.resolve()):
                     raise ValueError("launch child environment is not target-scoped")
+                if (target.stat().st_mode & 0o777) != 0o500:
+                    raise ValueError("launch did not protect the lifecycle lock parent")
+                try:
+                    lock.unlink()
+                except PermissionError:
+                    pass
+                else:
+                    raise ValueError("launch lifecycle lock was removable by the child")
+                replacement = target.parent / "replacement-kimi"
+                replacement.write_bytes(b"#!/bin/sh\nexit 99\n")
+                replacement.chmod(0o700)
+                try:
+                    os.replace(replacement, target / "bin" / manager.KIMI_COMMAND)
+                except PermissionError:
+                    pass
+                else:
+                    raise ValueError("launch protected path allowed ordinary os.replace")
+                finally:
+                    if replacement.exists():
+                        try:
+                            replacement.unlink()
+                        except OSError:
+                            pass
+                probe = original_run(
+                    [
+                        sys.executable,
+                        "-c",
+                        (
+                            "import errno, fcntl, os, sys\n"
+                            "fd = os.open(sys.argv[1], os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0))\n"
+                            "try:\n"
+                            "    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
+                            "except OSError as exc:\n"
+                            "    if exc.errno in {errno.EACCES, errno.EAGAIN}:\n"
+                            "        print('locked')\n"
+                            "        raise SystemExit(0)\n"
+                            "    raise\n"
+                            "raise SystemExit('flock unexpectedly acquired')\n"
+                        ),
+                        str(lock),
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                )
+                if probe.returncode != 0 or probe.stdout.strip() != "locked":
+                    raise ValueError(f"target lifecycle flock was not held by the launcher: {probe.stderr.strip()}")
                 try:
                     manager.write_setup(
                         target,
@@ -648,7 +717,8 @@ def validate_launch_lock_concurrency_regression(manager: Any) -> None:
                         require_existing=True,
                     )
                 except manager.KimicodeSetupError as exc:
-                    observed_mutation_failure = str(exc)
+                    if "target is locked" not in str(exc) and "target must be private" not in str(exc):
+                        raise ValueError(f"concurrent lifecycle mutation returned unstable error: {exc}") from exc
                 else:
                     raise ValueError("lifecycle mutation succeeded while launch child was running")
                 return SimpleNamespace(returncode=23)
@@ -657,8 +727,6 @@ def validate_launch_lock_concurrency_regression(manager: Any) -> None:
             exit_code = manager.launch(target, ["--version"])
             if exit_code != 23:
                 raise ValueError("launch did not forward child exit code under lifecycle lock")
-            if observed_mutation_failure is None or "target is locked" not in observed_mutation_failure:
-                raise ValueError("concurrent lifecycle mutation did not fail on target lock")
             if lock.exists():
                 raise ValueError("launch lifecycle lock was not cleaned up after child completion")
         finally:
@@ -677,29 +745,25 @@ def validate_launch_pre_handoff_swap_regression(manager: Any) -> None:
             manager.load_profile(manager.DEFAULT_PROFILE),
         )
         original_platforms = manager.KIMI_BINARY_PLATFORMS
-        original_status = manager.software_status_payload
+        original_prepare = manager.prepare_launch_invocation_locked
         original_run = manager.subprocess.run
         try:
             write_stub_software(manager, target)
             entrypoint = target / "bin" / manager.KIMI_COMMAND
-            current_results = 0
             swapped = False
 
-            def wrapped_status(status_target: Path) -> dict[str, Any]:
-                nonlocal current_results, swapped
-                result = original_status(status_target)
-                if Path(status_target).resolve() == target.resolve() and result.get("current"):
-                    current_results += 1
-                    if current_results == 2 and not swapped:
-                        entrypoint.write_bytes(b"#!/bin/sh\nprintf 'swapped\\n'\n")
-                        entrypoint.chmod(0o700)
-                        swapped = True
+            def wrapped_prepare(status_target: Path, child_args: list[str]) -> Any:
+                nonlocal swapped
+                result = original_prepare(status_target, child_args)
+                entrypoint.write_bytes(b"#!/bin/sh\nprintf 'swapped\\n'\n")
+                entrypoint.chmod(0o700)
+                swapped = True
                 return result
 
             def fake_run(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
                 raise ValueError("launch spawned a swapped target-owned executable")
 
-            manager.software_status_payload = wrapped_status
+            manager.prepare_launch_invocation_locked = wrapped_prepare
             manager.subprocess.run = fake_run
             try:
                 manager.launch(target, ["--version"])
@@ -712,7 +776,66 @@ def validate_launch_pre_handoff_swap_regression(manager: Any) -> None:
                 raise ValueError("pre-handoff executable swap regression was not exercised")
         finally:
             manager.subprocess.run = original_run
-            manager.software_status_payload = original_status
+            manager.prepare_launch_invocation_locked = original_prepare
+            manager.KIMI_BINARY_PLATFORMS = original_platforms
+    finally:
+        temp.cleanup()
+
+
+def validate_launch_protected_verified_path_regression(manager: Any) -> None:
+    temp, target = make_isolated_target("launch-protected-")
+    try:
+        manager.write_setup(
+            target,
+            manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP),
+            manager.load_profile(manager.DEFAULT_PROFILE),
+        )
+        original_platforms = manager.KIMI_BINARY_PLATFORMS
+        try:
+            stub = (
+                b"#!/bin/sh\n"
+                b"if rm -f \"$KIMI_CODE_HOME/bin/kimi\" 2>/dev/null; then\n"
+                b"  printf 'executable-unlink-allowed\\n' >> \"$2\"\n"
+                b"else\n"
+                b"  printf 'executable-unlink-denied\\n' >> \"$2\"\n"
+                b"fi\n"
+                b"if mv \"$KIMI_CODE_HOME/bin/kimi\" \"$KIMI_CODE_HOME/bin/kimi.swapped\" 2>/dev/null; then\n"
+                b"  printf 'executable-rename-allowed\\n' >> \"$2\"\n"
+                b"else\n"
+                b"  printf 'executable-rename-denied\\n' >> \"$2\"\n"
+                b"fi\n"
+                b"if rm -f \"$KIMI_CODE_HOME/.nddev-kimicode.lock\" 2>/dev/null; then\n"
+                b"  printf 'lock-unlink-allowed\\n' >> \"$2\"\n"
+                b"else\n"
+                b"  printf 'lock-unlink-denied\\n' >> \"$2\"\n"
+                b"fi\n"
+                b"printf 'verified-bytes\\n' > \"$1\"\n"
+                b"exit 31\n"
+            )
+            write_stub_software(manager, target, stub)
+            marker = target / ".nddev-kimicode-runtime" / "tmp" / "verified-marker"
+            report = target / ".nddev-kimicode-runtime" / "tmp" / "swap-report"
+            exit_code = manager.launch(target, [str(marker), str(report)])
+            if exit_code != 31:
+                raise ValueError("protected launch did not forward real child exit code")
+            if marker.read_text(encoding="utf-8") != "verified-bytes\n":
+                raise ValueError("protected launch did not execute the verified stub bytes")
+            report_lines = set(report.read_text(encoding="utf-8").splitlines())
+            expected_denials = {
+                "executable-unlink-denied",
+                "executable-rename-denied",
+                "lock-unlink-denied",
+            }
+            if not expected_denials <= report_lines:
+                raise ValueError(f"protected launch did not deny ordinary swaps: {sorted(report_lines)}")
+            entrypoint = target / "bin" / manager.KIMI_COMMAND
+            if not entrypoint.is_file() or manager.file_sha256(entrypoint, label="post-launch stub") != manager.sha256_bytes(stub):
+                raise ValueError("protected launch did not preserve the verified executable path")
+            if (target.stat().st_mode & 0o777) != 0o700:
+                raise ValueError("protected launch did not restore target mode")
+            if manager.lock_path(target).exists():
+                raise ValueError("protected launch did not clean up target lifecycle lock")
+        finally:
             manager.KIMI_BINARY_PLATFORMS = original_platforms
     finally:
         temp.cleanup()
@@ -720,11 +843,13 @@ def validate_launch_pre_handoff_swap_regression(manager: Any) -> None:
 
 def expect_revalidation_rejected(manager: Any, target: Path, expected: str) -> None:
     try:
-        manager.revalidate_launch_executable(target)
+        executable = manager.revalidate_launch_executable(target)
     except manager.KimicodeSetupError as exc:
         if expected not in str(exc):
             raise ValueError(f"launch executable revalidation returned unstable error: {exc}") from exc
         return
+    else:
+        executable.close()
     raise ValueError(f"launch executable revalidation unexpectedly allowed {expected}")
 
 
