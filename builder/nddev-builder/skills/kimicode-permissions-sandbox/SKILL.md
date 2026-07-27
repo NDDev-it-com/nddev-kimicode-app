@@ -18,6 +18,10 @@ NDDev profiles map to documented native Kimi permission modes:
 Launch must enforce the stamped profile and reject one-shot CLI overrides that
 change permissions, model selection, session binding, skills dirs, agent
 selection, prompt mode, workspace scope, or update/migration behavior.
+The official Kimi parser owner is recorded in `references/kimi-code-baseline.json`;
+audit that source before changing launch override constants or regressions.
+Do not copy the parser's full option or command list into this Skill, and do not
+deny flags that are not accepted by the audited upstream parser.
 
 Target isolation is separate from permission posture:
 

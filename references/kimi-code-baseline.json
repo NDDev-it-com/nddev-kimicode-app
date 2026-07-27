@@ -69,7 +69,12 @@
     "credentials": "$KIMI_CODE_HOME/credentials/",
     "sessions": "$KIMI_CODE_HOME/sessions/",
     "logs": "$KIMI_CODE_HOME/logs/",
-    "updates": "$KIMI_CODE_HOME/updates/"
+    "updates": "$KIMI_CODE_HOME/updates/",
+    "cli_parser": {
+      "source_path": "apps/kimi-code/src/cli/commands.ts",
+      "git_commit": "8a45f10eddbb35c317047e82e567cdb59a220b4f",
+      "source_url": "https://github.com/MoonshotAI/kimi-code/blob/8a45f10eddbb35c317047e82e567cdb59a220b4f/apps/kimi-code/src/cli/commands.ts"
+    }
   },
   "permission_model": {
     "safe": "manual with plan mode enabled",

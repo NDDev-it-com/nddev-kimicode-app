@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import binascii
 import contextlib
 import hashlib
 import json
@@ -136,6 +137,7 @@ FORBIDDEN_LAUNCH_FLAGS = {
     "--session",
     "--yolo",
     "--yes",
+    "-C",
     "-S",
     "-c",
     "-p",
@@ -152,7 +154,19 @@ FORBIDDEN_LAUNCH_VALUE_FLAGS = {
     "--skills-dir",
     "-m",
 }
-FORBIDDEN_LAUNCH_SUBCOMMANDS = {"migrate", "upgrade"}
+FORBIDDEN_LAUNCH_SUBCOMMANDS = {
+    "__plugin_run_node",
+    "acp",
+    "doctor",
+    "export",
+    "login",
+    "migrate",
+    "provider",
+    "update",
+    "upgrade",
+    "vis",
+    "web",
+}
 
 
 class KimicodeSetupError(Exception):
@@ -923,10 +937,11 @@ def status_payload(target: Path) -> dict[str, Any]:
     descriptor = stamp_descriptor(stamp)
     drift = drift_for_stamp(target, stamp)
     current = stamp_is_current(stamp)
+    software = software_status_payload(canonical)
     return {
         "state": "managed" if current else "legacy-managed",
         "managed": True,
-        "launch_allowed": current and not drift,
+        "launch_allowed": bool(current and not drift and software["current"]),
         "canonical_target": str(canonical),
         "content_setup_id": descriptor["content_setup_id"],
         "permission_profile_id": descriptor["permission_profile_id"],
@@ -935,6 +950,8 @@ def status_payload(target: Path) -> dict[str, Any]:
         "build_version": stamp.get("build_version"),
         "drift": drift,
         "managed_files": sorted(stamp["managed_files"]),
+        "software_current": software["current"],
+        "software_drift": software["drift"],
         "auth_state": auth_state(target),
     }
 
@@ -1131,7 +1148,11 @@ def restore_backup(target: Path, slot: int) -> dict[str, Any]:
                     continue
                 if not isinstance(encoded, str):
                     fail("backup file payload is invalid")
-                atomic_write(path, base64.b64decode(encoded.encode("ascii")), target)
+                try:
+                    decoded = base64.b64decode(encoded.encode("ascii"), validate=True)
+                except (binascii.Error, ValueError):
+                    fail("backup file payload is invalid base64")
+                atomic_write(path, decoded, target)
             prune_empty_managed_dirs(target, tuple(files))
         except BaseException:
             restore_snapshot(target, snapshot)

@@ -32,3 +32,10 @@ Do not write these directly:
 
 Use Kimi's native UI or slash commands for runtime-owned plugin and auth state.
 The NDDev manager only writes the documented configuration and content projection.
+
+## CLI Parser Owner
+
+The official Kimi CLI parser owner is recorded in
+`references/kimi-code-baseline.json`. Use that source path before changing
+managed launch-boundary constants or regressions. This reference intentionally
+does not copy the parser's full option or command list.

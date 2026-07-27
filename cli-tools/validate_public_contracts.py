@@ -4,11 +4,15 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
+
+sys.dont_write_bytecode = True
 
 ROOT = Path(__file__).resolve().parents[1]
 SHARED_CI_COMMIT = "2ccb80e96f5771b6a6b4eae63a4f47e232906dc7"
@@ -67,6 +71,21 @@ def load_json(path: Path) -> dict[str, Any]:
     return value
 
 
+def load_manager() -> Any:
+    path = ROOT / "cli-tools" / "nddev_kimicode.py"
+    module_name = "_nddev_kimicode_public_validator"
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise ValueError("could not load nddev_kimicode.py for isolated regressions")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:  # pragma: no cover - surfaced as validator failure.
+        raise ValueError(f"could not import nddev_kimicode.py: {exc}") from exc
+    return module
+
+
 def validate_workflows() -> None:
     workflow_root = ROOT / ".github" / "workflows"
     for filename, workflow in REQUIRED_WORKFLOWS.items():
@@ -120,6 +139,15 @@ def validate_baseline(baseline: dict[str, Any]) -> None:
         raise ValueError("baseline must record full-auto native auto mapping")
     if baseline["native_surfaces"].get("direct_plugin_install_state_write") is not False:
         raise ValueError("baseline must forbid direct plugin install-state writes")
+    parser = baseline["runtime"].get("cli_parser")
+    if (
+        not isinstance(parser, dict)
+        or parser.get("source_path") != "apps/kimi-code/src/cli/commands.ts"
+        or parser.get("git_commit") != "8a45f10eddbb35c317047e82e567cdb59a220b4f"
+        or parser.get("source_url")
+        != "https://github.com/MoonshotAI/kimi-code/blob/8a45f10eddbb35c317047e82e567cdb59a220b4f/apps/kimi-code/src/cli/commands.ts"
+    ):
+        raise ValueError("baseline must point to the official Kimi CLI parser owner")
     unsupported = baseline.get("unsupported", {})
     if unsupported.get("windows") is not True:
         raise ValueError("baseline must mark Windows unsupported")
@@ -235,11 +263,162 @@ def validate_metadata() -> None:
     validate_baseline(baseline)
 
 
+def make_isolated_target(label: str) -> tuple[tempfile.TemporaryDirectory[str], Path]:
+    temp = tempfile.TemporaryDirectory(prefix=f".tmp-kimicode-{label}-", dir=str(ROOT))
+    parent = Path(temp.name) / "parent"
+    parent.mkdir(mode=0o700)
+    parent.chmod(0o700)
+    return temp, parent / "target"
+
+
+def write_stub_software(manager: Any, target: Path) -> None:
+    platform_key = "linux-x64"
+    binary_bytes = b"#!/bin/sh\nprintf 'kimi-code 0.29.2\\n'\n"
+    binary_sha = manager.sha256_bytes(binary_bytes)
+    patched_platforms = dict(manager.KIMI_BINARY_PLATFORMS)
+    patched_platforms[platform_key] = {
+        "filename": "kimi-code-public-validator-stub",
+        "checksum": binary_sha,
+    }
+    manager.KIMI_BINARY_PLATFORMS = patched_platforms
+
+    software_bin = manager.software_current(target) / "bin"
+    software_bin.mkdir(mode=0o700, parents=True)
+    manager.software_root(target).chmod(0o700)
+    manager.software_current(target).chmod(0o700)
+    software_bin.chmod(0o700)
+    current_binary = software_bin / manager.KIMI_COMMAND
+    current_binary.write_bytes(binary_bytes)
+    current_binary.chmod(0o700)
+
+    entrypoint_bin = target / "bin"
+    entrypoint_bin.mkdir(mode=0o700)
+    entrypoint_bin.chmod(0o700)
+    entrypoint = entrypoint_bin / manager.KIMI_COMMAND
+    entrypoint.write_bytes(binary_bytes)
+    entrypoint.chmod(0o700)
+
+    binary = patched_platforms[platform_key]
+    stamp = manager.software_stamp(
+        target,
+        platform_key=platform_key,
+        binary={
+            "filename": binary["filename"],
+            "url": f"{manager.KIMI_BINARY_BASE}/{manager.KIMI_PACKAGE_VERSION}/{binary['filename']}",
+            "sha256": binary["checksum"],
+        },
+        entrypoint_digest=manager.file_sha256(entrypoint, label="stub Kimi Code entrypoint"),
+        installed_tree_digest=manager.tree_sha256(manager.software_current(target)),
+        version_probe_digest=manager.sha256_bytes(b"public-validator-stub-version-probe"),
+    )
+    manager.atomic_write(manager.software_stamp_path(target), manager.canonical_json(stamp), target)
+
+
+def validate_status_launch_allowed_regression(manager: Any) -> None:
+    temp, target = make_isolated_target("status-")
+    try:
+        manager.write_setup(
+            target,
+            manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP),
+            manager.load_profile(manager.DEFAULT_PROFILE),
+        )
+        fresh_status = manager.status_payload(target)
+        if fresh_status.get("launch_allowed") is not False:
+            raise ValueError("fresh managed setup without software must not be launch_allowed")
+        if fresh_status.get("software_current") is not False:
+            raise ValueError("fresh managed setup must report software_current false")
+
+        original_platforms = manager.KIMI_BINARY_PLATFORMS
+        try:
+            write_stub_software(manager, target)
+            software = manager.software_status_payload(target)
+            if software.get("current") is not True:
+                raise ValueError(f"stub software must be current: {software.get('drift')}")
+            ready_status = manager.status_payload(target)
+            if ready_status.get("launch_allowed") is not True:
+                raise ValueError("current clean setup with current target-owned software must be launch_allowed")
+        finally:
+            manager.KIMI_BINARY_PLATFORMS = original_platforms
+    finally:
+        temp.cleanup()
+
+
+def validate_corrupt_backup_regression(manager: Any) -> None:
+    temp, target = make_isolated_target("backup-")
+    try:
+        setup = manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP)
+        manager.write_setup(target, setup, manager.load_profile(manager.DEFAULT_PROFILE))
+        manager.write_setup(target, setup, manager.load_profile("safe"), require_existing=True)
+        before = manager.status_payload(target)
+        backup_path = manager.backup_pool(target) / "0" / manager.BACKUP_NAME
+        envelope = manager.read_json_file(backup_path, max_bytes=manager.METADATA_MAX_BYTES, label=manager.BACKUP_NAME)
+        files = envelope.get("files")
+        if not isinstance(files, dict):
+            raise ValueError("backup regression could not find backup files")
+        corrupt_relative = "skills/nddev-builder/SKILL.md"
+        if corrupt_relative not in files:
+            raise ValueError("backup regression could not find routed skill payload")
+        files[corrupt_relative] = "!!!!"
+        manager.atomic_write(backup_path, manager.canonical_json(envelope), backup_path.parent)
+        try:
+            manager.restore_backup(target, 0)
+        except manager.KimicodeSetupError as exc:
+            if str(exc) != "backup file payload is invalid base64":
+                raise ValueError(f"corrupt backup returned unstable error: {exc}") from exc
+        else:
+            raise ValueError("corrupt backup restore unexpectedly succeeded")
+        after = manager.status_payload(target)
+        if after.get("permission_profile_id") != before.get("permission_profile_id") or after.get("drift"):
+            raise ValueError("corrupt backup restore did not roll back cleanly")
+    finally:
+        temp.cleanup()
+
+
+def validate_runtime_regressions() -> None:
+    manager = load_manager()
+    validate_status_launch_allowed_regression(manager)
+    validate_corrupt_backup_regression(manager)
+    validate_launch_boundary_regression(manager)
+
+
+def expect_launch_rejected(manager: Any, argv: list[str], expected: str) -> None:
+    try:
+        manager.reject_managed_launch_overrides(argv)
+    except manager.KimicodeSetupError as exc:
+        if str(exc) != expected:
+            raise ValueError(f"launch boundary error changed for {argv}: {exc}") from exc
+        return
+    raise ValueError(f"launch boundary allowed managed parser case: {argv}")
+
+
+def validate_launch_boundary_regression(manager: Any) -> None:
+    for flag in ("--config", "--profile", "--settings"):
+        if flag in manager.FORBIDDEN_LAUNCH_FLAGS or flag in manager.FORBIDDEN_LAUNCH_VALUE_FLAGS:
+            raise ValueError(f"launch boundary must not invent unsupported upstream flag: {flag}")
+        manager.reject_managed_launch_overrides([flag])
+    expect_launch_rejected(manager, ["-C"], "launch flag is managed by nddev-kimicode-app: -C")
+    for command in (
+        "__plugin_run_node",
+        "acp",
+        "doctor",
+        "export",
+        "login",
+        "migrate",
+        "provider",
+        "update",
+        "upgrade",
+        "vis",
+        "web",
+    ):
+        expect_launch_rejected(manager, [command], f"launch argument is managed by nddev-kimicode-app: {command}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parse_args(argv)
     validate_catalog()
     validate_metadata()
     validate_builder_toolkit()
+    validate_runtime_regressions()
     validate_workflows()
     print("validate_public_contracts.py: PASS")
     return 0
