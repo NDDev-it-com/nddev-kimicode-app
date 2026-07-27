@@ -41,6 +41,7 @@
     "holds_lifecycle_lock_through_child": true,
     "stable_fcntl_flock_lifecycle_lock": true,
     "write_protected_verified_path_handoff": true,
+    "mutable_runtime_state_writable_during_launch": true,
     "pre_handoff_executable_revalidation": true,
     "exact_inode_exec": false,
     "runtime_dirs_private": true

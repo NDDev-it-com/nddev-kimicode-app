@@ -40,7 +40,8 @@ DEFAULT_PROFILE = "full-auto"
 
 STAMP_NAME = "NDDEV-KIMICODE-SETUP.json"
 BACKUP_NAME = "NDDEV-KIMICODE-BACKUP.json"
-LOCK_NAME = ".nddev-kimicode.lock"
+LOCK_DIR_NAME = ".nddev-kimicode-lock"
+LOCK_NAME = "lifecycle.lock"
 CURRENT_SETUP_SCHEMA = 2
 LEGACY_SETUP_SCHEMA = 1
 MANAGED_BEGIN = "# BEGIN NDDEV-KIMICODE MANAGED"
@@ -378,21 +379,47 @@ def backup_pool(target: Path) -> Path:
     return target.parent / f".{target.name}.nddev-kimicode-backups"
 
 
+def lock_parent_path(target: Path) -> Path:
+    return target / LOCK_DIR_NAME
+
+
 def lock_path(target: Path) -> Path:
-    return target / LOCK_NAME
+    return lock_parent_path(target) / LOCK_NAME
 
 
 def bootstrap_lock_path(target: Path) -> Path:
     return target.parent / f".{target.name}.nddev-kimicode.bootstrap.lock"
 
 
+def ensure_lock_parent(target: Path) -> Path:
+    path = lock_parent_path(target)
+    info = stat_existing(path, "target lifecycle lock directory")
+    if info is None:
+        path.mkdir(mode=OWNER_DIRECTORY_MODE)
+        path.chmod(OWNER_DIRECTORY_MODE)
+        return path
+    if not stat.S_ISDIR(info.st_mode):
+        fail("target lifecycle lock directory must be a directory")
+    if not is_current_owner(info):
+        fail("target lifecycle lock directory must be owned by the current user")
+    mode = stat.S_IMODE(info.st_mode)
+    if mode not in {OWNER_DIRECTORY_MODE, 0o500}:
+        fail("target lifecycle lock directory mode must be 0700 or protected 0500")
+    return path
+
+
 def open_lock_file(path: Path, label: str) -> int:
-    flags = os.O_RDWR | os.O_CREAT
+    flags = os.O_RDWR
     if not hasattr(os, "O_NOFOLLOW"):
         fail("lifecycle lock requires O_NOFOLLOW support")
     flags |= os.O_NOFOLLOW
     try:
         fd = os.open(path, flags, OWNER_FILE_MODE)
+    except FileNotFoundError:
+        try:
+            fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
+        except OSError as exc:
+            fail(f"{label} could not be opened safely: {exc}")
     except OSError as exc:
         fail(f"{label} could not be opened safely: {exc}")
     try:
@@ -433,7 +460,7 @@ def acquire_lock_file(path: Path, label: str) -> int:
     return fd
 
 
-def release_lock_file(fd: int, path: Path) -> None:
+def release_lock_file(fd: int, path: Path, *, remove_empty_parent: bool = False) -> None:
     try:
         with contextlib.suppress(OSError):
             fcntl.flock(fd, fcntl.LOCK_UN)
@@ -442,6 +469,9 @@ def release_lock_file(fd: int, path: Path) -> None:
         with contextlib.suppress(OSError):
             if path_exists_no_follow(path) and not path.is_symlink():
                 path.unlink()
+        if remove_empty_parent:
+            with contextlib.suppress(OSError):
+                path.parent.rmdir()
 
 
 @contextlib.contextmanager
@@ -471,8 +501,11 @@ def target_lock(target: Path, *, create_parent: bool = False):
                 fail("target must be a real directory")
             if not is_owner_private_directory(target_info):
                 fail("target must be private and owned by the current user")
+            lock_parent = ensure_lock_parent(target)
             internal_path = lock_path(target)
             internal_fd = acquire_lock_file(internal_path, "target lifecycle lock")
+            if stat.S_IMODE(lock_parent.lstat().st_mode) == 0o500:
+                lock_parent.chmod(OWNER_DIRECTORY_MODE)
         failed = False
         try:
             yield transaction
@@ -481,7 +514,7 @@ def target_lock(target: Path, *, create_parent: bool = False):
             raise
         finally:
             if internal_fd is not None and internal_path is not None:
-                release_lock_file(internal_fd, internal_path)
+                release_lock_file(internal_fd, internal_path, remove_empty_parent=True)
             release_lock_file(bootstrap_fd, bootstrap_path)
             if failed:
                 transaction.cleanup()
@@ -2003,7 +2036,7 @@ def chmod_restore(path: Path, mode: int) -> None:
 @contextlib.contextmanager
 def protected_launch_path(target: Path):
     directories = (
-        target,
+        lock_path(target).parent,
         software_entrypoint(target).parent,
         software_root(target),
         software_current(target),

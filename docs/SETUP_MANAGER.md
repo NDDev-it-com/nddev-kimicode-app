@@ -58,21 +58,25 @@ It executes `/absolute/target/bin/kimi` with target-local `HOME`, `TMPDIR`, and
 constructs a fresh child environment without live provider credentials or
 `KIMI_MODEL_*` variables.
 
-The target lifecycle lock is a target-local regular file held with
-`fcntl.flock` on an open fd from launch preflight through child process
-completion and lock cleanup, so install, update, migrate, restore, remove, or
-profile-switch mutations fail while the child is running. Immediately before the
-subprocess handoff, the manager makes the executable and software parent chain
-read/execute-only, reopens the target-owned executable without following
-symlinks, and checks regular file type, current-user ownership, mode, stable
-inode, and the pinned official-binary digest. Runtime `HOME` and `TMPDIR`
-directories are rechecked as real private directories before handoff.
+The target lifecycle lock is a target-local regular file under a dedicated lock
+directory, held with `fcntl.flock` on an open fd from launch preflight through
+child process completion and lock cleanup, so install, update, migrate, restore,
+remove, or profile-switch mutations fail while the child is running.
+Immediately before the subprocess handoff, the manager makes only the dedicated
+lock directory, launcher `bin/` directory, and immutable software artifact
+directories read/execute-only, reopens the target-owned executable without
+following symlinks, and checks regular file type, current-user ownership, mode,
+stable inode, and the pinned official-binary digest. Runtime `HOME` and
+`TMPDIR` directories are rechecked as real private directories before handoff.
+The managed target root, runtime `HOME`, runtime `TMPDIR`, KIMI_CODE_HOME,
+config, session, plugin, MCP, and log locations remain writable by the launched
+CLI.
 
 The portable launch contract is a write-protected verified-path handoff. It does
 not claim exact-inode fd execution on macOS, and it is not an OS sandbox against
-deliberate same-UID `chmod` or tampering outside the manager. Ordinary unlink,
-rename, and `os.replace` swaps are denied while the protected launch path is
-held.
+deliberate same-UID `chmod` or tampering outside the manager. Ordinary lock-file
+unlink and executable `os.replace` swaps are denied while the protected launch
+path is held.
 
 Child arguments that override managed permission mode, plan mode, prompt mode,
 model selection, Skill directories, agents, sessions, extra workspace scope, or

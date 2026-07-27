@@ -51,7 +51,8 @@
     "launch_blocks_managed_mode_overrides": true,
     "launch_holds_lifecycle_lock": true,
     "launch_uses_stable_fcntl_flock": true,
-    "launch_protects_executable_parent_chain": true,
+    "launch_preserves_mutable_runtime_state_paths": true,
+    "launch_protects_dedicated_lock_and_artifact_directories": true,
     "launch_revalidates_executable_before_handoff": true,
     "full_auto_active_blocking_hooks": false
   },
@@ -108,10 +109,11 @@
     "target_environment_scope": "target-owned /absolute/target/bin/kimi with isolated HOME, TMPDIR, and KIMI_CODE_HOME; credentials, sessions, logs, skills, agents, plugins, MCP, updates, and runtime data stay under the explicit target",
     "pre_login_supported": true,
     "lifecycle_lock_scope": "Held from launch preflight through child process completion and cleanup",
-    "pre_handoff_executable_revalidation": "Immediately before subprocess handoff, the executable and software parent chain is made read/execute-only, /absolute/target/bin/kimi is reopened without following symlinks, and the path is checked for regular file type, current-user ownership, mode 0700, stable inode, and pinned official-binary digest",
+    "mutable_runtime_paths": "The managed target root, runtime HOME, runtime TMPDIR, KIMI_CODE_HOME, config, session, plugin, MCP, and log locations remain writable by the launched CLI",
+    "pre_handoff_executable_revalidation": "Immediately before subprocess handoff, only the dedicated lock directory, launcher bin directory, and immutable software artifact directories are made read/execute-only; /absolute/target/bin/kimi is reopened without following symlinks and checked for regular file type, current-user ownership, mode 0700, stable inode, and pinned official-binary digest",
     "portable_handoff_mechanism": "write-protected verified-path handoff with an O_NOFOLLOW identity/digest evidence fd held until the child is spawned; exact-inode fd execution is not the portable macOS contract",
-    "lifecycle_lock_mechanism": "target-local regular lock file held with fcntl.flock on an open fd from lifecycle preflight through child process completion; the lock parent is write-protected during child execution",
-    "same_uid_tamper_boundary": "No OS sandbox is claimed against deliberate same-UID chmod or tampering outside the manager; ordinary unlink, rename, or os.replace swaps are denied while the protected launch path is held"
+    "lifecycle_lock_mechanism": "target-local regular lock file under a dedicated lock directory held with fcntl.flock on an open fd from lifecycle preflight through child process completion; the dedicated lock directory is write-protected during child execution",
+    "same_uid_tamper_boundary": "No OS sandbox is claimed against deliberate same-UID chmod or tampering outside the manager; ordinary lock-file unlink and executable os.replace swaps are denied while the protected launch path is held"
   },
   "builder_toolkit": {
     "plugin_id": "nddev-builder",

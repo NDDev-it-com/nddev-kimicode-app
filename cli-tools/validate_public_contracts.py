@@ -462,8 +462,10 @@ def validate_metadata() -> None:
         raise ValueError("contract must state launch holds the lifecycle lock")
     if contract["safety"].get("launch_uses_stable_fcntl_flock") is not True:
         raise ValueError("contract must state launch uses a stable fcntl flock")
-    if contract["safety"].get("launch_protects_executable_parent_chain") is not True:
-        raise ValueError("contract must state launch protects executable parent chain")
+    if contract["safety"].get("launch_preserves_mutable_runtime_state_paths") is not True:
+        raise ValueError("contract must state launch preserves mutable runtime state paths")
+    if contract["safety"].get("launch_protects_dedicated_lock_and_artifact_directories") is not True:
+        raise ValueError("contract must state launch protects only dedicated lock and artifact directories")
     if contract["safety"].get("launch_revalidates_executable_before_handoff") is not True:
         raise ValueError("contract must state launch revalidates the executable before handoff")
     runtime_launch = contract["runtime_launch"]
@@ -471,8 +473,10 @@ def validate_metadata() -> None:
         raise ValueError("contract must keep pre-login launch supported")
     if "child process completion" not in runtime_launch.get("lifecycle_lock_scope", ""):
         raise ValueError("contract must document launch lock scope through child completion")
-    if "read/execute-only" not in runtime_launch.get("pre_handoff_executable_revalidation", ""):
-        raise ValueError("contract must document launch parent-chain protection")
+    if "managed target root" not in runtime_launch.get("mutable_runtime_paths", ""):
+        raise ValueError("contract must document writable runtime state paths")
+    if "only the dedicated lock directory" not in runtime_launch.get("pre_handoff_executable_revalidation", ""):
+        raise ValueError("contract must document narrow launch path protection")
     if "pinned official-binary digest" not in runtime_launch.get("pre_handoff_executable_revalidation", ""):
         raise ValueError("contract must document pinned digest revalidation before launch handoff")
     if "write-protected verified-path handoff" not in runtime_launch.get("portable_handoff_mechanism", ""):
@@ -481,12 +485,15 @@ def validate_metadata() -> None:
         raise ValueError("contract must not overclaim portable exact-inode execution")
     if "fcntl.flock" not in runtime_launch.get("lifecycle_lock_mechanism", ""):
         raise ValueError("contract must document the stable flock mechanism")
+    if "dedicated lock directory" not in runtime_launch.get("lifecycle_lock_mechanism", ""):
+        raise ValueError("contract must document the dedicated lock directory")
     if "same-UID" not in runtime_launch.get("same_uid_tamper_boundary", ""):
         raise ValueError("contract must document the same-UID tamper boundary")
     if manifest.get("runtime_launch") != {
         "holds_lifecycle_lock_through_child": True,
         "stable_fcntl_flock_lifecycle_lock": True,
         "write_protected_verified_path_handoff": True,
+        "mutable_runtime_state_writable_during_launch": True,
         "pre_handoff_executable_revalidation": True,
         "exact_inode_exec": False,
         "runtime_dirs_private": True,
@@ -623,6 +630,7 @@ def validate_runtime_regressions() -> None:
     for required in (
         "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)",
         "path.chmod(0o500)",
+        "lock_path(target).parent",
         "with protected_launch_path(invocation.target):",
         "expected_digest=invocation.expected_entrypoint_digest",
         "is_current_owner(opened)",
@@ -631,6 +639,11 @@ def validate_runtime_regressions() -> None:
     ):
         if required not in manager_text:
             raise ValueError(f"manager is missing launch hardening fragment: {required}")
+    protected_start = manager_text.index("def protected_launch_path")
+    protected_end = manager_text.index("def revalidate_launch_executable")
+    protected_source = manager_text[protected_start:protected_end]
+    if "        target,\n" in protected_source:
+        raise ValueError("launch protection must not chmod the managed target root")
     validate_status_launch_allowed_regression(manager)
     validate_corrupt_backup_regression(manager)
     validate_launch_lock_concurrency_regression(manager)
@@ -661,8 +674,14 @@ def validate_launch_lock_concurrency_regression(manager: Any) -> None:
                     raise ValueError("launch did not hand off to the target-owned executable")
                 if env.get("KIMI_CODE_HOME") != str(target.resolve()):
                     raise ValueError("launch child environment is not target-scoped")
-                if (target.stat().st_mode & 0o777) != 0o500:
-                    raise ValueError("launch did not protect the lifecycle lock parent")
+                if (target.stat().st_mode & 0o777) != 0o700:
+                    raise ValueError("launch must not protect the managed target root")
+                if (lock.parent.stat().st_mode & 0o777) != 0o500:
+                    raise ValueError("launch did not protect the dedicated lifecycle lock parent")
+                writable_probe = target / "launch-runtime-state"
+                writable_probe.write_text("target-writable\n", encoding="utf-8")
+                Path(env["HOME"], "home-state").write_text("home-writable\n", encoding="utf-8")
+                Path(env["TMPDIR"], "tmp-state").write_text("tmp-writable\n", encoding="utf-8")
                 try:
                     lock.unlink()
                 except PermissionError:
@@ -794,6 +813,21 @@ def validate_launch_protected_verified_path_regression(manager: Any) -> None:
         try:
             stub = (
                 b"#!/bin/sh\n"
+                b"if printf 'target-state\\n' > \"$KIMI_CODE_HOME/session-state\"; then\n"
+                b"  printf 'target-write-ok\\n' >> \"$2\"\n"
+                b"else\n"
+                b"  printf 'target-write-failed\\n' >> \"$2\"\n"
+                b"fi\n"
+                b"if printf 'home-state\\n' > \"$HOME/home-state\"; then\n"
+                b"  printf 'home-write-ok\\n' >> \"$2\"\n"
+                b"else\n"
+                b"  printf 'home-write-failed\\n' >> \"$2\"\n"
+                b"fi\n"
+                b"if printf 'tmp-state\\n' > \"$TMPDIR/tmp-state\"; then\n"
+                b"  printf 'tmp-write-ok\\n' >> \"$2\"\n"
+                b"else\n"
+                b"  printf 'tmp-write-failed\\n' >> \"$2\"\n"
+                b"fi\n"
                 b"if rm -f \"$KIMI_CODE_HOME/bin/kimi\" 2>/dev/null; then\n"
                 b"  printf 'executable-unlink-allowed\\n' >> \"$2\"\n"
                 b"else\n"
@@ -804,10 +838,17 @@ def validate_launch_protected_verified_path_regression(manager: Any) -> None:
                 b"else\n"
                 b"  printf 'executable-rename-denied\\n' >> \"$2\"\n"
                 b"fi\n"
-                b"if rm -f \"$KIMI_CODE_HOME/.nddev-kimicode.lock\" 2>/dev/null; then\n"
+                b"if rm -f \"$KIMI_CODE_HOME/.nddev-kimicode-lock/lifecycle.lock\" 2>/dev/null; then\n"
                 b"  printf 'lock-unlink-allowed\\n' >> \"$2\"\n"
                 b"else\n"
                 b"  printf 'lock-unlink-denied\\n' >> \"$2\"\n"
+                b"fi\n"
+                b"printf 'replacement-lock\\n' > \"$KIMI_CODE_HOME/replacement-lock\"\n"
+                b"if mv \"$KIMI_CODE_HOME/replacement-lock\" \"$KIMI_CODE_HOME/.nddev-kimicode-lock/lifecycle.lock\" 2>/dev/null; then\n"
+                b"  printf 'lock-replace-allowed\\n' >> \"$2\"\n"
+                b"else\n"
+                b"  printf 'lock-replace-denied\\n' >> \"$2\"\n"
+                b"  rm -f \"$KIMI_CODE_HOME/replacement-lock\"\n"
                 b"fi\n"
                 b"printf 'verified-bytes\\n' > \"$1\"\n"
                 b"exit 31\n"
@@ -825,9 +866,23 @@ def validate_launch_protected_verified_path_regression(manager: Any) -> None:
                 "executable-unlink-denied",
                 "executable-rename-denied",
                 "lock-unlink-denied",
+                "lock-replace-denied",
+            }
+            expected_writes = {
+                "target-write-ok",
+                "home-write-ok",
+                "tmp-write-ok",
             }
             if not expected_denials <= report_lines:
                 raise ValueError(f"protected launch did not deny ordinary swaps: {sorted(report_lines)}")
+            if not expected_writes <= report_lines:
+                raise ValueError(f"protected launch blocked expected runtime writes: {sorted(report_lines)}")
+            if (target / "session-state").read_text(encoding="utf-8") != "target-state\n":
+                raise ValueError("protected launch did not preserve KIMI_CODE_HOME write access")
+            if (target / ".nddev-kimicode-runtime" / "home" / "home-state").read_text(encoding="utf-8") != "home-state\n":
+                raise ValueError("protected launch did not preserve HOME write access")
+            if (target / ".nddev-kimicode-runtime" / "tmp" / "tmp-state").read_text(encoding="utf-8") != "tmp-state\n":
+                raise ValueError("protected launch did not preserve TMPDIR write access")
             entrypoint = target / "bin" / manager.KIMI_COMMAND
             if not entrypoint.is_file() or manager.file_sha256(entrypoint, label="post-launch stub") != manager.sha256_bytes(stub):
                 raise ValueError("protected launch did not preserve the verified executable path")

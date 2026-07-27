@@ -49,14 +49,17 @@ behavior is owned by `cli-tools/nddev_kimicode.py`.
 Kimi software.
 
 `launch` holds a target-local `fcntl.flock` lifecycle lock until the child
-process exits. Immediately before spawning, it temporarily makes the executable
-and software parent chain read/execute-only, reopens `bin/kimi` without
-following symlinks, checks regular-file status, current-user ownership, private
-executable mode, stable inode, and pinned official-binary digest, then launches
-the verified path while the protection and lock are still held. This is a
-portable write-protected verified-path handoff, not exact-inode fd execution.
-Deliberate same-UID `chmod` or tampering outside the manager is outside the
-enforceable isolation boundary.
+process exits. Immediately before spawning, it temporarily makes only the
+dedicated lock directory, launcher `bin/` directory, and immutable software
+artifact directories read/execute-only, reopens `bin/kimi` without following
+symlinks, checks regular-file status, current-user ownership, private executable
+mode, stable inode, and pinned official-binary digest, then launches the
+verified path while the protection and lock are still held. The managed target,
+runtime `HOME`, `TMPDIR`, KIMI_CODE_HOME, config, session, plugin, MCP, and log
+locations remain writable by the launched CLI. This is a portable
+write-protected verified-path handoff, not exact-inode fd execution. Deliberate
+same-UID `chmod` or tampering outside the manager is outside the enforceable
+isolation boundary.
 
 ## Builder Toolkit
 
