@@ -7,6 +7,8 @@ import argparse
 import importlib.util
 import json
 import re
+import shlex
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -27,6 +29,43 @@ REQUIRED_WORKFLOWS = {
     "secret-scan.yml": ".github/workflows/secret-scan.yml",
     "zizmor.yml": ".github/workflows/zizmor-sarif.yml",
 }
+RELEASE_WORKFLOW = ".github/workflows/release.yml"
+RELEASE_PACKAGE_NAME = "nddev-kimicode-app"
+RELEASE_CALLER_PERMISSIONS = {
+    "contents": "write",
+    "id-token": "write",
+    "attestations": "write",
+    "artifact-metadata": "write",
+}
+RELEASE_PATHS = (
+    ".gds",
+    ".github",
+    "AGENTS.md",
+    "CHANGELOG.md",
+    "LICENSE",
+    "README.md",
+    "VERSION",
+    "build",
+    "builder",
+    "cli-tools",
+    "config",
+    "docs",
+    "profiles",
+    "references",
+    "setups",
+)
+RELEASE_CONTRACT_ROOTS = (
+    ".gds",
+    ".github",
+    "build",
+    "builder",
+    "cli-tools",
+    "config",
+    "docs",
+    "profiles",
+    "references",
+    "setups",
+)
 KIMI_VERSION = "0.29.2"
 KIMI_PACKAGE = "@moonshot-ai/kimi-code"
 KIMI_COMMAND = "kimi"
@@ -87,6 +126,168 @@ def load_manager() -> Any:
     return module
 
 
+def yaml_indent(line: str) -> int:
+    return len(line) - len(line.lstrip(" "))
+
+
+def strip_yaml_comment(raw: str) -> str:
+    return raw.split("#", 1)[0].strip()
+
+
+def find_yaml_key(lines: list[str], *, key: str, indent: int) -> tuple[int, str]:
+    prefix = " " * indent + f"{key}:"
+    for index, line in enumerate(lines):
+        if line.startswith(prefix):
+            return index, strip_yaml_comment(line[len(prefix) :])
+    raise ValueError(f"{RELEASE_WORKFLOW}: missing {key}")
+
+
+def find_yaml_child(lines: list[str], *, parent_index: int, key: str, indent: int) -> tuple[int, str]:
+    parent_indent = yaml_indent(lines[parent_index])
+    prefix = " " * indent + f"{key}:"
+    for index in range(parent_index + 1, len(lines)):
+        line = lines[index]
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        current_indent = yaml_indent(line)
+        if current_indent <= parent_indent:
+            break
+        if line.startswith(prefix):
+            return index, strip_yaml_comment(line[len(prefix) :])
+    raise ValueError(f"{RELEASE_WORKFLOW}: missing {key}")
+
+
+def parse_yaml_mapping_children(lines: list[str], *, parent_index: int) -> dict[str, str]:
+    parent_indent = yaml_indent(lines[parent_index])
+    child_indent = parent_indent + 2
+    result: dict[str, str] = {}
+    for line in lines[parent_index + 1 :]:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        current_indent = yaml_indent(line)
+        if current_indent <= parent_indent:
+            break
+        if current_indent == child_indent and ":" in stripped:
+            key, value = stripped.split(":", 1)
+            result[key.strip()] = strip_yaml_comment(value)
+    return result
+
+
+def release_publish_job(lines: list[str]) -> int:
+    jobs_index, _value = find_yaml_key(lines, key="jobs", indent=0)
+    publish_index, _value = find_yaml_child(lines, parent_index=jobs_index, key="publish", indent=2)
+    return publish_index
+
+
+def release_workflow_paths(lines: list[str], *, with_index: int, key: str) -> list[str]:
+    key_index, raw_value = find_yaml_child(lines, parent_index=with_index, key=key, indent=6)
+    if raw_value in {">", ">-", "|", "|-"}:
+        parts: list[str] = []
+        key_indent = yaml_indent(lines[key_index])
+        for line in lines[key_index + 1 :]:
+            if not line.strip():
+                continue
+            current_indent = yaml_indent(line)
+            if current_indent <= key_indent:
+                break
+            parts.append(line.strip())
+        raw_value = " ".join(parts)
+    try:
+        paths = shlex.split(raw_value)
+    except ValueError as exc:
+        raise ValueError(f"{RELEASE_WORKFLOW}: {key} is not parseable: {exc}") from exc
+    if not paths:
+        raise ValueError(f"{RELEASE_WORKFLOW}: {key} must not be empty")
+    return paths
+
+
+def tracked_files() -> set[str]:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(ROOT), "ls-files", "-z"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ValueError(f"could not list tracked release files: {exc}") from exc
+    return {entry for entry in result.stdout.split("\0") if entry}
+
+
+def covered_tracked_files(paths: list[str], tracked: set[str], *, label: str) -> set[str]:
+    covered: set[str] = set()
+    for raw in paths:
+        relative = Path(raw)
+        if relative.is_absolute() or any(part in {"", ".", ".."} for part in relative.parts):
+            raise ValueError(f"{RELEASE_WORKFLOW}: {label} path is unsafe: {raw}")
+        absolute = ROOT / relative
+        if not absolute.exists():
+            raise ValueError(f"{RELEASE_WORKFLOW}: {label} path does not exist: {raw}")
+        if absolute.is_file():
+            if raw not in tracked:
+                raise ValueError(f"{RELEASE_WORKFLOW}: {label} file is not tracked: {raw}")
+            covered.add(raw)
+            continue
+        if absolute.is_dir():
+            prefix = raw.rstrip("/") + "/"
+            matches = {entry for entry in tracked if entry.startswith(prefix)}
+            if not matches:
+                raise ValueError(f"{RELEASE_WORKFLOW}: {label} directory has no tracked files: {raw}")
+            covered.update(matches)
+            continue
+        raise ValueError(f"{RELEASE_WORKFLOW}: {label} path must be a regular file or directory: {raw}")
+    return covered
+
+
+def validate_release_workflow(path: Path) -> None:
+    text = path.read_text(encoding="utf-8")
+    lines = text.splitlines()
+    _permissions_index, top_permissions = find_yaml_key(lines, key="permissions", indent=0)
+    if top_permissions != "{}":
+        raise ValueError(f"{RELEASE_WORKFLOW}: top-level permissions must be empty")
+    if '      - "[0-9]+.[0-9]+.[0-9]+"' not in text:
+        raise ValueError(f"{RELEASE_WORKFLOW}: release tags must be numeric SemVer")
+    publish_index = release_publish_job(lines)
+    permissions_index, _value = find_yaml_child(lines, parent_index=publish_index, key="permissions", indent=4)
+    if parse_yaml_mapping_children(lines, parent_index=permissions_index) != RELEASE_CALLER_PERMISSIONS:
+        raise ValueError(f"{RELEASE_WORKFLOW}: publish job permissions mismatch")
+    _uses_index, uses = find_yaml_child(lines, parent_index=publish_index, key="uses", indent=4)
+    expected_uses = (
+        f"NDDev-it-com/ci-workflows/.github/workflows/release-supply-chain.yml@{SHARED_CI_COMMIT}"
+    )
+    if uses != expected_uses:
+        raise ValueError(f"{RELEASE_WORKFLOW}: release job must call the pinned shared workflow")
+    with_index, _value = find_yaml_child(lines, parent_index=publish_index, key="with", indent=4)
+    _version_index, version = find_yaml_child(lines, parent_index=with_index, key="version", indent=6)
+    if version != "${{ github.ref_name }}":
+        raise ValueError(f"{RELEASE_WORKFLOW}: version input must be github.ref_name")
+    _package_index, package_name = find_yaml_child(lines, parent_index=with_index, key="package_name", indent=6)
+    if package_name != RELEASE_PACKAGE_NAME:
+        raise ValueError(f"{RELEASE_WORKFLOW}: package_name input mismatch")
+
+    archive_paths = release_workflow_paths(lines, with_index=with_index, key="archive_paths")
+    runtime_paths = release_workflow_paths(lines, with_index=with_index, key="runtime_paths")
+    if tuple(archive_paths) != RELEASE_PATHS:
+        raise ValueError(f"{RELEASE_WORKFLOW}: archive_paths must be explicit and canonical")
+    if tuple(runtime_paths) != RELEASE_PATHS:
+        raise ValueError(f"{RELEASE_WORKFLOW}: runtime_paths must be explicit and canonical")
+    for root in RELEASE_CONTRACT_ROOTS:
+        if root not in archive_paths or root not in runtime_paths:
+            raise ValueError(f"{RELEASE_WORKFLOW}: release paths missing contract root {root}")
+    tracked = tracked_files()
+    archive_covered = covered_tracked_files(archive_paths, tracked, label="archive_paths")
+    runtime_covered = covered_tracked_files(runtime_paths, tracked, label="runtime_paths")
+    if archive_covered != tracked:
+        missing = ", ".join(sorted(tracked - archive_covered))
+        raise ValueError(f"{RELEASE_WORKFLOW}: archive_paths do not cover tracked files: {missing}")
+    if runtime_covered != tracked:
+        missing = ", ".join(sorted(tracked - runtime_covered))
+        raise ValueError(f"{RELEASE_WORKFLOW}: runtime_paths do not cover tracked files: {missing}")
+
+
 def validate_workflows() -> None:
     workflow_root = ROOT / ".github" / "workflows"
     for filename, workflow in REQUIRED_WORKFLOWS.items():
@@ -97,6 +298,8 @@ def validate_workflows() -> None:
         text = path.read_text(encoding="utf-8")
         if text.count(expected) != 1:
             raise ValueError(f"{filename}: missing exact shared CI caller")
+        if filename == "release.yml":
+            validate_release_workflow(path)
 
 
 def validate_catalog() -> None:
