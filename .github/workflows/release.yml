@@ -24,8 +24,8 @@ jobs:
       version: ${{ github.ref_name }}
       package_name: nddev-kimicode-app
       archive_paths: >-
-        .gds .github AGENTS.md CHANGELOG.md LICENSE README.md VERSION build
+        .claude .gds .github AGENTS.md CHANGELOG.md LICENSE README.md VERSION build
         builder cli-tools config docs profiles references setups
       runtime_paths: >-
-        .gds .github AGENTS.md CHANGELOG.md LICENSE README.md VERSION build
+        .claude .gds .github AGENTS.md CHANGELOG.md LICENSE README.md VERSION build
         builder cli-tools config docs profiles references setups

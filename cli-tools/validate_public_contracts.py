@@ -37,7 +37,7 @@ REQUIRED_WORKFLOWS = {
 }
 RELEASE_WORKFLOW = ".github/workflows/release.yml"
 RELEASE_PACKAGE_NAME = "nddev-kimicode-app"
-RELEASE_BYTES_MANIFEST = "build/release-bytes.json"
+CLAUDE_INSTRUCTION_PATH = ".claude/CLAUDE.md"
 RELEASE_CALLER_PERMISSIONS = {
     "contents": "write",
     "id-token": "write",
@@ -45,6 +45,7 @@ RELEASE_CALLER_PERMISSIONS = {
     "artifact-metadata": "write",
 }
 RELEASE_PATHS = (
+    ".claude",
     ".gds",
     ".github",
     "AGENTS.md",
@@ -299,61 +300,11 @@ def release_file_set() -> tuple[set[str], str]:
     return files, "archive tree"
 
 
-def release_bytes_digest(files: set[str]) -> tuple[str, int, int]:
-    subject_files = sorted(files - {RELEASE_BYTES_MANIFEST})
-    digest = hashlib.sha256()
-    total_size = 0
-    for raw in subject_files:
-        path = ROOT / raw
-        info = path.lstat()
-        if not stat.S_ISREG(info.st_mode):
-            raise ValueError(f"{RELEASE_WORKFLOW}: release byte subject is not a regular file: {raw}")
-        file_digest = hashlib.sha256()
-        size = 0
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-        try:
-            while True:
-                chunk = os.read(fd, 65536)
-                if not chunk:
-                    break
-                size += len(chunk)
-                total_size += len(chunk)
-                if total_size > 32 * 1024 * 1024:
-                    raise ValueError(f"{RELEASE_WORKFLOW}: release byte set is unexpectedly large")
-                file_digest.update(chunk)
-        finally:
-            os.close(fd)
-        if size != info.st_size:
-            raise ValueError(f"{RELEASE_WORKFLOW}: release file changed while hashing: {raw}")
-        digest.update(raw.encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(str(size).encode("ascii"))
-        digest.update(b"\0")
-        digest.update(file_digest.hexdigest().encode("ascii"))
-        digest.update(b"\0")
-    return digest.hexdigest(), len(subject_files), total_size
-
-
-def validate_release_bytes_manifest(files: set[str]) -> None:
-    if RELEASE_BYTES_MANIFEST not in files:
-        raise ValueError(f"{RELEASE_WORKFLOW}: release byte manifest is not covered by archive closure")
-    manifest = load_json(ROOT / RELEASE_BYTES_MANIFEST)
-    expected_digest, expected_count, expected_size = release_bytes_digest(files)
-    expected = {
-        "schema_version": 1,
-        "product_name": "nddev-kimicode-app",
-        "scope": "public-release-archive-bytes",
-        "hash_algorithm": "sha256",
-        "subject": "derived release file set excluding this manifest",
-        "subject_file_count": expected_count,
-        "subject_total_bytes": expected_size,
-        "subject_sha256": expected_digest,
-    }
-    expected_bytes = (json.dumps(expected, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    if (ROOT / RELEASE_BYTES_MANIFEST).read_bytes() != expected_bytes:
-        raise ValueError(f"{RELEASE_WORKFLOW}: release byte manifest JSON is not canonical")
-    if manifest != expected:
-        raise ValueError(f"{RELEASE_WORKFLOW}: release byte manifest does not match exact release bytes")
+def validate_claude_instruction(files: set[str]) -> None:
+    if CLAUDE_INSTRUCTION_PATH not in files:
+        raise ValueError(f"{RELEASE_WORKFLOW}: {CLAUDE_INSTRUCTION_PATH} is not covered by archive closure")
+    if (ROOT / CLAUDE_INSTRUCTION_PATH).read_bytes() != b"@../AGENTS.md\n":
+        raise ValueError(f"{CLAUDE_INSTRUCTION_PATH}: must contain exactly @../AGENTS.md followed by newline")
 
 
 def covered_release_files(paths: list[str], files: set[str], *, label: str, file_set_label: str) -> set[str]:
@@ -423,7 +374,7 @@ def validate_release_workflow(path: Path) -> None:
         if root not in archive_paths or root not in runtime_paths:
             raise ValueError(f"{RELEASE_WORKFLOW}: release paths missing contract root {root}")
     release_files, file_set_label = release_file_set()
-    validate_release_bytes_manifest(release_files)
+    validate_claude_instruction(release_files)
     archive_covered = covered_release_files(archive_paths, release_files, label="archive_paths", file_set_label=file_set_label)
     runtime_covered = covered_release_files(runtime_paths, release_files, label="runtime_paths", file_set_label=file_set_label)
     if not runtime_covered <= archive_covered:
