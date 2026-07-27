@@ -300,11 +300,145 @@ def release_file_set() -> tuple[set[str], str]:
     return files, "archive tree"
 
 
-def validate_claude_instruction(files: set[str]) -> None:
+def validate_claude_instruction(files: set[str], *, root: Path | None = None) -> None:
+    base = ROOT if root is None else root
+    claude_dir = base / ".claude"
+    try:
+        claude_info = claude_dir.lstat()
+    except FileNotFoundError:
+        raise ValueError(f"{RELEASE_WORKFLOW}: .claude directory is missing") from None
+    if stat.S_ISLNK(claude_info.st_mode):
+        raise ValueError(f"{RELEASE_WORKFLOW}: .claude must be a real directory, not a symlink")
+    if not stat.S_ISDIR(claude_info.st_mode):
+        raise ValueError(f"{RELEASE_WORKFLOW}: .claude must be a real directory")
+    claude_entries = sorted(child.name for child in claude_dir.iterdir())
+    if claude_entries != ["CLAUDE.md"]:
+        raise ValueError(f"{RELEASE_WORKFLOW}: .claude must contain exactly CLAUDE.md")
+
     if CLAUDE_INSTRUCTION_PATH not in files:
         raise ValueError(f"{RELEASE_WORKFLOW}: {CLAUDE_INSTRUCTION_PATH} is not covered by archive closure")
-    if (ROOT / CLAUDE_INSTRUCTION_PATH).read_bytes() != b"@../AGENTS.md\n":
+    bridge = base / CLAUDE_INSTRUCTION_PATH
+    try:
+        bridge_info = bridge.lstat()
+    except FileNotFoundError:
+        raise ValueError(f"{CLAUDE_INSTRUCTION_PATH}: bridge file is missing") from None
+    if stat.S_ISLNK(bridge_info.st_mode):
+        raise ValueError(f"{CLAUDE_INSTRUCTION_PATH}: must be a regular file, not a symlink")
+    if not stat.S_ISREG(bridge_info.st_mode):
+        raise ValueError(f"{CLAUDE_INSTRUCTION_PATH}: must be a regular file")
+    if bridge.read_bytes() != b"@../AGENTS.md\n":
         raise ValueError(f"{CLAUDE_INSTRUCTION_PATH}: must contain exactly @../AGENTS.md followed by newline")
+
+    agents = base / "AGENTS.md"
+    try:
+        agents_info = agents.lstat()
+    except FileNotFoundError:
+        raise ValueError(f"{CLAUDE_INSTRUCTION_PATH}: AGENTS.md target is missing") from None
+    if stat.S_ISLNK(agents_info.st_mode):
+        raise ValueError(f"{CLAUDE_INSTRUCTION_PATH}: AGENTS.md target must be a regular file, not a symlink")
+    if not stat.S_ISREG(agents_info.st_mode):
+        raise ValueError(f"{CLAUDE_INSTRUCTION_PATH}: AGENTS.md target must be a regular file")
+
+
+def write_valid_claude_bridge(root: Path) -> set[str]:
+    (root / "AGENTS.md").write_text("# Instructions\n", encoding="utf-8")
+    claude_dir = root / ".claude"
+    claude_dir.mkdir()
+    (claude_dir / "CLAUDE.md").write_bytes(b"@../AGENTS.md\n")
+    return {"AGENTS.md", CLAUDE_INSTRUCTION_PATH}
+
+
+def expect_claude_bridge_rejected(root: Path, files: set[str], expected: str) -> None:
+    try:
+        validate_claude_instruction(files, root=root)
+    except ValueError as exc:
+        if expected not in str(exc):
+            raise ValueError(f"Claude bridge structural check returned unstable error: {exc}") from exc
+        return
+    raise ValueError(f"Claude bridge structural check unexpectedly allowed {expected}")
+
+
+def validate_claude_bridge_structural_regression() -> None:
+    with tempfile.TemporaryDirectory(prefix=".tmp-kimicode-claude-valid-") as temp:
+        root = Path(temp) / "archive"
+        root.mkdir()
+        files = write_valid_claude_bridge(root)
+        validate_claude_instruction(files, root=root)
+
+    def run_case(label: str, mutate: Any, expected: str, files_override: set[str] | None = None) -> None:
+        with tempfile.TemporaryDirectory(prefix=f".tmp-kimicode-claude-{label}-") as temp:
+            root = Path(temp) / "archive"
+            root.mkdir()
+            files = write_valid_claude_bridge(root)
+            mutate(root)
+            expect_claude_bridge_rejected(root, files if files_override is None else files_override, expected)
+
+    run_case(
+        "extra-entry",
+        lambda root: (root / ".claude" / "extra").write_text("extra\n", encoding="utf-8"),
+        ".claude must contain exactly CLAUDE.md",
+    )
+
+    def replace_claude_dir_with_symlink(root: Path) -> None:
+        claude_dir = root / ".claude"
+        (claude_dir / "CLAUDE.md").unlink()
+        claude_dir.rmdir()
+        target = root / "real-claude"
+        target.mkdir()
+        (target / "CLAUDE.md").write_bytes(b"@../AGENTS.md\n")
+        claude_dir.symlink_to(target, target_is_directory=True)
+
+    run_case(
+        "dir-symlink",
+        replace_claude_dir_with_symlink,
+        ".claude must be a real directory, not a symlink",
+    )
+
+    def replace_bridge_with_symlink(root: Path) -> None:
+        bridge = root / ".claude" / "CLAUDE.md"
+        bridge.unlink()
+        bridge.symlink_to("../AGENTS.md")
+
+    run_case(
+        "bridge-symlink",
+        replace_bridge_with_symlink,
+        "must be a regular file, not a symlink",
+    )
+
+    def replace_bridge_with_directory(root: Path) -> None:
+        bridge = root / ".claude" / "CLAUDE.md"
+        bridge.unlink()
+        bridge.mkdir()
+
+    run_case(
+        "bridge-directory",
+        replace_bridge_with_directory,
+        "must be a regular file",
+    )
+    run_case(
+        "wrong-bytes",
+        lambda root: (root / ".claude" / "CLAUDE.md").write_bytes(b"@../README.md\n"),
+        "must contain exactly @../AGENTS.md followed by newline",
+    )
+    run_case(
+        "missing-fileset",
+        lambda _root: None,
+        f"{CLAUDE_INSTRUCTION_PATH} is not covered by archive closure",
+        files_override={"AGENTS.md"},
+    )
+
+    def replace_agents_with_symlink(root: Path) -> None:
+        agents = root / "AGENTS.md"
+        agents.unlink()
+        target = root / "AGENTS.real.md"
+        target.write_text("# Real instructions\n", encoding="utf-8")
+        agents.symlink_to(target.name)
+
+    run_case(
+        "agents-symlink",
+        replace_agents_with_symlink,
+        "AGENTS.md target must be a regular file, not a symlink",
+    )
 
 
 def covered_release_files(paths: list[str], files: set[str], *, label: str, file_set_label: str) -> set[str]:
@@ -1664,6 +1798,7 @@ def main(argv: list[str] | None = None) -> int:
     validate_builder_toolkit()
     validate_runtime_regressions()
     validate_workflows()
+    validate_claude_bridge_structural_regression()
     print("validate_public_contracts.py: PASS")
     return 0
 
