@@ -58,6 +58,14 @@ It executes `/absolute/target/bin/kimi` with target-local `HOME`, `TMPDIR`, and
 constructs a fresh child environment without live provider credentials or
 `KIMI_MODEL_*` variables.
 
+The target lifecycle lock is held from launch preflight through child process
+completion and lock cleanup, so install, update, migrate, restore, remove, or
+profile-switch mutations fail while the child is running. Immediately before the
+subprocess handoff, the manager reopens the target-owned executable without
+following symlinks and checks regular file type, current-user ownership, mode,
+stable inode, and the pinned official-binary digest. Runtime `HOME` and `TMPDIR`
+directories are rechecked as real private directories before handoff.
+
 Child arguments that override managed permission mode, plan mode, prompt mode,
 model selection, Skill directories, agents, sessions, extra workspace scope, or
 software migration/update behavior are rejected before the target-owned binary

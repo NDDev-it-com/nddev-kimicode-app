@@ -37,6 +37,11 @@
     "supported_platforms": ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"],
     "unsupported_platforms": ["windows", "musl-linux"]
   },
+  "runtime_launch": {
+    "holds_lifecycle_lock_through_child": true,
+    "pre_handoff_executable_revalidation": true,
+    "runtime_dirs_private": true
+  },
   "manager": "cli-tools/nddev_kimicode.py",
   "contract": "config/nddev-contract.json",
   "runtime_baseline": "references/kimi-code-baseline.json",

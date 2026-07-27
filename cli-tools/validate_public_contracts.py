@@ -10,6 +10,7 @@ import re
 import sys
 import tempfile
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 sys.dont_write_bytecode = True
@@ -253,6 +254,23 @@ def validate_metadata() -> None:
         raise ValueError("contract must not ship yolo")
     if contract["safety"].get("full_auto_active_blocking_hooks") is not False:
         raise ValueError("contract must state full-auto has no active blocking hooks")
+    if contract["safety"].get("launch_holds_lifecycle_lock") is not True:
+        raise ValueError("contract must state launch holds the lifecycle lock")
+    if contract["safety"].get("launch_revalidates_executable_before_handoff") is not True:
+        raise ValueError("contract must state launch revalidates the executable before handoff")
+    runtime_launch = contract["runtime_launch"]
+    if runtime_launch.get("pre_login_supported") is not True:
+        raise ValueError("contract must keep pre-login launch supported")
+    if "child process completion" not in runtime_launch.get("lifecycle_lock_scope", ""):
+        raise ValueError("contract must document launch lock scope through child completion")
+    if "pinned official-binary digest" not in runtime_launch.get("pre_handoff_executable_revalidation", ""):
+        raise ValueError("contract must document pinned digest revalidation before launch handoff")
+    if manifest.get("runtime_launch") != {
+        "holds_lifecycle_lock_through_child": True,
+        "pre_handoff_executable_revalidation": True,
+        "runtime_dirs_private": True,
+    }:
+        raise ValueError("manifest must expose launch lock and executable revalidation facts")
     software = contract["software_lifecycle"]
     if software.get("channel") != "official-binary" or software.get("manifest_sha256") != MANIFEST_SHA256:
         raise ValueError("contract software lifecycle must use official binary manifest")
@@ -376,9 +394,172 @@ def validate_corrupt_backup_regression(manager: Any) -> None:
 
 def validate_runtime_regressions() -> None:
     manager = load_manager()
+    manager_text = (ROOT / "cli-tools" / "nddev_kimicode.py").read_text(encoding="utf-8")
+    for forbidden in ("NDDEV_KIMICODE_TEST", "ENABLE_TEST_OVERRIDES"):
+        if forbidden in manager_text:
+            raise ValueError("manager must not expose public test environment switches")
+    for required in (
+        "with target_lock(target):\n        command, child_env = prepare_launch_invocation_locked",
+        "is_current_owner(opened)",
+        "opened.st_dev != info.st_dev or opened.st_ino != info.st_ino",
+        "target-owned Kimi Code entrypoint digest does not match pinned binary",
+    ):
+        if required not in manager_text:
+            raise ValueError(f"manager is missing launch hardening fragment: {required}")
     validate_status_launch_allowed_regression(manager)
     validate_corrupt_backup_regression(manager)
+    validate_launch_lock_concurrency_regression(manager)
+    validate_launch_pre_handoff_swap_regression(manager)
+    validate_launch_executable_error_regression(manager)
     validate_launch_boundary_regression(manager)
+
+
+def validate_launch_lock_concurrency_regression(manager: Any) -> None:
+    temp, target = make_isolated_target("launch-lock-")
+    try:
+        manager.write_setup(
+            target,
+            manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP),
+            manager.load_profile(manager.DEFAULT_PROFILE),
+        )
+        original_platforms = manager.KIMI_BINARY_PLATFORMS
+        original_run = manager.subprocess.run
+        try:
+            write_stub_software(manager, target)
+            lock = manager.lock_path(target)
+            observed_mutation_failure: str | None = None
+
+            def fake_run(command: list[str], *, env: dict[str, str], check: bool) -> SimpleNamespace:
+                nonlocal observed_mutation_failure
+                if not lock.is_dir():
+                    raise ValueError("launch lifecycle lock was not held during child execution")
+                if command[0] != str(target / "bin" / manager.KIMI_COMMAND):
+                    raise ValueError("launch did not hand off to the target-owned executable")
+                if env.get("KIMI_CODE_HOME") != str(target.resolve()):
+                    raise ValueError("launch child environment is not target-scoped")
+                try:
+                    manager.write_setup(
+                        target,
+                        manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP),
+                        manager.load_profile("safe"),
+                        require_existing=True,
+                    )
+                except manager.KimicodeSetupError as exc:
+                    observed_mutation_failure = str(exc)
+                else:
+                    raise ValueError("lifecycle mutation succeeded while launch child was running")
+                return SimpleNamespace(returncode=23)
+
+            manager.subprocess.run = fake_run
+            exit_code = manager.launch(target, ["--version"])
+            if exit_code != 23:
+                raise ValueError("launch did not forward child exit code under lifecycle lock")
+            if observed_mutation_failure is None or "target is locked" not in observed_mutation_failure:
+                raise ValueError("concurrent lifecycle mutation did not fail on target lock")
+            if lock.exists():
+                raise ValueError("launch lifecycle lock was not cleaned up after child completion")
+        finally:
+            manager.subprocess.run = original_run
+            manager.KIMI_BINARY_PLATFORMS = original_platforms
+    finally:
+        temp.cleanup()
+
+
+def validate_launch_pre_handoff_swap_regression(manager: Any) -> None:
+    temp, target = make_isolated_target("launch-swap-")
+    try:
+        manager.write_setup(
+            target,
+            manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP),
+            manager.load_profile(manager.DEFAULT_PROFILE),
+        )
+        original_platforms = manager.KIMI_BINARY_PLATFORMS
+        original_status = manager.software_status_payload
+        original_run = manager.subprocess.run
+        try:
+            write_stub_software(manager, target)
+            entrypoint = target / "bin" / manager.KIMI_COMMAND
+            current_results = 0
+            swapped = False
+
+            def wrapped_status(status_target: Path) -> dict[str, Any]:
+                nonlocal current_results, swapped
+                result = original_status(status_target)
+                if Path(status_target).resolve() == target.resolve() and result.get("current"):
+                    current_results += 1
+                    if current_results == 2 and not swapped:
+                        entrypoint.write_bytes(b"#!/bin/sh\nprintf 'swapped\\n'\n")
+                        entrypoint.chmod(0o700)
+                        swapped = True
+                return result
+
+            def fake_run(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+                raise ValueError("launch spawned a swapped target-owned executable")
+
+            manager.software_status_payload = wrapped_status
+            manager.subprocess.run = fake_run
+            try:
+                manager.launch(target, ["--version"])
+            except manager.KimicodeSetupError as exc:
+                if "pinned binary" not in str(exc):
+                    raise ValueError(f"swapped executable returned unstable error: {exc}") from exc
+            else:
+                raise ValueError("swapped executable launch unexpectedly succeeded")
+            if not swapped:
+                raise ValueError("pre-handoff executable swap regression was not exercised")
+        finally:
+            manager.subprocess.run = original_run
+            manager.software_status_payload = original_status
+            manager.KIMI_BINARY_PLATFORMS = original_platforms
+    finally:
+        temp.cleanup()
+
+
+def expect_revalidation_rejected(manager: Any, target: Path, expected: str) -> None:
+    try:
+        manager.revalidate_launch_executable(target)
+    except manager.KimicodeSetupError as exc:
+        if expected not in str(exc):
+            raise ValueError(f"launch executable revalidation returned unstable error: {exc}") from exc
+        return
+    raise ValueError(f"launch executable revalidation unexpectedly allowed {expected}")
+
+
+def validate_launch_executable_error_regression(manager: Any) -> None:
+    cases = (
+        ("mode", lambda path: path.chmod(0o600), "mode must be 0700"),
+        (
+            "digest",
+            lambda path: (path.write_bytes(b"#!/bin/sh\nprintf 'wrong\\n'\n"), path.chmod(0o700)),
+            "digest does not match pinned binary",
+        ),
+        ("symlink", None, "must not be a symlink"),
+    )
+    for label, mutation, expected in cases:
+        temp, target = make_isolated_target(f"launch-{label}-")
+        try:
+            manager.write_setup(
+                target,
+                manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP),
+                manager.load_profile(manager.DEFAULT_PROFILE),
+            )
+            original_platforms = manager.KIMI_BINARY_PLATFORMS
+            try:
+                write_stub_software(manager, target)
+                entrypoint = target / "bin" / manager.KIMI_COMMAND
+                if label == "symlink":
+                    replacement = target.parent / f"{target.name}-outside-kimi"
+                    replacement.write_bytes(b"#!/bin/sh\nprintf 'outside\\n'\n")
+                    replacement.chmod(0o700)
+                    entrypoint.unlink()
+                    entrypoint.symlink_to(replacement)
+                elif mutation is not None:
+                    mutation(entrypoint)
+                expect_revalidation_rejected(manager, target, expected)
+            finally:
+                manager.KIMI_BINARY_PLATFORMS = original_platforms
+        finally:
+            temp.cleanup()
 
 
 def expect_launch_rejected(manager: Any, argv: list[str], expected: str) -> None:

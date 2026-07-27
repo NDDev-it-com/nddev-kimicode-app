@@ -536,6 +536,21 @@ def file_sha256(path: Path, *, label: str, max_bytes: int = SOFTWARE_MAX_BYTES) 
     return digest.hexdigest()
 
 
+def file_sha256_from_fd(fd: int, label: str, *, max_bytes: int = SOFTWARE_MAX_BYTES) -> str:
+    digest = hashlib.sha256()
+    total = 0
+    os.lseek(fd, 0, os.SEEK_SET)
+    while True:
+        chunk = os.read(fd, 1024 * 1024)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > max_bytes:
+            fail(f"{label} is too large")
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
 def tree_sha256(root: Path) -> str:
     info = stat_existing(root, "software tree")
     if info is None:
@@ -1862,48 +1877,115 @@ def reject_managed_launch_overrides(child_args: list[str]) -> None:
         index += 1
 
 
+def ensure_launch_runtime_directories(canonical: Path) -> tuple[Path, Path, Path]:
+    runtime = canonical / ".nddev-kimicode-runtime"
+    home = runtime / "home"
+    tmp = runtime / "tmp"
+    ensure_private_directory(runtime, "runtime root")
+    ensure_private_directory(home, "runtime home")
+    ensure_private_directory(tmp, "runtime tmp")
+    require_owner_private_directory(runtime, "runtime root")
+    require_owner_private_directory(home, "runtime home")
+    require_owner_private_directory(tmp, "runtime tmp")
+    return runtime, home, tmp
+
+
+def revalidate_launch_executable(target: Path) -> Path:
+    executable = software_entrypoint(target)
+    label = "target-owned Kimi Code entrypoint"
+    info = validate_software_file(executable, label)
+    if not is_current_owner(info):
+        fail(f"{label} must be owned by the current user")
+    if stat.S_IMODE(info.st_mode) != 0o700:
+        fail(f"{label} mode must be 0700")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(executable, flags)
+    except FileNotFoundError:
+        fail("target-owned kimi executable is missing")
+    except OSError as exc:
+        fail(f"{label} could not be opened safely: {exc}")
+    try:
+        opened = os.fstat(fd)
+        if opened.st_dev != info.st_dev or opened.st_ino != info.st_ino:
+            fail(f"{label} changed while opening")
+        if not stat.S_ISREG(opened.st_mode):
+            fail(f"{label} must be a regular file")
+        if opened.st_nlink != 1:
+            fail(f"{label} must not be a hardlink")
+        if not is_current_owner(opened):
+            fail(f"{label} must be owned by the current user")
+        if stat.S_IMODE(opened.st_mode) != 0o700:
+            fail(f"{label} mode must be 0700")
+        digest = file_sha256_from_fd(fd, label)
+        after = os.fstat(fd)
+        if after.st_dev != opened.st_dev or after.st_ino != opened.st_ino or after.st_size != opened.st_size:
+            fail(f"{label} changed while hashing")
+    finally:
+        os.close(fd)
+
+    stamp = read_software_stamp(target)
+    if stamp is None:
+        fail("launch requires current target-owned Kimi Code binary: software stamp is missing")
+    if software_is_legacy(stamp):
+        fail("launch refuses legacy Bun software state; run migrate-cli first")
+    platform_key = stamp.get("platform")
+    expected_binary = KIMI_BINARY_PLATFORMS.get(str(platform_key))
+    if expected_binary is None:
+        fail("launch requires current target-owned Kimi Code binary: platform")
+    if digest != expected_binary["checksum"]:
+        fail("target-owned Kimi Code entrypoint digest does not match pinned binary")
+    if stamp.get("entrypoint_sha256") != digest:
+        fail("target-owned Kimi Code entrypoint digest does not match software stamp")
+    return executable
+
+
+def prepare_launch_invocation_locked(target: Path, child_args: list[str]) -> tuple[list[str], dict[str, str]]:
+    status = status_payload(target)
+    if not status["managed"]:
+        fail("launch requires a managed target")
+    if status["state"] == "legacy-managed":
+        fail("launch refuses legacy managed setup state; run migrate first")
+    if status["drift"]:
+        fail(f"managed target has drift: {', '.join(status['drift'])}")
+    software = software_status_payload(target)
+    if software["legacy"]:
+        fail("launch refuses legacy Bun software state; run migrate-cli first")
+    if not software["current"]:
+        drift = software.get("drift") or ["target-owned Kimi Code binary is not installed"]
+        fail(f"launch requires current target-owned Kimi Code binary: {', '.join(drift)}")
+    canonical = validate_target(target, create=False)
+    runtime, home, tmp = ensure_launch_runtime_directories(canonical)
+    executable = revalidate_launch_executable(canonical)
+    require_owner_private_directory(runtime, "runtime root")
+    require_owner_private_directory(home, "runtime home")
+    require_owner_private_directory(tmp, "runtime tmp")
+    child_env: dict[str, str] = {
+        "HOME": str(home),
+        "KIMI_CODE_HOME": str(canonical),
+        "KIMI_DISABLE_TELEMETRY": "1",
+        "KIMI_CODE_BACKGROUND_KEEP_ALIVE_ON_EXIT": "0",
+        "PATH": "/usr/bin:/bin",
+        "TMPDIR": str(tmp),
+    }
+    return [str(executable), *child_args], child_env
+
+
 def prepare_launch_invocation(target: Path, child_args: list[str]) -> tuple[list[str], dict[str, str]]:
     reject_managed_launch_overrides(child_args)
     with target_lock(target):
-        status = status_payload(target)
-        if not status["managed"]:
-            fail("launch requires a managed target")
-        if status["state"] == "legacy-managed":
-            fail("launch refuses legacy managed setup state; run migrate first")
-        if status["drift"]:
-            fail(f"managed target has drift: {', '.join(status['drift'])}")
-        software = software_status_payload(target)
-        if software["legacy"]:
-            fail("launch refuses legacy Bun software state; run migrate-cli first")
-        if not software["current"]:
-            drift = software.get("drift") or ["target-owned Kimi Code binary is not installed"]
-            fail(f"launch requires current target-owned Kimi Code binary: {', '.join(drift)}")
-        canonical = validate_target(target, create=False)
-        runtime = canonical / ".nddev-kimicode-runtime"
-        home = runtime / "home"
-        tmp = runtime / "tmp"
-        ensure_private_directory(runtime, "runtime root")
-        ensure_private_directory(home, "runtime home")
-        ensure_private_directory(tmp, "runtime tmp")
-        executable = software_entrypoint(canonical)
-        child_env: dict[str, str] = {
-            "HOME": str(home),
-            "KIMI_CODE_HOME": str(canonical),
-            "KIMI_DISABLE_TELEMETRY": "1",
-            "KIMI_CODE_BACKGROUND_KEEP_ALIVE_ON_EXIT": "0",
-            "PATH": "/usr/bin:/bin",
-            "TMPDIR": str(tmp),
-        }
-        return [str(executable), *child_args], child_env
+        return prepare_launch_invocation_locked(target, child_args)
 
 
 def launch(target: Path, child_args: list[str]) -> int:
-    command, child_env = prepare_launch_invocation(target, child_args)
-    try:
-        completed = subprocess.run(command, env=child_env, check=False)
-    except FileNotFoundError:
-        fail("target-owned kimi executable is missing")
-    return int(completed.returncode)
+    reject_managed_launch_overrides(child_args)
+    with target_lock(target):
+        command, child_env = prepare_launch_invocation_locked(target, child_args)
+        try:
+            completed = subprocess.run(command, env=child_env, check=False)
+        except FileNotFoundError:
+            fail("target-owned kimi executable is missing")
+        return int(completed.returncode)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

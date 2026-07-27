@@ -48,6 +48,11 @@ behavior is owned by `cli-tools/nddev_kimicode.py`.
 `update-cli`, and `migrate-cli` are the only commands that acquire target-owned
 Kimi software.
 
+`launch` holds the target lifecycle lock until the child process exits. It
+revalidates `bin/kimi` immediately before spawning, including non-symlink
+regular-file status, current-user ownership, private executable mode, stable
+inode, and pinned official-binary digest.
+
 ## Builder Toolkit
 
 The `nddev-builder` content setup projects the full public builder toolkit under

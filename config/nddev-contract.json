@@ -49,6 +49,8 @@
     "launch_requires_clean_managed_target": true,
     "launch_filters_live_credentials": true,
     "launch_blocks_managed_mode_overrides": true,
+    "launch_holds_lifecycle_lock": true,
+    "launch_revalidates_executable_before_handoff": true,
     "full_auto_active_blocking_hooks": false
   },
   "runtime_compatibility": {
@@ -102,7 +104,9 @@
     "streams_child_stdio": true,
     "json_manager_errors_supported": true,
     "target_environment_scope": "target-owned /absolute/target/bin/kimi with isolated HOME, TMPDIR, and KIMI_CODE_HOME; credentials, sessions, logs, skills, agents, plugins, MCP, updates, and runtime data stay under the explicit target",
-    "pre_login_supported": true
+    "pre_login_supported": true,
+    "lifecycle_lock_scope": "Held from launch preflight through child process completion and cleanup",
+    "pre_handoff_executable_revalidation": "Immediately before subprocess handoff, /absolute/target/bin/kimi is reopened without following symlinks and checked for regular file type, current-user ownership, mode 0700, stable inode, and pinned official-binary digest"
   },
   "builder_toolkit": {
     "plugin_id": "nddev-builder",
