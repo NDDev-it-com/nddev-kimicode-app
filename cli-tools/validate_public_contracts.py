@@ -4,14 +4,19 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import hashlib
 import importlib.util
 import json
 import os
 import re
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -460,6 +465,14 @@ def validate_metadata() -> None:
         raise ValueError("contract must state full-auto has no active blocking hooks")
     if contract["safety"].get("launch_holds_lifecycle_lock") is not True:
         raise ValueError("contract must state launch holds the lifecycle lock")
+    if contract["safety"].get("launch_uses_external_target_bound_lifecycle_lock") is not True:
+        raise ValueError("contract must state launch uses an external target-bound lifecycle lock")
+    if contract["safety"].get("launch_keeps_external_lock_file_persistent") is not True:
+        raise ValueError("contract must state external lifecycle lock files are persistent")
+    if contract["safety"].get("launch_keeps_internal_lock_file_persistent") is not True:
+        raise ValueError("contract must state internal lifecycle lock files are persistent")
+    if contract["safety"].get("launch_protects_internal_lock_directory_while_held") is not True:
+        raise ValueError("contract must state internal lifecycle lock directory is protected while held")
     if contract["safety"].get("launch_uses_stable_fcntl_flock") is not True:
         raise ValueError("contract must state launch uses a stable fcntl flock")
     if contract["safety"].get("launch_preserves_mutable_runtime_state_paths") is not True:
@@ -483,13 +496,26 @@ def validate_metadata() -> None:
         raise ValueError("contract must document portable verified-path handoff")
     if "exact-inode fd execution is not the portable macOS contract" not in runtime_launch.get("portable_handoff_mechanism", ""):
         raise ValueError("contract must not overclaim portable exact-inode execution")
+    if "external bootstrap lock" not in runtime_launch.get("lifecycle_lock_scope", "").lower():
+        raise ValueError("contract must document external lock acquisition order")
     if "fcntl.flock" not in runtime_launch.get("lifecycle_lock_mechanism", ""):
         raise ValueError("contract must document the stable flock mechanism")
-    if "dedicated lock directory" not in runtime_launch.get("lifecycle_lock_mechanism", ""):
+    if "fixed validated system temp root" not in runtime_launch.get("lifecycle_lock_mechanism", ""):
+        raise ValueError("contract must document fixed bootstrap root")
+    if "both lock files are never unlinked" not in runtime_launch.get("lifecycle_lock_mechanism", ""):
+        raise ValueError("contract must document persistent lifecycle lock files")
+    if "restored to 0700" not in runtime_launch.get("lifecycle_lock_mechanism", ""):
+        raise ValueError("contract must document internal lock directory restoration")
+    if "dedicated target-local lock directory" not in runtime_launch.get("lifecycle_lock_mechanism", ""):
         raise ValueError("contract must document the dedicated lock directory")
     if "same-UID" not in runtime_launch.get("same_uid_tamper_boundary", ""):
         raise ValueError("contract must document the same-UID tamper boundary")
     if manifest.get("runtime_launch") != {
+        "external_target_bound_lifecycle_lock": True,
+        "external_lock_persistent_inode": True,
+        "external_lock_fixed_system_bootstrap_root": True,
+        "internal_lock_persistent_inode": True,
+        "internal_lock_directory_protected_while_held": True,
         "holds_lifecycle_lock_through_child": True,
         "stable_fcntl_flock_lifecycle_lock": True,
         "write_protected_verified_path_handoff": True,
@@ -561,6 +587,113 @@ def write_stub_software(manager: Any, target: Path, binary_bytes: bytes | None =
     manager.atomic_write(manager.software_stamp_path(target), manager.canonical_json(stamp), target)
 
 
+def file_sha256_no_follow(path: Path, max_bytes: int) -> str:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(path, flags)
+    try:
+        digest = hashlib.sha256()
+        total = 0
+        while True:
+            chunk = os.read(fd, 65536)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise ValueError(f"snapshot file is too large: {path}")
+            digest.update(chunk)
+        return digest.hexdigest()
+    finally:
+        os.close(fd)
+
+
+def bootstrap_tree_snapshot(manager: Any, *, system_root: Path | None = None) -> tuple[Any, ...] | None:
+    root = (system_root or manager.fixed_system_temp_root()) / manager.EXTERNAL_LOCK_ROOT_NAME
+    try:
+        info = root.lstat()
+    except FileNotFoundError:
+        return None
+    if stat.S_ISLNK(info.st_mode):
+        return (("<root-symlink>",),)
+    if not stat.S_ISDIR(info.st_mode):
+        return (("<root-non-directory>",),)
+    entries: list[tuple[Any, ...]] = [
+        (
+            "<root>",
+            info.st_dev,
+            info.st_ino,
+            stat.S_IMODE(info.st_mode),
+            info.st_uid,
+            info.st_nlink,
+        )
+    ]
+    try:
+        children = sorted(root.iterdir(), key=lambda item: item.name)
+    except OSError as exc:
+        return (*entries, (f"<unreadable:{exc.errno}>",))
+    if len(children) > 256:
+        raise ValueError("bootstrap snapshot is unexpectedly large")
+    for child in children:
+        child_info = child.lstat()
+        child_entry: tuple[Any, ...]
+        if stat.S_ISREG(child_info.st_mode):
+            child_entry = (
+                child.name,
+                "file",
+                child_info.st_dev,
+                child_info.st_ino,
+                stat.S_IMODE(child_info.st_mode),
+                child_info.st_uid,
+                child_info.st_nlink,
+                child_info.st_size,
+                file_sha256_no_follow(child, max_bytes=manager.METADATA_MAX_BYTES),
+            )
+        elif stat.S_ISDIR(child_info.st_mode):
+            child_entry = (
+                child.name,
+                "directory",
+                child_info.st_dev,
+                child_info.st_ino,
+                stat.S_IMODE(child_info.st_mode),
+                child_info.st_uid,
+                child_info.st_nlink,
+            )
+        else:
+            child_entry = (
+                child.name,
+                "other",
+                child_info.st_dev,
+                child_info.st_ino,
+                stat.S_IMODE(child_info.st_mode),
+                child_info.st_uid,
+                child_info.st_nlink,
+            )
+        entries.append(child_entry)
+    return tuple(entries)
+
+
+def run_with_injected_bootstrap_root(manager: Any, callback: Any) -> None:
+    original_resolver = manager.fixed_system_temp_root
+    before = bootstrap_tree_snapshot(manager)
+    with tempfile.TemporaryDirectory(prefix=".tmp-kimicode-bootstrap-") as temp:
+        injected_root = Path(temp) / "system-root"
+        injected_root.mkdir(mode=0o777)
+        injected_root.chmod(0o1777)
+        if ROOT in injected_root.resolve().parents:
+            raise ValueError("injected bootstrap root must be outside the source tree")
+        if stat.S_IMODE(injected_root.lstat().st_mode) != 0o1777:
+            raise ValueError("injected bootstrap system root must be sticky 01777")
+        manager.fixed_system_temp_root = lambda: injected_root
+        try:
+            if manager.fixed_system_temp_root() != injected_root:
+                raise ValueError("bootstrap root monkeypatch was not installed")
+            callback()
+        finally:
+            manager.fixed_system_temp_root = original_resolver
+    after = bootstrap_tree_snapshot(manager)
+    if after != before:
+        raise ValueError("runtime regressions created artifacts in the real system bootstrap root")
+
+
 def validate_status_launch_allowed_regression(manager: Any) -> None:
     temp, target = make_isolated_target("status-")
     try:
@@ -621,15 +754,361 @@ def validate_corrupt_backup_regression(manager: Any) -> None:
         temp.cleanup()
 
 
+def validate_external_lock_binding_regression(manager: Any) -> None:
+    temp, target = make_isolated_target("external-lock-binding-")
+    try:
+        setup = manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP)
+        manager.write_setup(target, setup, manager.load_profile(manager.DEFAULT_PROFILE))
+        canonical_target = manager.lock_canonical_target(target)
+        lock_path = manager.bootstrap_lock_path(target, canonical_target)
+        internal_path = manager.lock_path(target)
+        if not internal_path.is_file():
+            raise ValueError("target lifecycle lock must be persistent after normal release")
+        internal_info = internal_path.lstat()
+
+        lock_path.write_bytes(b"")
+        lock_path.chmod(0o600)
+        manager.write_setup(target, setup, manager.load_profile("safe"), require_existing=True)
+        if not lock_path.is_file():
+            raise ValueError("external bootstrap lock must be persistent after normal release")
+        first_info = lock_path.lstat()
+        if not internal_path.is_file():
+            raise ValueError("target lifecycle lock disappeared after normal release")
+        if (internal_info.st_dev, internal_info.st_ino) != (internal_path.lstat().st_dev, internal_path.lstat().st_ino):
+            raise ValueError("target lifecycle lock inode changed across normal release")
+
+        lock_path.write_bytes(b"not json\n")
+        lock_path.chmod(0o600)
+        try:
+            manager.write_setup(target, setup, manager.load_profile(manager.DEFAULT_PROFILE), require_existing=True)
+        except manager.KimicodeSetupError as exc:
+            if "binding is malformed" not in str(exc):
+                raise ValueError(f"malformed external lock binding returned unstable error: {exc}") from exc
+        else:
+            raise ValueError("malformed external lock binding unexpectedly succeeded")
+
+        payload = manager.lock_payload(
+            "external-bootstrap",
+            str(target.parent / "other-target"),
+            lock_path,
+        )
+        lock_path.write_bytes(manager.canonical_json(payload))
+        lock_path.chmod(0o600)
+        try:
+            manager.write_setup(target, setup, manager.load_profile(manager.DEFAULT_PROFILE), require_existing=True)
+        except manager.KimicodeSetupError as exc:
+            if "different canonical target" not in str(exc):
+                raise ValueError(f"external lock binding returned unstable error: {exc}") from exc
+        else:
+            raise ValueError("external lock binding mismatch unexpectedly succeeded")
+
+        payload = manager.lock_payload("external-bootstrap", canonical_target, target / "wrong.lock")
+        lock_path.write_bytes(manager.canonical_json(payload))
+        lock_path.chmod(0o600)
+        try:
+            manager.write_setup(target, setup, manager.load_profile(manager.DEFAULT_PROFILE), require_existing=True)
+        except manager.KimicodeSetupError as exc:
+            if "different lock path" not in str(exc):
+                raise ValueError(f"external lock path binding returned unstable error: {exc}") from exc
+        else:
+            raise ValueError("external lock path binding mismatch unexpectedly succeeded")
+
+        payload = manager.lock_payload("external-bootstrap", canonical_target, lock_path)
+        lock_path.write_bytes(manager.canonical_json(payload))
+        lock_path.chmod(0o600)
+        manager.write_setup(target, setup, manager.load_profile("safe"), require_existing=True)
+        second_info = lock_path.lstat()
+        if (first_info.st_dev, first_info.st_ino) != (second_info.st_dev, second_info.st_ino):
+            raise ValueError("external bootstrap lock inode changed across normal release")
+    finally:
+        temp.cleanup()
+
+
+def fork_wait(pid: int, label: str, timeout_seconds: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    status_value: int | None = None
+    while time.monotonic() < deadline:
+        waited, status_value = os.waitpid(pid, os.WNOHANG)
+        if waited == pid:
+            break
+        if waited != 0:
+            raise ValueError(f"{label} waitpid returned the wrong child")
+        time.sleep(0.05)
+    else:
+        with contextlib.suppress(ProcessLookupError):
+            os.kill(pid, 9)
+        with contextlib.suppress(ChildProcessError):
+            os.waitpid(pid, 0)
+        raise ValueError(f"{label} did not exit within {timeout_seconds:.1f}s")
+    if status_value is None:
+        raise ValueError(f"{label} waitpid did not return a status")
+    if os.WIFSIGNALED(status_value):
+        raise ValueError(f"{label} died from signal {os.WTERMSIG(status_value)}")
+    if not os.WIFEXITED(status_value) or os.WEXITSTATUS(status_value) != 0:
+        raise ValueError(f"{label} exited with status {status_value}")
+
+
+def wait_for_file(path: Path, label: str, timeout_seconds: float = 5.0) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if path.exists():
+            return
+        time.sleep(0.05)
+    raise ValueError(f"timed out waiting for {label}")
+
+
+def validate_external_lock_persistent_inode_handover_regression(manager: Any) -> None:
+    temp, target = make_isolated_target("external-lock-handover-")
+    children: list[tuple[int, str]] = []
+    parent_fd: int | None = None
+    lock_path: Path | None = None
+    b_release: Path | None = None
+    try:
+        setup = manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP)
+        manager.write_setup(target, setup, manager.load_profile(manager.DEFAULT_PROFILE))
+        canonical_target = manager.lock_canonical_target(target)
+        lock_path = manager.bootstrap_lock_path(target, canonical_target)
+        parent_fd = manager.acquire_lock_file(
+            lock_path,
+            "external bootstrap lifecycle lock",
+            canonical_target=canonical_target,
+            kind="external-bootstrap",
+        )
+        initial_info = os.fstat(parent_fd)
+        control = target.parent / "handover-control"
+        control.mkdir(mode=0o700)
+        control.chmod(0o700)
+        b_acquired = control / "b-acquired"
+        b_release = control / "b-release"
+        c_acquired = control / "c-acquired"
+        c_error = control / "c-error"
+        b_error = control / "b-error"
+
+        def fork_lock_holder(name: str, acquired: Path, release: Path | None, wait_for: Path | None, error_path: Path) -> int:
+            pid = os.fork()
+            if pid != 0:
+                children.append((pid, name))
+                return pid
+            try:
+                if parent_fd is not None:
+                    with contextlib.suppress(OSError):
+                        os.close(parent_fd)
+                if wait_for is not None:
+                    wait_for_file(wait_for, f"{name} predecessor")
+                deadline = time.monotonic() + 5.0
+                child_fd: int | None = None
+                while time.monotonic() < deadline:
+                    try:
+                        child_fd = manager.acquire_lock_file(
+                            lock_path,
+                            "external bootstrap lifecycle lock",
+                            canonical_target=canonical_target,
+                            kind="external-bootstrap",
+                        )
+                        break
+                    except manager.KimicodeSetupError as exc:
+                        if "target is locked" not in str(exc):
+                            raise
+                        time.sleep(0.05)
+                if child_fd is None:
+                    raise ValueError(f"{name} did not acquire persistent external lock")
+                info = os.fstat(child_fd)
+                acquired.write_text(f"{info.st_dev}:{info.st_ino}\n", encoding="utf-8")
+                if release is not None:
+                    wait_for_file(release, f"{name} release")
+                manager.release_lock_file(child_fd, lock_path, remove_file=False)
+                os._exit(0)
+            except BaseException as exc:
+                with contextlib.suppress(BaseException):
+                    error_path.write_text(str(exc), encoding="utf-8")
+                os._exit(1)
+
+        fork_lock_holder("handover-b", b_acquired, b_release, None, b_error)
+        fork_lock_holder("handover-c", c_acquired, None, b_acquired, c_error)
+        time.sleep(0.2)
+        manager.release_lock_file(parent_fd, lock_path, remove_file=False)
+        parent_fd = None
+        wait_for_file(b_acquired, "handover B acquire")
+        if not lock_path.is_file():
+            raise ValueError("external bootstrap lock disappeared during B handover")
+        if b_acquired.read_text(encoding="utf-8") != f"{initial_info.st_dev}:{initial_info.st_ino}\n":
+            raise ValueError("handover B acquired a different external lock inode")
+        b_release.write_text("release\n", encoding="utf-8")
+        wait_for_file(c_acquired, "handover C acquire")
+        if c_acquired.read_text(encoding="utf-8") != f"{initial_info.st_dev}:{initial_info.st_ino}\n":
+            raise ValueError("handover C acquired a different external lock inode")
+        for pid, label in children:
+            fork_wait(pid, label)
+        children.clear()
+        child_errors = "".join(
+            path.read_text(encoding="utf-8")
+            for path in (b_error, c_error)
+            if path.exists()
+        )
+        if child_errors:
+            raise ValueError(f"external lock handover child error: {child_errors}")
+        final_info = lock_path.lstat()
+        if (final_info.st_dev, final_info.st_ino) != (initial_info.st_dev, initial_info.st_ino):
+            raise ValueError("external bootstrap lock inode changed after 3-process handover")
+    finally:
+        if parent_fd is not None and lock_path is not None:
+            manager.release_lock_file(parent_fd, lock_path, remove_file=False)
+        if b_release is not None:
+            with contextlib.suppress(BaseException):
+                b_release.write_text("release\n", encoding="utf-8")
+        for pid, label in children:
+            with contextlib.suppress(ChildProcessError):
+                fork_wait(pid, label)
+        temp.cleanup()
+
+
+def validate_internal_lock_persistent_inode_handover_regression(manager: Any) -> None:
+    temp, target = make_isolated_target("internal-lock-handover-")
+    children: list[tuple[int, str]] = []
+    parent_fd: int | None = None
+    lock_path: Path | None = None
+    protected_parent: Any | None = None
+    b_release: Path | None = None
+    try:
+        setup = manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP)
+        manager.write_setup(target, setup, manager.load_profile(manager.DEFAULT_PROFILE))
+        canonical_target = manager.lock_canonical_target(target)
+        lock_path = manager.lock_path(target)
+        parent_fd = manager.acquire_lock_file(
+            lock_path,
+            "target lifecycle lock",
+            canonical_target=canonical_target,
+            kind="target-internal",
+        )
+        initial_info = os.fstat(parent_fd)
+        protected_parent = manager.protect_internal_lock_parent(lock_path.parent)
+        if (lock_path.parent.stat().st_mode & 0o777) != 0o500:
+            raise ValueError("target lifecycle lock parent was not protected while held")
+        control = target.parent / "internal-handover-control"
+        control.mkdir(mode=0o700)
+        control.chmod(0o700)
+        b_acquired = control / "b-acquired"
+        b_release = control / "b-release"
+        c_acquired = control / "c-acquired"
+        b_error = control / "b-error"
+        c_error = control / "c-error"
+
+        def fork_internal_lock_holder(name: str, acquired: Path, release: Path | None, wait_for: Path | None, error_path: Path) -> None:
+            pid = os.fork()
+            if pid != 0:
+                children.append((pid, name))
+                return
+            try:
+                if parent_fd is not None:
+                    with contextlib.suppress(OSError):
+                        os.close(parent_fd)
+                if protected_parent is not None:
+                    with contextlib.suppress(OSError):
+                        os.close(protected_parent.fd)
+                if wait_for is not None:
+                    wait_for_file(wait_for, f"{name} predecessor")
+                deadline = time.monotonic() + 5.0
+                child_fd: int | None = None
+                while time.monotonic() < deadline:
+                    try:
+                        child_fd = manager.acquire_lock_file(
+                            lock_path,
+                            "target lifecycle lock",
+                            canonical_target=canonical_target,
+                            kind="target-internal",
+                        )
+                        break
+                    except manager.KimicodeSetupError as exc:
+                        if "target is locked" not in str(exc):
+                            raise
+                        time.sleep(0.05)
+                if child_fd is None:
+                    raise ValueError(f"{name} did not acquire persistent target lock")
+                info = os.fstat(child_fd)
+                acquired.write_text(f"{info.st_dev}:{info.st_ino}\n", encoding="utf-8")
+                if release is not None:
+                    wait_for_file(release, f"{name} release")
+                manager.release_lock_file(child_fd, lock_path, remove_file=False)
+                os._exit(0)
+            except BaseException as exc:
+                with contextlib.suppress(BaseException):
+                    error_path.write_text(str(exc), encoding="utf-8")
+                os._exit(1)
+
+        fork_internal_lock_holder("internal-handover-b", b_acquired, b_release, None, b_error)
+        fork_internal_lock_holder("internal-handover-c", c_acquired, None, b_acquired, c_error)
+        time.sleep(0.2)
+        manager.release_lock_file(parent_fd, lock_path, remove_file=False)
+        parent_fd = None
+        wait_for_file(b_acquired, "internal handover B acquire")
+        if b_acquired.read_text(encoding="utf-8") != f"{initial_info.st_dev}:{initial_info.st_ino}\n":
+            raise ValueError("handover B acquired a different target lifecycle lock inode")
+        b_release.write_text("release\n", encoding="utf-8")
+        wait_for_file(c_acquired, "internal handover C acquire")
+        if c_acquired.read_text(encoding="utf-8") != f"{initial_info.st_dev}:{initial_info.st_ino}\n":
+            raise ValueError("handover C acquired a different target lifecycle lock inode")
+        for pid, label in children:
+            fork_wait(pid, label)
+        children.clear()
+        child_errors = "".join(
+            path.read_text(encoding="utf-8")
+            for path in (b_error, c_error)
+            if path.exists()
+        )
+        if child_errors:
+            raise ValueError(f"target lifecycle lock handover child error: {child_errors}")
+        final_info = lock_path.lstat()
+        if (final_info.st_dev, final_info.st_ino) != (initial_info.st_dev, initial_info.st_ino):
+            raise ValueError("target lifecycle lock inode changed after 3-process handover")
+    finally:
+        if parent_fd is not None and lock_path is not None:
+            manager.release_lock_file(parent_fd, lock_path, remove_file=False)
+        if b_release is not None:
+            with contextlib.suppress(BaseException):
+                b_release.write_text("release\n", encoding="utf-8")
+        for pid, label in children:
+            with contextlib.suppress(ChildProcessError):
+                fork_wait(pid, label)
+        if protected_parent is not None:
+            protected_parent.restore()
+        temp.cleanup()
+
+
 def validate_runtime_regressions() -> None:
     manager = load_manager()
     manager_text = (ROOT / "cli-tools" / "nddev_kimicode.py").read_text(encoding="utf-8")
-    for forbidden in ("NDDEV_KIMICODE_TEST", "ENABLE_TEST_OVERRIDES"):
+    for forbidden in (
+        "NDDEV_KIMICODE_TEST",
+        "ENABLE_TEST_OVERRIDES",
+        "NDDEV_KIMICODE_BOOTSTRAP_ROOT",
+        "NDDEV_KIMICODE_LOCK_ROOT",
+        "KIMI_CODE_BOOTSTRAP_ROOT",
+    ):
         if forbidden in manager_text:
             raise ValueError("manager must not expose public test environment switches")
+    fixed_start = manager_text.index("def fixed_system_temp_root")
+    fixed_end = manager_text.index("def ensure_external_lock_root")
+    fixed_source = manager_text[fixed_start:fixed_end]
+    for required in ('Path("/private/tmp")', 'Path("/tmp")', "stat.S_ISVTX"):
+        if required not in fixed_source:
+            raise ValueError(f"manager system bootstrap root resolver is missing {required}")
+    for forbidden in ("tempfile.gettempdir", "os.environ"):
+        if forbidden in fixed_source:
+            raise ValueError("manager bootstrap root must not derive from ambient runtime state")
     for required in (
         "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)",
-        "path.chmod(0o500)",
+        "kind=\"external-bootstrap\"",
+        "kind=\"target-internal\"",
+        "EXTERNAL_LOCK_NAMESPACE",
+        "ensure_external_lock_root()",
+        "protect_internal_lock_parent(lock_parent)",
+        "validate_lock_binding",
+        "binding is malformed",
+        "current.st_dev != info.st_dev or current.st_ino != info.st_ino",
+        "bootstrap_lock_path(target, canonical_target)",
+        "release_lock_file(releasing_bootstrap_fd, bootstrap_path, remove_file=False)",
+        "release_lock_file(releasing_internal_fd, internal_path, remove_file=False)",
+        "os.fchmod(fd, 0o500)",
         "lock_path(target).parent",
         "with protected_launch_path(invocation.target):",
         "expected_digest=invocation.expected_entrypoint_digest",
@@ -644,13 +1123,21 @@ def validate_runtime_regressions() -> None:
     protected_source = manager_text[protected_start:protected_end]
     if "        target,\n" in protected_source:
         raise ValueError("launch protection must not chmod the managed target root")
-    validate_status_launch_allowed_regression(manager)
-    validate_corrupt_backup_regression(manager)
-    validate_launch_lock_concurrency_regression(manager)
-    validate_launch_pre_handoff_swap_regression(manager)
-    validate_launch_protected_verified_path_regression(manager)
-    validate_launch_executable_error_regression(manager)
-    validate_launch_boundary_regression(manager)
+
+    def run_isolated_runtime_regressions() -> None:
+        validate_status_launch_allowed_regression(manager)
+        validate_corrupt_backup_regression(manager)
+        validate_external_lock_binding_regression(manager)
+        validate_external_lock_persistent_inode_handover_regression(manager)
+        validate_internal_lock_persistent_inode_handover_regression(manager)
+        validate_launch_lock_concurrency_regression(manager)
+        validate_launch_external_lock_survives_internal_parent_rename_regression(manager)
+        validate_launch_pre_handoff_swap_regression(manager)
+        validate_launch_protected_verified_path_regression(manager)
+        validate_launch_executable_error_regression(manager)
+        validate_launch_boundary_regression(manager)
+
+    run_with_injected_bootstrap_root(manager, run_isolated_runtime_regressions)
 
 
 def validate_launch_lock_concurrency_regression(manager: Any) -> None:
@@ -746,10 +1233,107 @@ def validate_launch_lock_concurrency_regression(manager: Any) -> None:
             exit_code = manager.launch(target, ["--version"])
             if exit_code != 23:
                 raise ValueError("launch did not forward child exit code under lifecycle lock")
-            if lock.exists():
-                raise ValueError("launch lifecycle lock was not cleaned up after child completion")
+            if not lock.is_file():
+                raise ValueError("launch lifecycle lock was not persistent after child completion")
+            if (lock.stat().st_mode & 0o777) != 0o600:
+                raise ValueError("launch lifecycle lock mode changed after child completion")
+            if (lock.parent.stat().st_mode & 0o777) != 0o700:
+                raise ValueError("launch lifecycle lock parent was not restored after child completion")
         finally:
             manager.subprocess.run = original_run
+            manager.KIMI_BINARY_PLATFORMS = original_platforms
+    finally:
+        temp.cleanup()
+
+
+def validate_launch_external_lock_survives_internal_parent_rename_regression(manager: Any) -> None:
+    temp, target = make_isolated_target("launch-external-lock-")
+    result: dict[str, Any] = {}
+    thread: threading.Thread | None = None
+    release: Path | None = None
+    try:
+        manager.write_setup(
+            target,
+            manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP),
+            manager.load_profile(manager.DEFAULT_PROFILE),
+        )
+        original_platforms = manager.KIMI_BINARY_PLATFORMS
+        try:
+            stub = (
+                b"#!/bin/sh\n"
+                b"if mv \"$KIMI_CODE_HOME/.nddev-kimicode-lock\" \"$KIMI_CODE_HOME/.nddev-kimicode-lock.renamed\" 2>/dev/null; then\n"
+                b"  printf 'renamed\\n' > \"$1\"\n"
+                b"else\n"
+                b"  printf 'rename-failed\\n' > \"$1\"\n"
+                b"fi\n"
+                b"while [ ! -f \"$2\" ]; do sleep 0.05; done\n"
+                b"exit 37\n"
+            )
+            write_stub_software(manager, target, stub)
+            runtime_tmp = target / ".nddev-kimicode-runtime" / "tmp"
+            marker = runtime_tmp / "internal-lock-renamed"
+            release = runtime_tmp / "release-child"
+
+            def run_launch() -> None:
+                try:
+                    result["exit_code"] = manager.launch(target, [str(marker), str(release)])
+                except BaseException as exc:
+                    result["error"] = exc
+
+            thread = threading.Thread(target=run_launch)
+            thread.start()
+            wait_for_file(marker, "internal lock parent rename")
+            if marker.read_text(encoding="utf-8") != "renamed\n":
+                raise ValueError("launch child did not rename the internal lock parent")
+            if (target.stat().st_mode & 0o777) != 0o700:
+                raise ValueError("launch must keep managed target root writable during internal lock parent rename")
+
+            mutation_cases = (
+                (
+                    "switch-profile",
+                    lambda: manager.write_setup(
+                        target,
+                        manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP),
+                        manager.load_profile("safe"),
+                        require_existing=True,
+                    ),
+                ),
+                ("remove", lambda: manager.remove_setup(target)),
+                (
+                    "install",
+                    lambda: manager.write_setup(
+                        target,
+                        manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP),
+                        manager.load_profile(manager.DEFAULT_PROFILE),
+                        require_existing=False,
+                    ),
+                ),
+            )
+            for label, operation in mutation_cases:
+                try:
+                    operation()
+                except manager.KimicodeSetupError as exc:
+                    if "target is locked" not in str(exc):
+                        raise ValueError(f"{label} returned unstable error under external lock: {exc}") from exc
+                else:
+                    raise ValueError(f"{label} succeeded after child renamed the internal lock parent")
+            release.write_text("release\n", encoding="utf-8")
+            thread.join(timeout=5)
+            if thread.is_alive():
+                raise ValueError("launch child did not exit after release marker")
+            if "error" in result:
+                raise ValueError(f"launch failed after internal lock parent rename: {result['error']}")
+            if result.get("exit_code") != 37:
+                raise ValueError("launch did not forward child exit code after internal lock parent rename")
+            renamed_lock_parent = target / ".nddev-kimicode-lock.renamed"
+            if not renamed_lock_parent.is_dir() or (renamed_lock_parent.stat().st_mode & 0o777) != 0o700:
+                raise ValueError("renamed internal lock parent was not restored for cleanup")
+        finally:
+            if release is not None:
+                with contextlib.suppress(BaseException):
+                    release.write_text("release\n", encoding="utf-8")
+            if thread is not None and thread.is_alive():
+                thread.join(timeout=5)
             manager.KIMI_BINARY_PLATFORMS = original_platforms
     finally:
         temp.cleanup()
@@ -888,8 +1472,10 @@ def validate_launch_protected_verified_path_regression(manager: Any) -> None:
                 raise ValueError("protected launch did not preserve the verified executable path")
             if (target.stat().st_mode & 0o777) != 0o700:
                 raise ValueError("protected launch did not restore target mode")
-            if manager.lock_path(target).exists():
-                raise ValueError("protected launch did not clean up target lifecycle lock")
+            if not manager.lock_path(target).is_file():
+                raise ValueError("protected launch did not preserve target lifecycle lock")
+            if (manager.lock_path(target).parent.stat().st_mode & 0o777) != 0o700:
+                raise ValueError("protected launch did not restore target lifecycle lock parent")
         finally:
             manager.KIMI_BINARY_PLATFORMS = original_platforms
     finally:

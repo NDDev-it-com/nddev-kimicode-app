@@ -58,12 +58,16 @@ It executes `/absolute/target/bin/kimi` with target-local `HOME`, `TMPDIR`, and
 constructs a fresh child environment without live provider credentials or
 `KIMI_MODEL_*` variables.
 
-The target lifecycle lock is a target-local regular file under a dedicated lock
-directory, held with `fcntl.flock` on an open fd from launch preflight through
-child process completion and lock cleanup, so install, update, migrate, restore,
-remove, or profile-switch mutations fail while the child is running.
-Immediately before the subprocess handoff, the manager makes only the dedicated
-lock directory, launcher `bin/` directory, and immutable software artifact
+The lifecycle boundary uses two `fcntl.flock` locks. The manager first opens a
+persistent external bootstrap lock under the fixed system temp root, keyed to
+the canonical absolute target, then opens the persistent target-local internal
+lock under a dedicated lock directory. The internal lock directory is protected
+at mode `0500` while held and restored to `0700` after. Both locks are held from
+launch preflight through child process completion and cleanup, and internal is
+released before external, so install, update, migrate, restore, remove, or
+profile-switch mutations fail while the child is running even if the child
+renames target-local lock paths. Immediately before the subprocess handoff, the
+manager makes only the launcher `bin/` directory and immutable software artifact
 directories read/execute-only, reopens the target-owned executable without
 following symlinks, and checks regular file type, current-user ownership, mode,
 stable inode, and the pinned official-binary digest. Runtime `HOME` and
@@ -74,9 +78,10 @@ CLI.
 
 The portable launch contract is a write-protected verified-path handoff. It does
 not claim exact-inode fd execution on macOS, and it is not an OS sandbox against
-deliberate same-UID `chmod` or tampering outside the manager. Ordinary lock-file
-unlink and executable `os.replace` swaps are denied while the protected launch
-path is held.
+deliberate same-UID `chmod` or tampering of the external bootstrap root outside
+the manager. Ordinary target-local lock-file unlink, internal lock-parent rename
+bypass, and executable `os.replace` swaps are denied while the protected launch
+path and external bootstrap lock are held.
 
 Child arguments that override managed permission mode, plan mode, prompt mode,
 model selection, Skill directories, agents, sessions, extra workspace scope, or

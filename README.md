@@ -48,18 +48,22 @@ behavior is owned by `cli-tools/nddev_kimicode.py`.
 `update-cli`, and `migrate-cli` are the only commands that acquire target-owned
 Kimi software.
 
-`launch` holds a target-local `fcntl.flock` lifecycle lock until the child
-process exits. Immediately before spawning, it temporarily makes only the
-dedicated lock directory, launcher `bin/` directory, and immutable software
-artifact directories read/execute-only, reopens `bin/kimi` without following
-symlinks, checks regular-file status, current-user ownership, private executable
-mode, stable inode, and pinned official-binary digest, then launches the
-verified path while the protection and lock are still held. The managed target,
-runtime `HOME`, `TMPDIR`, KIMI_CODE_HOME, config, session, plugin, MCP, and log
+`launch` holds dual `fcntl.flock` lifecycle locks until the child process exits:
+a persistent external bootstrap lock keyed to the canonical absolute target
+under the fixed system temp root, then a persistent target-local internal lock.
+The internal lock directory is held at mode `0500` and restored to `0700`; the
+internal lock is released first and the external lock last. Immediately before
+spawning, the manager temporarily makes only the launcher `bin/` directory and
+immutable software artifact directories read/execute-only, reopens `bin/kimi`
+without following symlinks, checks regular-file status, current-user ownership,
+private executable mode, stable inode, and pinned official-binary digest, then
+launches the verified path while the protection and locks are still held. The
+managed target, runtime
+`HOME`, `TMPDIR`, KIMI_CODE_HOME, config, session, plugin, MCP, and log
 locations remain writable by the launched CLI. This is a portable
 write-protected verified-path handoff, not exact-inode fd execution. Deliberate
-same-UID `chmod` or tampering outside the manager is outside the enforceable
-isolation boundary.
+same-UID `chmod` or tampering of the external bootstrap root outside the manager
+is outside the enforceable isolation boundary.
 
 ## Builder Toolkit
 

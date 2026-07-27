@@ -42,6 +42,9 @@ STAMP_NAME = "NDDEV-KIMICODE-SETUP.json"
 BACKUP_NAME = "NDDEV-KIMICODE-BACKUP.json"
 LOCK_DIR_NAME = ".nddev-kimicode-lock"
 LOCK_NAME = "lifecycle.lock"
+EXTERNAL_LOCK_ROOT_NAME = f"{PRODUCT_NAME}.{os.getuid() if hasattr(os, 'getuid') else 'nouid'}.locks"
+EXTERNAL_LOCK_NAMESPACE = f"{PRODUCT_NAME}:external-bootstrap:v1"
+EXTERNAL_LOCK_SUFFIX = "external.lock"
 CURRENT_SETUP_SCHEMA = 2
 LEGACY_SETUP_SCHEMA = 1
 MANAGED_BEGIN = "# BEGIN NDDEV-KIMICODE MANAGED"
@@ -206,6 +209,19 @@ class LaunchInvocation:
     child_env: dict[str, str]
     expected_entrypoint_digest: str
     stamp_entrypoint_digest: str
+
+
+@dataclass
+class ProtectedDirectory:
+    path: Path
+    fd: int
+    original_mode: int
+
+    def restore(self) -> None:
+        try:
+            os.fchmod(self.fd, self.original_mode)
+        finally:
+            os.close(self.fd)
 
 
 def fail(message: str) -> NoReturn:
@@ -387,8 +403,61 @@ def lock_path(target: Path) -> Path:
     return lock_parent_path(target) / LOCK_NAME
 
 
-def bootstrap_lock_path(target: Path) -> Path:
-    return target.parent / f".{target.name}.nddev-kimicode.bootstrap.lock"
+def lock_canonical_target(target: Path) -> str:
+    reject_symlink_ancestors(target)
+    parent = target.parent
+    reject_symlink_ancestors(parent)
+    require_owner_private_directory(parent, "target parent")
+    canonical_parent = parent.resolve(strict=True)
+    reject_symlink_ancestors(canonical_parent)
+    return str(canonical_parent / target.name)
+
+
+def fixed_system_temp_root() -> Path:
+    system = platform.system().lower()
+    if system == "darwin":
+        root = Path("/private/tmp")
+    elif system == "linux":
+        root = Path("/tmp")
+    else:
+        fail("external lifecycle lock is unsupported on this platform")
+    resolved = root.resolve(strict=True)
+    info = stat_existing(resolved, "system bootstrap root")
+    if info is None:
+        fail("system bootstrap root is missing")
+    if not stat.S_ISDIR(info.st_mode):
+        fail("system bootstrap root must be a real directory")
+    if not info.st_mode & stat.S_ISVTX:
+        fail("system bootstrap root must be sticky")
+    return resolved
+
+
+def ensure_external_lock_root() -> Path:
+    root = fixed_system_temp_root() / EXTERNAL_LOCK_ROOT_NAME
+    info = stat_existing(root, "external lifecycle lock root")
+    if info is None:
+        try:
+            root.mkdir(mode=OWNER_DIRECTORY_MODE)
+        except FileExistsError:
+            pass
+        else:
+            root.chmod(OWNER_DIRECTORY_MODE)
+        info = stat_existing(root, "external lifecycle lock root")
+    if info is None:
+        fail("external lifecycle lock root is missing")
+    if not stat.S_ISDIR(info.st_mode):
+        fail("external lifecycle lock root must be a real directory")
+    if not is_current_owner(info):
+        fail("external lifecycle lock root must be owned by the current user")
+    if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
+        fail("external lifecycle lock root mode must be 0700")
+    return root
+
+
+def bootstrap_lock_path(target: Path, canonical_target: str | None = None) -> Path:
+    canonical = canonical_target if canonical_target is not None else lock_canonical_target(target)
+    digest = sha256_bytes(f"{EXTERNAL_LOCK_NAMESPACE}\0{canonical}".encode("utf-8"))
+    return ensure_external_lock_root() / f"{digest}.{EXTERNAL_LOCK_SUFFIX}"
 
 
 def ensure_lock_parent(target: Path) -> Path:
@@ -408,36 +477,114 @@ def ensure_lock_parent(target: Path) -> Path:
     return path
 
 
+def validate_lock_info(info: os.stat_result, label: str) -> None:
+    if not stat.S_ISREG(info.st_mode):
+        fail(f"{label} must be a regular file")
+    if not is_current_owner(info):
+        fail(f"{label} must be owned by the current user")
+    if info.st_nlink != 1:
+        fail(f"{label} must not be a hardlink")
+    if stat.S_IMODE(info.st_mode) != OWNER_FILE_MODE:
+        fail(f"{label} mode must be 0600")
+
+
 def open_lock_file(path: Path, label: str) -> int:
     flags = os.O_RDWR
     if not hasattr(os, "O_NOFOLLOW"):
         fail("lifecycle lock requires O_NOFOLLOW support")
     flags |= os.O_NOFOLLOW
+    expected = stat_existing(path, label)
+    if expected is not None:
+        validate_lock_info(expected, label)
     try:
         fd = os.open(path, flags, OWNER_FILE_MODE)
     except FileNotFoundError:
         try:
             fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
+        except FileExistsError:
+            try:
+                fd = os.open(path, flags, OWNER_FILE_MODE)
+            except OSError as exc:
+                fail(f"{label} could not be opened safely: {exc}")
         except OSError as exc:
             fail(f"{label} could not be opened safely: {exc}")
     except OSError as exc:
         fail(f"{label} could not be opened safely: {exc}")
     try:
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode):
-            fail(f"{label} must be a regular file")
-        if not is_current_owner(info):
-            fail(f"{label} must be owned by the current user")
-        if info.st_nlink != 1:
-            fail(f"{label} must not be a hardlink")
         os.fchmod(fd, OWNER_FILE_MODE)
+        info = os.fstat(fd)
+        validate_lock_info(info, label)
+        current = stat_existing(path, label)
+        if current is None:
+            fail(f"{label} disappeared while opening")
+        validate_lock_info(current, label)
+        if current.st_dev != info.st_dev or current.st_ino != info.st_ino:
+            fail(f"{label} changed while opening")
     except BaseException:
         os.close(fd)
         raise
     return fd
 
 
-def acquire_lock_file(path: Path, label: str) -> int:
+def verify_lock_fd_path(fd: int, path: Path, label: str) -> os.stat_result:
+    info = os.fstat(fd)
+    validate_lock_info(info, label)
+    current = stat_existing(path, label)
+    if current is None:
+        fail(f"{label} disappeared")
+    validate_lock_info(current, label)
+    if current.st_dev != info.st_dev or current.st_ino != info.st_ino:
+        fail(f"{label} changed")
+    return info
+
+
+def lock_payload(kind: str, canonical_target: str, path: Path) -> dict[str, Any]:
+    return {
+        "schema_version": 3,
+        "product_name": PRODUCT_NAME,
+        "kind": kind,
+        "canonical_target": canonical_target,
+        "path": str(path),
+        "pid": os.getpid(),
+    }
+
+
+def read_lock_payload(fd: int, label: str) -> dict[str, Any] | None:
+    os.lseek(fd, 0, os.SEEK_SET)
+    data = os.read(fd, METADATA_MAX_BYTES + 1)
+    if len(data) > METADATA_MAX_BYTES:
+        fail(f"{label} metadata is too large")
+    if not data.strip():
+        return None
+    try:
+        value = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        fail(f"{label} binding is malformed")
+    if not isinstance(value, dict):
+        fail(f"{label} binding is malformed")
+    return value
+
+
+def validate_lock_binding(
+    payload: dict[str, Any] | None,
+    *,
+    kind: str,
+    canonical_target: str,
+    path: Path,
+    label: str,
+) -> None:
+    if payload is None:
+        return
+    if payload.get("product_name") != PRODUCT_NAME or payload.get("kind") != kind:
+        fail(f"{label} is bound to another lifecycle owner")
+    if payload.get("canonical_target") != canonical_target:
+        fail(f"{label} is bound to a different canonical target")
+    if payload.get("path") != str(path):
+        fail(f"{label} is bound to a different lock path")
+
+
+def acquire_lock_file(path: Path, label: str, *, canonical_target: str, kind: str) -> int:
     fd = open_lock_file(path, label)
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -447,7 +594,15 @@ def acquire_lock_file(path: Path, label: str) -> int:
             fail(f"target is locked: {path}")
         fail(f"{label} could not be locked: {exc}")
     try:
-        payload = canonical_json({"schema_version": 2, "pid": os.getpid(), "target": str(path.parent)})
+        verify_lock_fd_path(fd, path, label)
+        validate_lock_binding(
+            read_lock_payload(fd, label),
+            kind=kind,
+            canonical_target=canonical_target,
+            path=path,
+            label=label,
+        )
+        payload = canonical_json(lock_payload(kind, canonical_target, path))
         os.ftruncate(fd, 0)
         os.lseek(fd, 0, os.SEEK_SET)
         os.write(fd, payload)
@@ -460,18 +615,25 @@ def acquire_lock_file(path: Path, label: str) -> int:
     return fd
 
 
-def release_lock_file(fd: int, path: Path, *, remove_empty_parent: bool = False) -> None:
+def release_lock_file(fd: int, path: Path, *, remove_file: bool = True, remove_empty_parent: bool = False) -> None:
     try:
         with contextlib.suppress(OSError):
             fcntl.flock(fd, fcntl.LOCK_UN)
         os.close(fd)
     finally:
-        with contextlib.suppress(OSError):
-            if path_exists_no_follow(path) and not path.is_symlink():
-                path.unlink()
+        if remove_file:
+            with contextlib.suppress(OSError):
+                if path_exists_no_follow(path) and not path.is_symlink():
+                    path.unlink()
         if remove_empty_parent:
             with contextlib.suppress(OSError):
                 path.parent.rmdir()
+
+
+def protect_internal_lock_parent(path: Path) -> ProtectedDirectory:
+    protected = open_protected_directory(path, "target lifecycle lock directory")
+    protected.original_mode = OWNER_DIRECTORY_MODE
+    return protected
 
 
 @contextlib.contextmanager
@@ -485,11 +647,19 @@ def target_lock(target: Path, *, create_parent: bool = False):
     except BaseException:
         transaction.cleanup()
         raise
-    bootstrap_path = bootstrap_lock_path(target)
-    bootstrap_fd = acquire_lock_file(bootstrap_path, "bootstrap lifecycle lock")
+    canonical_target = lock_canonical_target(target)
+    bootstrap_path = bootstrap_lock_path(target, canonical_target)
+    bootstrap_fd: int | None = None
     internal_path: Path | None = None
     internal_fd: int | None = None
+    internal_parent: ProtectedDirectory | None = None
     try:
+        bootstrap_fd = acquire_lock_file(
+            bootstrap_path,
+            "external bootstrap lifecycle lock",
+            canonical_target=canonical_target,
+            kind="external-bootstrap",
+        )
         target_info = stat_existing(target, "target")
         if target_info is None and create_parent:
             target.mkdir(mode=OWNER_DIRECTORY_MODE)
@@ -503,9 +673,13 @@ def target_lock(target: Path, *, create_parent: bool = False):
                 fail("target must be private and owned by the current user")
             lock_parent = ensure_lock_parent(target)
             internal_path = lock_path(target)
-            internal_fd = acquire_lock_file(internal_path, "target lifecycle lock")
-            if stat.S_IMODE(lock_parent.lstat().st_mode) == 0o500:
-                lock_parent.chmod(OWNER_DIRECTORY_MODE)
+            internal_fd = acquire_lock_file(
+                internal_path,
+                "target lifecycle lock",
+                canonical_target=canonical_target,
+                kind="target-internal",
+            )
+            internal_parent = protect_internal_lock_parent(lock_parent)
         failed = False
         try:
             yield transaction
@@ -513,14 +687,37 @@ def target_lock(target: Path, *, create_parent: bool = False):
             failed = True
             raise
         finally:
-            if internal_fd is not None and internal_path is not None:
-                release_lock_file(internal_fd, internal_path, remove_empty_parent=True)
-            release_lock_file(bootstrap_fd, bootstrap_path)
+            try:
+                if internal_fd is not None and internal_path is not None:
+                    releasing_internal_fd = internal_fd
+                    internal_fd = None
+                    release_lock_file(releasing_internal_fd, internal_path, remove_file=False)
+            finally:
+                try:
+                    if internal_parent is not None:
+                        restoring_parent = internal_parent
+                        internal_parent = None
+                        restoring_parent.restore()
+                finally:
+                    if bootstrap_fd is not None:
+                        releasing_bootstrap_fd = bootstrap_fd
+                        bootstrap_fd = None
+                        release_lock_file(releasing_bootstrap_fd, bootstrap_path, remove_file=False)
             if failed:
                 transaction.cleanup()
     except BaseException:
-        if internal_fd is None:
-            release_lock_file(bootstrap_fd, bootstrap_path)
+        if internal_fd is not None and internal_path is not None:
+            releasing_internal_fd = internal_fd
+            internal_fd = None
+            release_lock_file(releasing_internal_fd, internal_path, remove_file=False)
+        if internal_parent is not None:
+            restoring_parent = internal_parent
+            internal_parent = None
+            restoring_parent.restore()
+        if bootstrap_fd is not None:
+            releasing_bootstrap_fd = bootstrap_fd
+            bootstrap_fd = None
+            release_lock_file(releasing_bootstrap_fd, bootstrap_path, remove_file=False)
         transaction.cleanup()
         raise
 
@@ -2024,13 +2221,40 @@ def require_owner_directory_mode(path: Path, label: str, mode: int) -> None:
         fail(f"{label} mode must be {mode:04o}")
 
 
-def require_protected_launch_directory(path: Path, label: str) -> None:
-    require_owner_directory_mode(path, label, 0o500)
-
-
-def chmod_restore(path: Path, mode: int) -> None:
-    with contextlib.suppress(FileNotFoundError):
-        path.chmod(mode)
+def open_protected_directory(path: Path, label: str) -> ProtectedDirectory:
+    flags = os.O_RDONLY
+    if not hasattr(os, "O_NOFOLLOW"):
+        fail("launch directory protection requires O_NOFOLLOW support")
+    flags |= os.O_NOFOLLOW | getattr(os, "O_DIRECTORY", 0)
+    expected = stat_existing(path, label)
+    if expected is None:
+        fail(f"{label} is missing")
+    if not stat.S_ISDIR(expected.st_mode):
+        fail(f"{label} must be a directory")
+    if not is_current_owner(expected):
+        fail(f"{label} must be owned by the current user")
+    original_mode = stat.S_IMODE(expected.st_mode)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        fail(f"{label} could not be opened safely: {exc}")
+    try:
+        opened = os.fstat(fd)
+        if opened.st_dev != expected.st_dev or opened.st_ino != expected.st_ino:
+            fail(f"{label} changed while opening")
+        if not stat.S_ISDIR(opened.st_mode):
+            fail(f"{label} must be a directory")
+        if not is_current_owner(opened):
+            fail(f"{label} must be owned by the current user")
+        if original_mode != 0o500:
+            os.fchmod(fd, 0o500)
+        protected = os.fstat(fd)
+        if stat.S_IMODE(protected.st_mode) != 0o500:
+            fail(f"{label} mode must be 0500")
+    except BaseException:
+        os.close(fd)
+        raise
+    return ProtectedDirectory(path=path, fd=fd, original_mode=original_mode)
 
 
 @contextlib.contextmanager
@@ -2042,26 +2266,18 @@ def protected_launch_path(target: Path):
         software_current(target),
         software_current_binary(target).parent,
     )
-    original_modes: list[tuple[Path, int]] = []
+    protected: list[ProtectedDirectory] = []
     for path in dict.fromkeys(directories):
-        info = stat_existing(path, f"launch protected directory {path}")
-        if info is None:
-            fail(f"launch protected directory is missing: {path}")
-        if not stat.S_ISDIR(info.st_mode):
-            fail(f"launch protected path must be a directory: {path}")
-        if not is_current_owner(info):
-            fail(f"launch protected directory must be owned by the current user: {path}")
-        mode = stat.S_IMODE(info.st_mode)
-        original_modes.append((path, mode))
-        if mode != 0o500:
-            path.chmod(0o500)
+        protected.append(open_protected_directory(path, f"launch protected directory {path}"))
     try:
-        for path, _mode in original_modes:
-            require_protected_launch_directory(path, f"launch protected directory {path}")
+        for directory in protected:
+            info = os.fstat(directory.fd)
+            if stat.S_IMODE(info.st_mode) != 0o500:
+                fail(f"launch protected directory mode changed: {directory.path}")
         yield
     finally:
-        for path, mode in reversed(original_modes):
-            chmod_restore(path, mode)
+        for directory in reversed(protected):
+            directory.restore()
 
 
 def revalidate_launch_executable(
