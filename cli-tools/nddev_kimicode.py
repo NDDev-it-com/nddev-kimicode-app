@@ -105,6 +105,34 @@ KIMI_BINARY_PLATFORMS = {
         "checksum": "f9977d259ed36019793cadf04b1f0343f12aaebfa76f90fa26cd3b02be671231",
     },
 }
+KIMI_SUPPORTED_PRODUCT_HOSTS = (
+    "macos-arm64",
+    "macos-x64",
+    "ubuntu-glibc-arm64",
+    "ubuntu-glibc-x64",
+)
+KIMI_UNSUPPORTED_HOST_CATEGORIES = (
+    "windows",
+    "non-ubuntu-linux",
+    "linux-musl",
+    "unsupported-architecture",
+)
+KIMI_PRODUCT_HOST_TO_VENDOR_PLATFORM = {
+    "macos-arm64": "darwin-arm64",
+    "macos-x64": "darwin-x64",
+    "ubuntu-glibc-arm64": "linux-arm64",
+    "ubuntu-glibc-x64": "linux-x64",
+}
+KIMI_VENDOR_PLATFORM_TO_PRODUCT_HOST = {
+    vendor_platform: product_host
+    for product_host, vendor_platform in KIMI_PRODUCT_HOST_TO_VENDOR_PLATFORM.items()
+}
+KIMI_UBUNTU_GLIBC_VERSION_FLOOR: str | None = None
+LINUX_OS_RELEASE_PATHS = (Path("/etc/os-release"), Path("/usr/lib/os-release"))
+LINUX_MUSL_MARKER_PATHS = (
+    Path("/lib/libc.musl-x86_64.so.1"),
+    Path("/lib/libc.musl-aarch64.so.1"),
+)
 
 SOFTWARE_STAMP_NAME = "NDDEV-KIMICODE-SOFTWARE.json"
 SOFTWARE_DIR_NAME = ".nddev-kimicode-software"
@@ -222,6 +250,23 @@ class ProtectedDirectory:
             os.fchmod(self.fd, self.original_mode)
         finally:
             os.close(self.fd)
+
+
+@dataclass(frozen=True)
+class LinuxDistribution:
+    distro_id: str
+    id_like: tuple[str, ...]
+    pretty_name: str
+    source: str
+
+
+@dataclass(frozen=True)
+class DetectedHost:
+    product_host_id: str
+    vendor_platform_key: str
+    os_name: str
+    arch: str
+    linux_distribution: LinuxDistribution | None
 
 
 def fail(message: str) -> NoReturn:
@@ -1812,43 +1857,163 @@ def software_status_payload(target: Path) -> dict[str, Any]:
     return payload
 
 
-def detect_official_platform() -> str:
-    system = platform.system()
-    machine = platform.machine().lower()
+def parse_os_release(text: str, *, source: str) -> LinuxDistribution:
+    fields: dict[str, str] = {}
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, raw_value = line.split("=", 1)
+        if not re.fullmatch(r"[A-Z][A-Z0-9_]*", key):
+            continue
+        try:
+            parts = shlex.split(raw_value, comments=False, posix=True)
+        except ValueError:
+            value = raw_value.strip().strip("'\"")
+        else:
+            value = parts[0] if parts else ""
+        fields[key] = value
+    distro_id = fields.get("ID", "").strip().lower() or "unknown"
+    id_like = tuple(value.lower() for value in fields.get("ID_LIKE", "").split() if value)
+    return LinuxDistribution(
+        distro_id=distro_id,
+        id_like=id_like,
+        pretty_name=fields.get("PRETTY_NAME", ""),
+        source=source,
+    )
+
+
+def detect_linux_distribution(
+    os_release_paths: tuple[Path, ...] = LINUX_OS_RELEASE_PATHS,
+) -> LinuxDistribution:
+    for path in os_release_paths:
+        try:
+            with path.open("rb") as handle:
+                data = handle.read(METADATA_MAX_BYTES + 1)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            fail(f"could not read Linux os-release metadata: {exc}")
+        if len(data) > METADATA_MAX_BYTES:
+            fail(f"Linux os-release metadata is too large: {path}")
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            fail(f"Linux os-release metadata is not UTF-8: {exc}")
+        return parse_os_release(text, source=str(path))
+    return LinuxDistribution(
+        distro_id="unknown",
+        id_like=(),
+        pretty_name="",
+        source="missing os-release",
+    )
+
+
+def linux_libc_is_musl(
+    *,
+    marker_paths: tuple[Path, ...] = LINUX_MUSL_MARKER_PATHS,
+    ldd_runner: Any | None = None,
+) -> bool:
+    if any(path.exists() for path in marker_paths):
+        return True
+    runner = subprocess.run if ldd_runner is None else ldd_runner
+    with contextlib.suppress(Exception):
+        completed = runner(
+            ["ldd", "/bin/ls"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+        if "musl" in str(getattr(completed, "stdout", "")).lower():
+            return True
+    return False
+
+
+def require_ubuntu_linux(
+    *,
+    os_release_paths: tuple[Path, ...] = LINUX_OS_RELEASE_PATHS,
+    musl_marker_paths: tuple[Path, ...] = LINUX_MUSL_MARKER_PATHS,
+    ldd_runner: Any | None = None,
+) -> LinuxDistribution:
+    if linux_libc_is_musl(marker_paths=musl_marker_paths, ldd_runner=ldd_runner):
+        fail("unsupported host category: linux-musl; nddev-kimicode-app supports Ubuntu glibc hosts only")
+    distro = detect_linux_distribution(os_release_paths)
+    if distro.distro_id != "ubuntu":
+        fail(
+            f"unsupported host category: non-ubuntu-linux; detected {distro.distro_id}; "
+            "nddev-kimicode-app supports Ubuntu ID=ubuntu glibc hosts only"
+        )
+    return distro
+
+
+def supported_arch(raw_machine: str) -> str:
+    machine = raw_machine.lower()
+    if machine in {"x86_64", "amd64"}:
+        return "x64"
+    if machine in {"arm64", "aarch64"}:
+        return "arm64"
+    fail(f"unsupported host category: unsupported-architecture; detected {raw_machine}")
+
+
+def detect_supported_host(
+    *,
+    system_name: str | None = None,
+    machine_name: str | None = None,
+    os_release_paths: tuple[Path, ...] = LINUX_OS_RELEASE_PATHS,
+    musl_marker_paths: tuple[Path, ...] = LINUX_MUSL_MARKER_PATHS,
+    ldd_runner: Any | None = None,
+) -> DetectedHost:
+    system = platform.system() if system_name is None else system_name
+    raw_machine = platform.machine() if machine_name is None else machine_name
+    if system not in {"Darwin", "Linux"}:
+        category = "windows" if system.lower().startswith("win") else "unsupported-architecture"
+        fail(
+            f"unsupported host category: {category}; nddev-kimicode-app supports "
+            + ", ".join(KIMI_SUPPORTED_PRODUCT_HOSTS)
+        )
+    arch = supported_arch(raw_machine)
     if system == "Darwin":
         os_name = "darwin"
-    elif system == "Linux":
+        product_host_id = f"macos-{arch}"
+        distro = None
+    else:
         os_name = "linux"
-        musl_markers = (
-            Path("/lib/libc.musl-x86_64.so.1"),
-            Path("/lib/libc.musl-aarch64.so.1"),
+        distro = require_ubuntu_linux(
+            os_release_paths=os_release_paths,
+            musl_marker_paths=musl_marker_paths,
+            ldd_runner=ldd_runner,
         )
-        if any(path.exists() for path in musl_markers):
-            fail("musl Linux is not supported by nddev-kimicode-app")
-        with contextlib.suppress(Exception):
-            completed = subprocess.run(
-                ["ldd", "/bin/ls"],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                timeout=5,
-                check=False,
-            )
-            if "musl" in completed.stdout.lower():
-                fail("musl Linux is not supported by nddev-kimicode-app")
-    else:
-        fail("nddev-kimicode-app supports only macOS and Ubuntu/Linux glibc")
-    if machine in {"x86_64", "amd64"}:
-        arch = "x64"
-    elif machine in {"arm64", "aarch64"}:
-        arch = "arm64"
-    else:
-        fail(f"unsupported architecture: {platform.machine()}")
-    key = f"{os_name}-{arch}"
-    if key not in KIMI_BINARY_PLATFORMS:
-        fail(f"unsupported platform: {key}")
-    return key
+        product_host_id = f"ubuntu-glibc-{arch}"
+    vendor_platform_key = KIMI_PRODUCT_HOST_TO_VENDOR_PLATFORM[product_host_id]
+    if vendor_platform_key not in KIMI_BINARY_PLATFORMS:
+        fail(f"unsupported platform: {product_host_id}")
+    return DetectedHost(
+        product_host_id=product_host_id,
+        vendor_platform_key=vendor_platform_key,
+        os_name=os_name,
+        arch=arch,
+        linux_distribution=distro,
+    )
+
+
+def detect_official_platform(
+    *,
+    system_name: str | None = None,
+    machine_name: str | None = None,
+    os_release_paths: tuple[Path, ...] = LINUX_OS_RELEASE_PATHS,
+    musl_marker_paths: tuple[Path, ...] = LINUX_MUSL_MARKER_PATHS,
+    ldd_runner: Any | None = None,
+) -> str:
+    return detect_supported_host(
+        system_name=system_name,
+        machine_name=machine_name,
+        os_release_paths=os_release_paths,
+        musl_marker_paths=musl_marker_paths,
+        ldd_runner=ldd_runner,
+    ).vendor_platform_key
 
 
 def fetch_url_bytes(url: str, *, max_bytes: int, label: str) -> bytes:
@@ -2072,6 +2237,7 @@ def copy_staged_binary(source: Path, destination: Path, target: Path) -> str:
 def install_or_update_software(target: Path, *, mode: str) -> dict[str, Any]:
     if mode not in {"install", "update", "migrate"}:
         fail("invalid software operation")
+    platform_key = detect_official_platform()
     preflight = software_status_payload(target)
     if preflight["current"]:
         return {
@@ -2120,7 +2286,6 @@ def install_or_update_software(target: Path, *, mode: str) -> dict[str, Any]:
             rollback_root = Path(rollback_raw)
             stage_current = stage_root / SOFTWARE_CURRENT_NAME
             stage_current.mkdir(mode=OWNER_DIRECTORY_MODE)
-            platform_key = detect_official_platform()
             binary = install_official_binary(stage_current, platform_key)
             version_probe_digest = run_stage_version_probe(stage_current, stage_root)
             installed_tree_digest = tree_sha256(stage_current)
@@ -2339,6 +2504,7 @@ def revalidate_launch_executable(
 
 
 def prepare_launch_invocation_locked(target: Path, child_args: list[str]) -> LaunchInvocation:
+    host_platform_key = detect_official_platform()
     status = status_payload(target)
     if not status["managed"]:
         fail("launch requires a managed target")
@@ -2360,6 +2526,8 @@ def prepare_launch_invocation_locked(target: Path, child_args: list[str]) -> Lau
     expected_binary = KIMI_BINARY_PLATFORMS.get(str(platform_key))
     if expected_binary is None:
         fail("launch requires current target-owned Kimi Code binary: platform")
+    if platform_key != host_platform_key:
+        fail("launch requires current target-owned Kimi Code binary: host platform")
     stamp_digest = stamp.get("entrypoint_sha256")
     if not isinstance(stamp_digest, str):
         fail("launch requires current target-owned Kimi Code binary: entrypoint stamp digest")

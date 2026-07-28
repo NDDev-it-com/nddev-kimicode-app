@@ -17,7 +17,10 @@ launches `bin/kimi` with isolated `HOME`, `TMPDIR`, and `KIMI_CODE_HOME`.
 - Safe permission profile: `safe`, mapped to documented native Kimi `manual`
   mode.
 
-The module does not ship `balanced`, `yolo`, or Windows support.
+The module does not ship `balanced` or `yolo`. Supported product hosts are
+`macos-arm64`, `macos-x64`, `ubuntu-glibc-arm64`, and `ubuntu-glibc-x64`;
+unsupported host categories are `windows`, `non-ubuntu-linux`, `linux-musl`,
+and `unsupported-architecture`.
 
 ## Commands
 
@@ -39,14 +42,16 @@ python3 cli-tools/nddev_kimicode.py launch --target /absolute/target --
 
 ## Runtime Baseline
 
-The current Kimi release, official binary manifest, platform checksums, npm
-metadata, and source URLs are owned by `references/kimi-code-baseline.json`.
-The public contract is owned by `config/nddev-contract.json`, and command
+The current Kimi release, official binary manifest, upstream platform assets,
+npm metadata, and source URLs are owned by
+`references/kimi-code-baseline.json`. Supported product hosts and their mapping
+to upstream asset keys are owned by `config/nddev-contract.json`; command
 behavior is owned by `cli-tools/nddev_kimicode.py`.
 
 `software-status` is structural and does not execute `kimi`. `install-cli`,
 `update-cli`, and `migrate-cli` are the only commands that acquire target-owned
-Kimi software.
+Kimi software. Ubuntu desktop and server share the same `ID=ubuntu` glibc host
+check; upstream publishes no official Ubuntu/glibc version floor.
 
 `launch` holds the managed lifecycle boundary until the child process exits, so
 setup, profile, software, restore, and remove mutations fail while the managed

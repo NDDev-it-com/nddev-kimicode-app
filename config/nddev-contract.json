@@ -67,9 +67,23 @@
     "tested_release": "0.29.2",
     "official_install_channel": "official-binary",
     "npm_alternative_recorded": true,
+    "supported_hosts": ["macos-arm64", "macos-x64", "ubuntu-glibc-arm64", "ubuntu-glibc-x64"],
+    "unsupported_host_categories": ["windows", "non-ubuntu-linux", "linux-musl", "unsupported-architecture"],
+    "host_to_vendor_platform": {
+      "macos-arm64": "darwin-arm64",
+      "macos-x64": "darwin-x64",
+      "ubuntu-glibc-arm64": "linux-arm64",
+      "ubuntu-glibc-x64": "linux-x64"
+    },
+    "observed_vendor_platforms": ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"],
+    "ubuntu_glibc_version_floor": null,
+    "ubuntu_glibc_version_floor_source": "no-official-floor",
     "windows_supported": false,
     "macos_supported": true,
-    "ubuntu_linux_glibc_supported": true
+    "ubuntu_linux_glibc_supported": true,
+    "generic_linux_supported": false,
+    "non_ubuntu_linux_supported": false,
+    "linux_musl_supported": false
   },
   "software_lifecycle": {
     "stamp_file": "NDDEV-KIMICODE-SOFTWARE.json",

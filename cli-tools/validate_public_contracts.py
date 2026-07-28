@@ -107,6 +107,20 @@ BINARY_PLATFORMS = {
     "linux-arm64": ("kimi-code-linux-arm64", "5fb64e74eeec0b3900732cfbc3679cc505beb51aa323f486154fd79b0e20b26a"),
     "linux-x64": ("kimi-code-linux-x64", "f9977d259ed36019793cadf04b1f0343f12aaebfa76f90fa26cd3b02be671231"),
 }
+OBSERVED_VENDOR_PLATFORMS = ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"]
+SUPPORTED_HOSTS = ["macos-arm64", "macos-x64", "ubuntu-glibc-arm64", "ubuntu-glibc-x64"]
+HOST_TO_VENDOR_PLATFORM = {
+    "macos-arm64": "darwin-arm64",
+    "macos-x64": "darwin-x64",
+    "ubuntu-glibc-arm64": "linux-arm64",
+    "ubuntu-glibc-x64": "linux-x64",
+}
+UNSUPPORTED_HOST_CATEGORIES = [
+    "windows",
+    "non-ubuntu-linux",
+    "linux-musl",
+    "unsupported-architecture",
+]
 CONTRACT_KEYS = {
     "contract_version",
     "product_name",
@@ -603,6 +617,16 @@ def validate_baseline(baseline: dict[str, Any]) -> None:
     platforms = install.get("platforms")
     if not isinstance(platforms, dict) or sorted(platforms) != sorted(BINARY_PLATFORMS):
         raise ValueError("official binary platform set mismatch")
+    if install.get("observed_vendor_platforms") != OBSERVED_VENDOR_PLATFORMS:
+        raise ValueError("baseline must preserve observed vendor platform keys separately")
+    if install.get("production_supported_hosts") != SUPPORTED_HOSTS:
+        raise ValueError("baseline must scope production support to canonical NDDev hosts")
+    if install.get("host_to_vendor_platform") != HOST_TO_VENDOR_PLATFORM:
+        raise ValueError("baseline must map supported hosts to observed vendor asset keys")
+    if install.get("ubuntu_glibc_version_floor") is not None:
+        raise ValueError("baseline must not invent an upstream Ubuntu/glibc version floor")
+    if install.get("ubuntu_glibc_version_floor_source") != "no-official-floor":
+        raise ValueError("baseline must record no-official-floor for Ubuntu/glibc")
     for key, (filename, checksum) in BINARY_PLATFORMS.items():
         entry = platforms[key]
         if entry.get("filename") != filename or entry.get("checksum") != checksum:
@@ -623,6 +647,9 @@ def validate_baseline(baseline: dict[str, Any]) -> None:
     unsupported = baseline.get("unsupported", {})
     if unsupported.get("windows") is not True:
         raise ValueError("baseline must mark Windows unsupported")
+    for host in ("non_ubuntu_linux", "linux_musl", "unsupported_architecture"):
+        if unsupported.get(host) is not True:
+            raise ValueError(f"baseline must mark {host} unsupported")
 
 
 def frontmatter(text: str, path: Path) -> dict[str, str]:
@@ -693,7 +720,7 @@ def extract_git_archive(destination: Path) -> None:
                 raise ValueError(f"git archive contains unsafe path {member.name}")
             if member.issym() or member.islnk():
                 raise ValueError(f"git archive contains link {member.name}")
-        archive.extractall(destination, members=members)
+        archive.extractall(destination, members=members, filter="data")
 
 
 def validate_archive_public_commands_cache_free() -> None:
@@ -879,8 +906,41 @@ def validate_metadata() -> None:
         raise ValueError("contract software lifecycle must use official binary manifest")
     if software.get("status_executes_binary") is not False:
         raise ValueError("software status must remain read-only")
-    if contract["runtime_compatibility"].get("windows_supported") is not False:
+    runtime_compatibility = contract["runtime_compatibility"]
+    if runtime_compatibility.get("observed_vendor_platforms") != OBSERVED_VENDOR_PLATFORMS:
+        raise ValueError("contract must preserve observed vendor platform keys")
+    if runtime_compatibility.get("supported_hosts") != SUPPORTED_HOSTS:
+        raise ValueError("contract must support only canonical NDDev hosts")
+    if runtime_compatibility.get("host_to_vendor_platform") != HOST_TO_VENDOR_PLATFORM:
+        raise ValueError("contract must map supported hosts to observed vendor asset keys")
+    if runtime_compatibility.get("unsupported_host_categories") != UNSUPPORTED_HOST_CATEGORIES:
+        raise ValueError("contract unsupported host categories mismatch")
+    if runtime_compatibility.get("ubuntu_glibc_version_floor") is not None:
+        raise ValueError("contract must not invent an upstream Ubuntu/glibc version floor")
+    if runtime_compatibility.get("ubuntu_glibc_version_floor_source") != "no-official-floor":
+        raise ValueError("contract must record no-official-floor for Ubuntu/glibc")
+    if runtime_compatibility.get("windows_supported") is not False:
         raise ValueError("Windows must be unsupported")
+    if runtime_compatibility.get("generic_linux_supported") is not False:
+        raise ValueError("generic Linux must not be supported")
+    for host in ("non_ubuntu_linux_supported", "linux_musl_supported"):
+        if runtime_compatibility.get(host) is not False:
+            raise ValueError(f"{host} must be unsupported")
+    software_runtime = manifest["software_runtime"]
+    if software_runtime.get("observed_vendor_platforms") != OBSERVED_VENDOR_PLATFORMS:
+        raise ValueError("manifest must preserve observed vendor platform keys")
+    if software_runtime.get("supported_hosts") != SUPPORTED_HOSTS:
+        raise ValueError("manifest must support only canonical NDDev hosts")
+    if software_runtime.get("host_to_vendor_platform") != HOST_TO_VENDOR_PLATFORM:
+        raise ValueError("manifest must map supported hosts to observed vendor asset keys")
+    if software_runtime.get("unsupported_host_categories") != UNSUPPORTED_HOST_CATEGORIES:
+        raise ValueError("manifest unsupported host categories mismatch")
+    if software_runtime.get("ubuntu_glibc_version_floor") is not None:
+        raise ValueError("manifest must not invent an upstream Ubuntu/glibc version floor")
+    if software_runtime.get("ubuntu_glibc_version_floor_source") != "no-official-floor":
+        raise ValueError("manifest must record no-official-floor for Ubuntu/glibc")
+    if "supported_platforms" in software_runtime:
+        raise ValueError("manifest must not call observed linux assets supported platforms")
     validate_baseline(baseline)
 
 
@@ -892,8 +952,15 @@ def make_isolated_target(label: str) -> tuple[tempfile.TemporaryDirectory[str], 
     return temp, parent / "target"
 
 
-def write_stub_software(manager: Any, target: Path, binary_bytes: bytes | None = None) -> None:
-    platform_key = "linux-x64"
+def write_stub_software(
+    manager: Any,
+    target: Path,
+    binary_bytes: bytes | None = None,
+    *,
+    platform_key: str | None = None,
+) -> None:
+    if platform_key is None:
+        platform_key = manager.detect_official_platform()
     if binary_bytes is None:
         binary_bytes = b"#!/bin/sh\nprintf 'kimi-code 0.29.2\\n'\n"
     binary_sha = manager.sha256_bytes(binary_bytes)
@@ -1423,6 +1490,90 @@ def validate_internal_lock_persistent_inode_handover_regression(manager: Any) ->
         temp.cleanup()
 
 
+def os_release_fixture(root: Path, name: str, distro_id: str | None) -> Path:
+    path = root / f"{name}.os-release"
+    if distro_id is None:
+        path.write_text("NAME=Unknown\n", encoding="utf-8")
+    else:
+        path.write_text(f"ID={distro_id}\nNAME={distro_id}\n", encoding="utf-8")
+    return path
+
+
+def glibc_runner(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+    return SimpleNamespace(stdout="ldd (GNU libc)")
+
+
+def musl_runner(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
+    return SimpleNamespace(stdout="musl libc")
+
+
+def validate_supported_host_detection_regression(manager: Any) -> None:
+    if tuple(manager.KIMI_SUPPORTED_PRODUCT_HOSTS) != tuple(SUPPORTED_HOSTS):
+        raise ValueError("manager supported product host ids mismatch")
+    if manager.KIMI_UNSUPPORTED_HOST_CATEGORIES != tuple(UNSUPPORTED_HOST_CATEGORIES):
+        raise ValueError("manager unsupported host categories mismatch")
+    if manager.KIMI_PRODUCT_HOST_TO_VENDOR_PLATFORM != HOST_TO_VENDOR_PLATFORM:
+        raise ValueError("manager host-to-vendor platform map mismatch")
+    if manager.KIMI_UBUNTU_GLIBC_VERSION_FLOOR is not None:
+        raise ValueError("manager must not invent an Ubuntu/glibc version floor")
+    with tempfile.TemporaryDirectory(prefix=".tmp-kimicode-host-detect-") as temp:
+        root = Path(temp)
+        ubuntu = os_release_fixture(root, "ubuntu", "ubuntu")
+        debian = os_release_fixture(root, "debian", "debian")
+        alpine = os_release_fixture(root, "alpine", "alpine")
+        unknown = os_release_fixture(root, "unknown", None)
+        supported = (
+            ("Darwin", "arm64", (), "macos-arm64", "darwin-arm64"),
+            ("Darwin", "x86_64", (), "macos-x64", "darwin-x64"),
+            ("Linux", "aarch64", (ubuntu,), "ubuntu-glibc-arm64", "linux-arm64"),
+            ("Linux", "amd64", (ubuntu,), "ubuntu-glibc-x64", "linux-x64"),
+        )
+        for system, machine, os_release_paths, product_host, vendor_platform in supported:
+            detected = manager.detect_supported_host(
+                system_name=system,
+                machine_name=machine,
+                os_release_paths=os_release_paths,
+                musl_marker_paths=(),
+                ldd_runner=glibc_runner,
+            )
+            if detected.product_host_id != product_host:
+                raise ValueError(f"host detection selected {detected.product_host_id}, expected {product_host}")
+            if detected.vendor_platform_key != vendor_platform:
+                raise ValueError(f"host detection mapped {product_host} to {detected.vendor_platform_key}")
+            observed = manager.detect_official_platform(
+                system_name=system,
+                machine_name=machine,
+                os_release_paths=os_release_paths,
+                musl_marker_paths=(),
+                ldd_runner=glibc_runner,
+            )
+            if observed != vendor_platform:
+                raise ValueError(f"official platform detection did not return vendor key {vendor_platform}")
+
+        rejected = (
+            ("Windows", "AMD64", (), glibc_runner, "unsupported host category: windows"),
+            ("Linux", "x86_64", (debian,), glibc_runner, "unsupported host category: non-ubuntu-linux"),
+            ("Linux", "x86_64", (alpine,), glibc_runner, "unsupported host category: non-ubuntu-linux"),
+            ("Linux", "x86_64", (unknown,), glibc_runner, "unsupported host category: non-ubuntu-linux"),
+            ("Linux", "x86_64", (ubuntu,), musl_runner, "unsupported host category: linux-musl"),
+            ("Darwin", "riscv64", (), glibc_runner, "unsupported host category: unsupported-architecture"),
+        )
+        for system, machine, os_release_paths, runner, expected in rejected:
+            try:
+                manager.detect_official_platform(
+                    system_name=system,
+                    machine_name=machine,
+                    os_release_paths=os_release_paths,
+                    musl_marker_paths=(),
+                    ldd_runner=runner,
+                )
+            except manager.KimicodeSetupError as exc:
+                if expected not in str(exc):
+                    raise ValueError(f"host rejection returned unstable error: {exc}") from exc
+            else:
+                raise ValueError(f"host detection unexpectedly accepted {system} {machine}")
+
+
 def validate_runtime_regressions() -> None:
     manager = load_manager()
     manager_text = (ROOT / "cli-tools" / "nddev_kimicode.py").read_text(encoding="utf-8")
@@ -1461,6 +1612,8 @@ def validate_runtime_regressions() -> None:
         "lock_path(target).parent",
         "with protected_launch_path(invocation.target):",
         "expected_digest=invocation.expected_entrypoint_digest",
+        "host_platform_key = detect_official_platform()",
+        "launch requires current target-owned Kimi Code binary: host platform",
         "is_current_owner(opened)",
         "opened.st_dev != info.st_dev or opened.st_ino != info.st_ino",
         "target-owned Kimi Code entrypoint digest does not match pinned binary",
@@ -1474,6 +1627,7 @@ def validate_runtime_regressions() -> None:
         raise ValueError("launch protection must not chmod the managed target root")
 
     def run_isolated_runtime_regressions() -> None:
+        validate_supported_host_detection_regression(manager)
         validate_status_launch_allowed_regression(manager)
         validate_corrupt_backup_regression(manager)
         validate_external_lock_binding_regression(manager)

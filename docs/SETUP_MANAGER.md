@@ -40,23 +40,26 @@ Native `yolo` is not shipped as an NDDev profile.
 binary presence, entrypoint digest, and installed tree digest without executing
 `kimi`.
 
-`install-cli` installs a verified official Kimi binary into target-owned state.
-`update-cli` repairs or updates current official-binary state. `migrate-cli` is
-the only transition from legacy Bun schema to official-binary schema.
+`install-cli` installs a verified official Kimi binary into target-owned state
+on `macos-arm64`, `macos-x64`, `ubuntu-glibc-arm64`, or
+`ubuntu-glibc-x64`. `update-cli` repairs or updates current official-binary
+state. `migrate-cli` is the only transition from legacy Bun schema to
+official-binary schema.
 
 Legacy Bun state may be read for status, migrated, restored, or removed. It must
 never launch.
 
-Release versions, URLs, manifest hashes, and platform binary digests are owned
-by `references/kimi-code-baseline.json`.
+Release versions, URLs, manifest hashes, upstream platform assets, product host
+mapping, and the no-official-floor Ubuntu/glibc observation are owned by
+`references/kimi-code-baseline.json`.
 
 ## Launch Isolation
 
-`launch` refuses unmanaged, legacy, drifted, or missing-current-software targets.
-It executes `/absolute/target/bin/kimi` with target-local `HOME`, `TMPDIR`, and
-`KIMI_CODE_HOME`, disables telemetry, stops background keep-alive on exit, and
-constructs a fresh child environment without live provider credentials or
-`KIMI_MODEL_*` variables.
+`launch` refuses unsupported hosts, unmanaged, legacy, drifted, or
+missing-current-software targets. It executes `/absolute/target/bin/kimi` with
+target-local `HOME`, `TMPDIR`, and `KIMI_CODE_HOME`, disables telemetry, stops
+background keep-alive on exit, and constructs a fresh child environment without
+live provider credentials or `KIMI_MODEL_*` variables.
 
 The lifecycle boundary is held from launch preflight through child process
 completion and cleanup. While it is held, install, update, migrate, restore,
@@ -76,3 +79,7 @@ Child arguments that override managed permission mode, plan mode, prompt mode,
 model selection, Skill directories, agents, sessions, extra workspace scope, or
 software migration/update behavior are rejected before the target-owned binary
 is spawned.
+
+Unsupported host categories are `windows`, `non-ubuntu-linux`, `linux-musl`,
+and `unsupported-architecture`. Ubuntu desktop and server share the same
+`ID=ubuntu` glibc check.

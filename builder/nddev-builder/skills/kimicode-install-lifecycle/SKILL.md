@@ -8,9 +8,9 @@ disableModelInvocation: false
 
 # Kimi Install Lifecycle
 
-The manager owns a target-owned implementation of Kimi's official macOS/Linux
-binary install channel. Do not pipe the official shell installer into live user
-state.
+The manager owns a target-owned implementation of Kimi's official binary
+install channel for the supported product hosts in `config/nddev-contract.json`.
+Do not pipe the official shell installer into live user state.
 
 Source owners:
 
@@ -28,5 +28,7 @@ Lifecycle rules:
 - Legacy Bun state may be read for status, migrated, restored, or removed; it must never launch.
 - Rollback restores prior binary tree, entrypoint, and stamp on failure.
 - Official binary state is target-owned under `.nddev-kimicode-software/current` plus `bin/kimi`.
+- Ubuntu desktop and server share the same `ID=ubuntu` glibc host check, and the upstream baseline records no official Ubuntu/glibc version floor.
 
-Do not add Windows support. NDDev supports macOS and Ubuntu/Linux glibc only.
+Do not add unsupported host categories: `windows`, `non-ubuntu-linux`,
+`linux-musl`, or `unsupported-architecture`.

@@ -34,8 +34,17 @@
     "entrypoint": "bin/kimi",
     "entrypoint_kind": "official-binary",
     "installed_tree": ".nddev-kimicode-software/current",
-    "supported_platforms": ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"],
-    "unsupported_platforms": ["windows", "musl-linux"]
+    "supported_hosts": ["macos-arm64", "macos-x64", "ubuntu-glibc-arm64", "ubuntu-glibc-x64"],
+    "unsupported_host_categories": ["windows", "non-ubuntu-linux", "linux-musl", "unsupported-architecture"],
+    "host_to_vendor_platform": {
+      "macos-arm64": "darwin-arm64",
+      "macos-x64": "darwin-x64",
+      "ubuntu-glibc-arm64": "linux-arm64",
+      "ubuntu-glibc-x64": "linux-x64"
+    },
+    "observed_vendor_platforms": ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"],
+    "ubuntu_glibc_version_floor": null,
+    "ubuntu_glibc_version_floor_source": "no-official-floor"
   },
   "runtime_launch": {
     "external_target_bound_lifecycle_lock": true,
