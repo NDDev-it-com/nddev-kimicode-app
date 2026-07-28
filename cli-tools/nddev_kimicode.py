@@ -330,7 +330,11 @@ CURRENT_SOFTWARE_SCHEMA = 2
 LEGACY_SOFTWARE_SCHEMA = 1
 SOFTWARE_MAX_BYTES = 160 * 1024 * 1024
 SOFTWARE_MAX_PATHS = 128
-DOWNLOAD_MAX_BYTES = 96 * 1024 * 1024
+DOWNLOAD_MAX_BYTES = max(
+    int(artifact["size_bytes"])
+    for artifact in KIMI_OBSERVED_BINARY_PLATFORMS.values()
+    if artifact.get("supported_product_hosts")
+)
 PROCESS_OUTPUT_MAX_BYTES = 64 * 1024
 PROCESS_TIMEOUT_SECONDS = 120
 SOFTWARE_STAMP_KEYS_V2 = {
@@ -6141,14 +6145,59 @@ def require_supported_product_host() -> DetectedHost:
     return detect_supported_host()
 
 
-def fetch_url_bytes(url: str, *, max_bytes: int, label: str) -> bytes:
+def response_content_length(response: Any, label: str) -> int | None:
+    headers = getattr(response, "headers", None)
+    value = None
+    if headers is not None and hasattr(headers, "get"):
+        value = headers.get("Content-Length")
+    if value is None and hasattr(response, "getheader"):
+        value = response.getheader("Content-Length")
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text.isdecimal():
+        fail(f"{label} Content-Length is malformed")
+    return int(text)
+
+
+def fetch_url_bytes(
+    url: str,
+    *,
+    max_bytes: int,
+    label: str,
+    expected_size: int | None = None,
+) -> bytes:
+    if expected_size is not None:
+        if expected_size < 0:
+            fail(f"{label} expected size is invalid")
+        if expected_size > max_bytes:
+            fail(f"{label} expected size exceeds the configured download bound")
+        read_limit = expected_size
+    else:
+        read_limit = max_bytes
+    chunks: list[bytes] = []
+    total = 0
     try:
         with urllib.request.urlopen(url, timeout=PROCESS_TIMEOUT_SECONDS) as response:
-            data = response.read(max_bytes + 1)
+            content_length = response_content_length(response, label)
+            if expected_size is not None and content_length is not None:
+                if content_length != expected_size:
+                    fail(f"{label} Content-Length does not match the pinned size")
+            while True:
+                chunk = response.read(min(1024 * 1024, read_limit + 1 - total))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                total += len(chunk)
+                if total > read_limit:
+                    fail(f"{label} download is too large")
     except urllib.error.URLError as exc:
         fail(f"{label} could not be downloaded: {exc}")
+    data = b"".join(chunks)
     if len(data) > max_bytes:
         fail(f"{label} download is too large")
+    if expected_size is not None and len(data) != expected_size:
+        fail(f"{label} download size does not match the pinned size")
     return data
 
 
@@ -6175,7 +6224,18 @@ def install_official_binary(stage_current: Path, platform_key: str) -> dict[str,
         fail("Kimi Code binary manifest platform entry does not match the pinned baseline")
     binary = KIMI_BINARY_PLATFORMS[platform_key]
     url = f"{KIMI_BINARY_BASE}/{KIMI_PACKAGE_VERSION}/{binary['filename']}"
-    binary_bytes = fetch_url_bytes(url, max_bytes=DOWNLOAD_MAX_BYTES, label="Kimi Code binary")
+    observed_binary = KIMI_OBSERVED_BINARY_PLATFORMS.get(platform_key)
+    if not isinstance(observed_binary, dict):
+        fail("Kimi Code binary size baseline is missing")
+    expected_size = observed_binary.get("size_bytes")
+    if not isinstance(expected_size, int):
+        fail("Kimi Code binary size baseline is invalid")
+    binary_bytes = fetch_url_bytes(
+        url,
+        max_bytes=DOWNLOAD_MAX_BYTES,
+        label="Kimi Code binary",
+        expected_size=expected_size,
+    )
     if sha256_bytes(binary_bytes) != binary["checksum"]:
         fail("Kimi Code binary digest does not match the pinned baseline")
     bin_dir = stage_current / "bin"

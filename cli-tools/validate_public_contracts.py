@@ -2743,6 +2743,86 @@ def validate_supported_host_detection_regression(manager: Any) -> None:
                 raise ValueError(f"host detection unexpectedly accepted {system} {machine}")
 
 
+class FakeHttpResponse:
+    def __init__(self, body: bytes, content_length: str | None) -> None:
+        self.body = body
+        self.offset = 0
+        self.headers: dict[str, str] = {}
+        if content_length is not None:
+            self.headers["Content-Length"] = content_length
+
+    def __enter__(self) -> "FakeHttpResponse":
+        return self
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+        return None
+
+    def read(self, size: int = -1) -> bytes:
+        if size is None or size < 0:
+            size = len(self.body) - self.offset
+        if size == 0:
+            return b""
+        chunk = self.body[self.offset : self.offset + size]
+        self.offset += len(chunk)
+        return chunk
+
+
+def validate_binary_download_size_regression(manager: Any) -> None:
+    supported_platforms = sorted(HOST_TO_VENDOR_PLATFORM.values())
+    expected_max = max(
+        OBSERVED_BINARY_ARTIFACTS[platform]["size_bytes"] for platform in supported_platforms
+    )
+    if manager.DOWNLOAD_MAX_BYTES != expected_max:
+        raise ValueError("download bound must equal the largest pinned supported binary size")
+    for platform in supported_platforms:
+        observed = manager.KIMI_OBSERVED_BINARY_PLATFORMS.get(platform)
+        if observed != OBSERVED_BINARY_ARTIFACTS[platform]:
+            raise ValueError(f"manager binary observation mismatch for {platform}")
+        if observed["size_bytes"] > manager.DOWNLOAD_MAX_BYTES:
+            raise ValueError(f"download bound is below supported binary size for {platform}")
+
+    original_urlopen = manager.urllib.request.urlopen
+
+    def run_case(
+        *,
+        body: bytes,
+        content_length: str | None,
+        expected_size: int,
+        should_pass: bool,
+    ) -> None:
+        def fake_urlopen(_url: str, timeout: int) -> FakeHttpResponse:
+            if timeout != manager.PROCESS_TIMEOUT_SECONDS:
+                raise ValueError("download timeout contract changed")
+            return FakeHttpResponse(body, content_length)
+
+        manager.urllib.request.urlopen = fake_urlopen
+        try:
+            result = manager.fetch_url_bytes(
+                "https://example.invalid/kimi",
+                max_bytes=expected_size,
+                label="Kimi Code binary",
+                expected_size=expected_size,
+            )
+        except manager.KimicodeSetupError:
+            if should_pass:
+                raise ValueError("exact-size binary download case unexpectedly failed")
+            return
+        if not should_pass:
+            raise ValueError("invalid binary download case unexpectedly passed")
+        if result != body:
+            raise ValueError("exact-size binary download returned changed bytes")
+
+    try:
+        run_case(body=b"abc", content_length="3", expected_size=3, should_pass=True)
+        run_case(body=b"abc", content_length=None, expected_size=3, should_pass=True)
+        run_case(body=b"abc", content_length="bogus", expected_size=3, should_pass=False)
+        run_case(body=b"abc", content_length="4", expected_size=3, should_pass=False)
+        run_case(body=b"ab", content_length=None, expected_size=3, should_pass=False)
+        run_case(body=b"abcd", content_length=None, expected_size=3, should_pass=False)
+    finally:
+        manager.urllib.request.urlopen = original_urlopen
+
+
 def validate_runtime_regressions() -> None:
     manager = load_manager()
     manager_text = (ROOT / "cli-tools" / "nddev_kimicode.py").read_text(encoding="utf-8")
@@ -3075,6 +3155,7 @@ def validate_runtime_regressions() -> None:
 
     def run_isolated_runtime_regressions() -> None:
         validate_supported_host_detection_regression(manager)
+        validate_binary_download_size_regression(manager)
         validate_json_argument_error_regression(manager)
         validate_tree_snapshot_metadata_regression(manager)
         validate_setup_update_regression(manager)
