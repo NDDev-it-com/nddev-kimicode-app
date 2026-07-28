@@ -1301,10 +1301,10 @@ def validate_metadata() -> None:
         "pre_handoff_executable_revalidation", ""
     ):
         raise ValueError("contract must document pinned digest revalidation before launch handoff")
-    if "write-protected verified-path handoff" not in runtime_launch.get(
+    if "latest revalidated path handoff" not in runtime_launch.get(
         "portable_handoff_mechanism", ""
     ):
-        raise ValueError("contract must document portable verified-path handoff")
+        raise ValueError("contract must document portable latest-path handoff")
     if "exact-inode fd execution is not the portable macOS contract" not in runtime_launch.get(
         "portable_handoff_mechanism", ""
     ):
@@ -1343,6 +1343,20 @@ def validate_metadata() -> None:
         raise ValueError("contract must document the dedicated lock directory")
     if "same-UID" not in runtime_launch.get("same_uid_tamper_boundary", ""):
         raise ValueError("contract must document the same-UID tamper boundary")
+    same_uid_boundary = runtime_launch.get("same_uid_tamper_boundary", "")
+    for required in (
+        "No OS sandbox or independent trust anchor is claimed",
+        "target entrypoint replacement",
+        "not authenticity against a same-UID writer",
+    ):
+        if required not in same_uid_boundary:
+            raise ValueError(f"contract must state same-UID boundary: {required}")
+    for forbidden in (
+        "executable os.replace swaps are denied",
+        "same-UID chmod protection",
+    ):
+        if forbidden in same_uid_boundary:
+            raise ValueError(f"contract must not overclaim same-UID launch protection: {forbidden}")
     if manifest.get("runtime_launch") != {
         "external_product_coordination_lock": True,
         "external_target_bound_lifecycle_lock": True,
@@ -1366,10 +1380,11 @@ def validate_metadata() -> None:
         "internal_lock_directory_protected_while_held": True,
         "holds_lifecycle_lock_through_child": True,
         "stable_fcntl_flock_lifecycle_lock": True,
-        "write_protected_verified_path_handoff": True,
+        "latest_revalidated_path_handoff": True,
         "mutable_runtime_state_writable_during_launch": True,
         "pre_handoff_executable_revalidation": True,
         "exact_inode_exec": False,
+        "same_uid_tamper_authenticity": False,
         "runtime_dirs_private": True,
     }:
         raise ValueError("manifest must expose launch lock and executable revalidation facts")

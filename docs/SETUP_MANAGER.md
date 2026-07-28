@@ -65,8 +65,9 @@ Exact lock ordering, path protection, executable checks, runtime directory
 checks, and portable handoff mechanics are owned by
 `cli-tools/nddev_kimicode.py` and summarized by `config/nddev-contract.json`.
 Official binary provenance is owned by `references/kimi-code-baseline.json`.
-The launch boundary is cooperative lifecycle isolation, not an OS sandbox
-against deliberate same-UID tampering outside the manager.
+The launch boundary is cooperative lifecycle isolation, not an OS sandbox or
+authenticity guarantee against deliberate same-UID target entrypoint replacement
+outside the manager.
 
 Child arguments that override managed permission mode, plan mode, prompt mode,
 model selection, Skill directories, agents, sessions, extra workspace scope, or
