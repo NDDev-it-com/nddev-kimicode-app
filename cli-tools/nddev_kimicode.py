@@ -839,19 +839,86 @@ def read_existing_file(path: Path, *, max_bytes: int, label: str) -> bytes | Non
     return data
 
 
-def atomic_write(path: Path, data: bytes, target: Path, *, mode: int = OWNER_FILE_MODE) -> None:
-    ensure_real_parent(path, target)
-    require_existing_managed_file(path, str(path), max_bytes=max(MANAGED_MAX_BYTES, SOFTWARE_MAX_BYTES))
-    temporary = path.with_name(f".{path.name}.nddev.tmp.{os.getpid()}.{time.time_ns()}")
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+def fsync_directory(path: Path) -> None:
+    fd = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def snapshot_replace_destination(
+    path: Path,
+    label: str,
+    *,
+    max_bytes: int,
+) -> tuple[bytes | None, int | None]:
+    info = require_existing_managed_file(path, label, max_bytes=max_bytes)
+    if info is None:
+        return None, None
+    fd, opened = open_regular_readonly(path, label, max_bytes=max_bytes)
+    with os.fdopen(fd, "rb") as handle:
+        data = handle.read(max_bytes + 1)
+    if len(data) > max_bytes:
+        fail(f"{label} is too large")
+    return data, stat.S_IMODE(opened.st_mode)
+
+
+def rollback_replaced_destination(
+    path: Path,
+    data: bytes | None,
+    mode: int | None,
+) -> None:
+    if data is None:
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+        with contextlib.suppress(OSError):
+            fsync_directory(path.parent)
+        return
+    temporary = path.with_name(f".{path.name}.nddev.rollback.{os.getpid()}.{time.time_ns()}")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode or OWNER_FILE_MODE)
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
+            handle.flush()
+            with contextlib.suppress(OSError):
+                os.fsync(handle.fileno())
         os.replace(temporary, path)
-        path.chmod(mode)
+        if mode is not None:
+            os.chmod(path, mode)
+        with contextlib.suppress(OSError):
+            fsync_directory(path.parent)
     except BaseException:
         with contextlib.suppress(FileNotFoundError):
             temporary.unlink()
+        raise
+
+
+def atomic_write(path: Path, data: bytes, target: Path, *, mode: int = OWNER_FILE_MODE) -> None:
+    ensure_real_parent(path, target)
+    original_data, original_mode = snapshot_replace_destination(
+        path,
+        str(path),
+        max_bytes=max(MANAGED_MAX_BYTES, SOFTWARE_MAX_BYTES),
+    )
+    temporary = path.with_name(f".{path.name}.nddev.tmp.{os.getpid()}.{time.time_ns()}")
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    replaced = False
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        replaced = True
+        path.chmod(mode)
+        fsync_directory(path.parent)
+    except BaseException:
+        if replaced:
+            rollback_replaced_destination(path, original_data, original_mode)
+        else:
+            with contextlib.suppress(FileNotFoundError):
+                temporary.unlink()
         raise
 
 
@@ -1430,6 +1497,21 @@ def build_stamp(target: Path, setup: dict[str, Any], profile_data: dict[str, Any
     }
 
 
+def setup_change_sets(
+    target: Path,
+    files: dict[str, bytes],
+    current: dict[str, Any] | None,
+) -> tuple[list[str], list[str], list[str]]:
+    changed = sorted(
+        relative
+        for relative, data in files.items()
+        if current_managed_digest(target, relative) != managed_digest_for_bytes(relative, data)
+    )
+    removed = sorted(relative for relative in stamp_managed_paths(current) if relative not in files)
+    changed_paths = sorted(dict.fromkeys((*changed, *removed)))
+    return changed, removed, changed_paths
+
+
 def write_setup(
     target: Path,
     setup: dict[str, Any],
@@ -1452,6 +1534,8 @@ def write_setup(
                     "changed": False,
                     "content_setup_id": current.get("content_setup_id"),
                     "permission_profile_id": current.get("permission_profile_id"),
+                    "changed_paths": [],
+                    "removed": [],
                     "backup_slot": None,
                     "target": str(validate_target(target, create=False)),
                 }
@@ -1460,11 +1544,7 @@ def write_setup(
                 fail(f"managed target has drift: {', '.join(drift)}")
         files = desired_files(target, setup, profile_data)
         desired_stamp = build_stamp(target, setup, profile_data, files)
-        changed = [
-            relative
-            for relative, data in files.items()
-            if current_managed_digest(target, relative) != managed_digest_for_bytes(relative, data)
-        ]
+        changed, removed, changed_paths = setup_change_sets(target, files, current)
         backup_slot = None
         if current is not None:
             descriptor = stamp_descriptor(current)
@@ -1474,9 +1554,7 @@ def write_setup(
                 or descriptor["permission_profile_id"] != profile_data["id"]
             ):
                 backup_slot = create_backup(target, current)
-        stale_paths = ()
-        if current is not None:
-            stale_paths = tuple(path for path in stamp_managed_paths(current) if path not in files)
+        stale_paths = tuple(removed)
         snapshot = snapshot_files(target, stale_paths)
         try:
             for relative in stale_paths:
@@ -1497,6 +1575,8 @@ def write_setup(
             "content_setup_id": setup["id"],
             "permission_profile_id": profile_data["id"],
             "changed": changed,
+            "changed_paths": changed_paths,
+            "removed": removed,
             "backup_slot": backup_slot,
             "target": str(validate_target(target, create=False)),
         }
@@ -1618,6 +1698,13 @@ def plan_payload(target: Path, setup: dict[str, Any], profile_data: dict[str, An
         else:
             operation = "switch-profile" if status["content_setup_id"] == setup["id"] else "switch"
             backup_required = True
+    changed: list[str] = []
+    removed: list[str] = []
+    changed_paths: list[str] = []
+    if operation != "blocked-legacy" and not status["drift"]:
+        current = read_stamp(target)
+        files = desired_files(target, setup, profile_data)
+        changed, removed, changed_paths = setup_change_sets(target, files, current)
     return {
         "operation": operation,
         "content_setup_id": setup["id"],
@@ -1628,6 +1715,9 @@ def plan_payload(target: Path, setup: dict[str, Any], profile_data: dict[str, An
         "legacy_setup_id": status["legacy_setup_id"],
         "drift": status["drift"],
         "backup_required": backup_required,
+        "changed": changed,
+        "removed": removed,
+        "changed_paths": changed_paths,
         "mutates": False,
     }
 
@@ -2224,13 +2314,32 @@ def restore_software_stamp(target: Path, data: bytes | None, mode: int | None) -
 def copy_staged_binary(source: Path, destination: Path, target: Path) -> str:
     info = validate_software_file(source, "staged Kimi Code binary")
     ensure_real_parent(destination, target)
+    original_data, original_mode = snapshot_replace_destination(
+        destination,
+        "Kimi Code entrypoint",
+        max_bytes=SOFTWARE_MAX_BYTES,
+    )
     temporary = destination.with_name(f".{destination.name}.nddev.tmp.{os.getpid()}.{time.time_ns()}")
     fd, _ = open_regular_readonly(source, "staged Kimi Code binary", max_bytes=SOFTWARE_MAX_BYTES)
-    with os.fdopen(fd, "rb") as source_handle, temporary.open("xb") as target_handle:
-        shutil.copyfileobj(source_handle, target_handle, length=1024 * 1024)
-    temporary.chmod(0o700 if stat.S_IMODE(info.st_mode) & 0o100 else OWNER_FILE_MODE)
-    os.replace(temporary, destination)
-    destination.chmod(0o700)
+    replaced = False
+    try:
+        with os.fdopen(fd, "rb") as source_handle:
+            with temporary.open("xb") as target_handle:
+                shutil.copyfileobj(source_handle, target_handle, length=1024 * 1024)
+                target_handle.flush()
+                os.fsync(target_handle.fileno())
+        temporary.chmod(0o700 if stat.S_IMODE(info.st_mode) & 0o100 else OWNER_FILE_MODE)
+        os.replace(temporary, destination)
+        replaced = True
+        destination.chmod(0o700)
+        fsync_directory(destination.parent)
+    except BaseException:
+        if replaced:
+            rollback_replaced_destination(destination, original_data, original_mode)
+        else:
+            with contextlib.suppress(FileNotFoundError):
+                temporary.unlink()
+        raise
     return file_sha256(destination, label="Kimi Code entrypoint")
 
 
@@ -2600,12 +2709,18 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         command.add_argument("--target", required=True)
         command.add_argument("--json", action="store_true")
 
-    for name in ("plan", "install"):
-        command = subparsers.add_parser(name)
-        command.add_argument("--setup", default=DEFAULT_CONTENT_SETUP)
-        command.add_argument("--profile", default=DEFAULT_PROFILE)
-        command.add_argument("--target", required=True)
-        command.add_argument("--json", action="store_true")
+    plan = subparsers.add_parser("plan")
+    plan.add_argument("--setup", default=DEFAULT_CONTENT_SETUP)
+    plan.add_argument("--profile", default=DEFAULT_PROFILE)
+    plan.add_argument("--target", required=True)
+    plan.add_argument("--migrate-legacy", action="store_true")
+    plan.add_argument("--json", action="store_true")
+
+    install = subparsers.add_parser("install")
+    install.add_argument("--setup", default=DEFAULT_CONTENT_SETUP)
+    install.add_argument("--profile", default=DEFAULT_PROFILE)
+    install.add_argument("--target", required=True)
+    install.add_argument("--json", action="store_true")
 
     switch_profile = subparsers.add_parser("switch-profile")
     switch_profile.add_argument("--profile", required=True)
@@ -2654,7 +2769,15 @@ def dispatch(args: argparse.Namespace) -> int:
         return 0
     if args.command == "plan":
         target = require_absolute_target(args.target)
-        emit(plan_payload(target, load_content_setup(args.setup), load_profile(args.profile)), as_json=args.json)
+        emit(
+            plan_payload(
+                target,
+                load_content_setup(args.setup),
+                load_profile(args.profile),
+                migrate_legacy=args.migrate_legacy,
+            ),
+            as_json=args.json,
+        )
         return 0
     if args.command == "install":
         target = require_absolute_target(args.target)
