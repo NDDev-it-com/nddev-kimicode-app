@@ -39,6 +39,8 @@
   },
   "runtime_launch": {
     "external_target_bound_lifecycle_lock": true,
+    "external_product_lifecycle_lock": true,
+    "external_product_to_target_handoff": true,
     "external_lock_persistent_inode": true,
     "external_lock_fixed_system_bootstrap_root": true,
     "internal_lock_persistent_inode": true,

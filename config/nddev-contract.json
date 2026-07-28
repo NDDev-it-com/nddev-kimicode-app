@@ -50,6 +50,7 @@
     "launch_filters_live_credentials": true,
     "launch_blocks_managed_mode_overrides": true,
     "launch_holds_lifecycle_lock": true,
+    "launch_uses_external_product_lifecycle_lock": true,
     "launch_uses_external_target_bound_lifecycle_lock": true,
     "launch_keeps_external_lock_file_persistent": true,
     "launch_keeps_internal_lock_file_persistent": true,
@@ -118,11 +119,11 @@
     "workspace_expansion_blocked": ["--add-dir", "--add-dir=<dir>"],
     "target_environment_scope": "target-owned /absolute/target/bin/kimi with isolated HOME, TMPDIR, and KIMI_CODE_HOME; credentials, sessions, logs, skills, agents, plugins, MCP, updates, and runtime data stay under the explicit target",
     "pre_login_supported": true,
-    "lifecycle_lock_scope": "External bootstrap lock is acquired first before target creation or inspection, target-local internal lock is acquired second, and both are held from launch preflight through child process completion and cleanup; internal is released first and external last",
+    "lifecycle_lock_scope": "External product coordination is acquired before target creation or inspection, hands off to the canonical external target lock, then the target-local internal lock is acquired; external target and internal locks are held from launch preflight through child process completion and cleanup; internal is released first and external target last",
     "mutable_runtime_paths": "The managed target root, runtime HOME, runtime TMPDIR, KIMI_CODE_HOME, config, session, plugin, MCP, and log locations remain writable by the launched CLI",
     "pre_handoff_executable_revalidation": "Immediately before subprocess handoff, only the dedicated lock directory, launcher bin directory, and immutable software artifact directories are made read/execute-only; /absolute/target/bin/kimi is reopened without following symlinks and checked for regular file type, current-user ownership, mode 0700, stable inode, and pinned official-binary digest",
     "portable_handoff_mechanism": "write-protected verified-path handoff with an O_NOFOLLOW identity/digest evidence fd held until the child is spawned; exact-inode fd execution is not the portable macOS contract",
-    "lifecycle_lock_mechanism": "dual fcntl.flock lifecycle locks: a persistent 0600 external bootstrap lock file under a product/UID 0700 root below the fixed validated system temp root (/private/tmp on macOS, /tmp on Linux) keyed by full sha256 of product namespace plus canonical absolute target, and a persistent 0600 target-local regular lock file under a dedicated lock directory; both lock files are never unlinked on normal release, and the dedicated target-local lock directory is write-protected to 0500 while held then restored to 0700",
+    "lifecycle_lock_mechanism": "fcntl.flock lifecycle locks: a persistent 0600 external product lock under a product/UID 0700 root below the fixed validated system temp root (/private/tmp on macOS, /tmp on Linux), persistent 0600 canonical external target locks below its targets directory keyed by full sha256 of product namespace plus canonical absolute target, and a persistent 0600 target-local regular lock file under a dedicated lock directory; lock files are never unlinked on normal release, and the dedicated target-local lock directory is write-protected to 0500 while held then restored to 0700",
     "same_uid_tamper_boundary": "No OS sandbox is claimed against deliberate same-UID chmod or tampering of the fixed bootstrap root outside the manager; ordinary target-local lock-file unlink, internal lock-parent rename bypass, and executable os.replace swaps are denied while the protected launch path and external bootstrap lock are held"
   },
   "builder_toolkit": {

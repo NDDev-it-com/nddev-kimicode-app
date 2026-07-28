@@ -74,6 +74,19 @@
       "source_path": "apps/kimi-code/src/cli/commands.ts",
       "git_commit": "8a45f10eddbb35c317047e82e567cdb59a220b4f",
       "source_url": "https://github.com/MoonshotAI/kimi-code/blob/8a45f10eddbb35c317047e82e567cdb59a220b4f/apps/kimi-code/src/cli/commands.ts"
+    },
+    "native_cli_grammar": {
+      "source_url": "https://www.kimi.com/code/docs/en/kimi-code-cli/reference/kimi-command.html",
+      "main_command": "kimi [options]",
+      "short_value_flags": ["-S", "-m", "-p", "-r"],
+      "short_boolean_flags": ["-V", "-h", "-c", "-y"],
+      "workspace_expansion_flags": ["--add-dir"],
+      "hidden_aliases": {
+        "-r": "--session",
+        "--auto-approve": "--yolo",
+        "--yes": "--yolo"
+      },
+      "unsupported_short_flags": ["-C"]
     }
   },
   "permission_model": {

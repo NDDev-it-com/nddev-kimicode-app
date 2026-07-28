@@ -46,6 +46,11 @@ LOCK_NAME = "lifecycle.lock"
 EXTERNAL_LOCK_ROOT_NAME = f"{PRODUCT_NAME}.{os.getuid() if hasattr(os, 'getuid') else 'nouid'}.locks"
 EXTERNAL_LOCK_NAMESPACE = f"{PRODUCT_NAME}:external-bootstrap:v1"
 EXTERNAL_LOCK_SUFFIX = "external.lock"
+PRODUCT_LOCK_NAME = "product.lock"
+TARGET_LOCK_ROOT_NAME = "targets"
+LOCK_STAGE_ALIAS_MAX = 4
+LOCK_PARENT_ENTRY_MAX = 256
+READ_LIFECYCLE_MAX_ATTEMPTS = 2
 AT_FDCWD_BY_SYSTEM = {"darwin": -2, "linux": -100}
 RENAME_EXCL_DARWIN = 0x00000004
 RENAME_NOREPLACE_LINUX = 1
@@ -154,7 +159,6 @@ FORBIDDEN_LAUNCH_FLAGS = {
     "--session",
     "--yolo",
     "--yes",
-    "-C",
     "-S",
     "-c",
     "-p",
@@ -168,9 +172,15 @@ FORBIDDEN_LAUNCH_VALUE_FLAGS = {
     "--model",
     "--output-format",
     "--prompt",
+    "--resume",
+    "--session",
     "--skills-dir",
     "-m",
+    "-p",
+    "-r",
+    "-S",
 }
+FORBIDDEN_LAUNCH_SHORT_VALUE_FLAGS = {"-S", "-m", "-p", "-r"}
 FORBIDDEN_LAUNCH_SUBCOMMANDS = {
     "__plugin_run_node",
     "acp",
@@ -188,6 +198,10 @@ FORBIDDEN_LAUNCH_SUBCOMMANDS = {
 
 class KimicodeSetupError(Exception):
     """Safe user-facing lifecycle failure."""
+
+
+class ReadLifecycleRetry(Exception):
+    """Internal signal that an uncoordinated read observed lifecycle namespace churn."""
 
 
 @dataclass
@@ -220,6 +234,20 @@ class LaunchInvocation:
     child_env: dict[str, str]
     expected_entrypoint_digest: str
     stamp_entrypoint_digest: str
+
+
+@dataclass
+class ProductLockHandle:
+    fd: int
+    path: Path
+    root: Path
+
+
+@dataclass
+class ExternalTargetLockHandle:
+    fd: int
+    path: Path
+    canonical_target: str
 
 
 @dataclass
@@ -443,19 +471,170 @@ def fixed_system_temp_root() -> Path:
     return resolved
 
 
-def ensure_external_lock_root() -> Path:
+def remove_unpublished_path(path: Path, created_info: os.stat_result, label: str) -> None:
+    current = stat_existing(path, label)
+    if current is None:
+        return
+    if current.st_dev != created_info.st_dev or current.st_ino != created_info.st_ino:
+        fail(f"{label} changed before rollback")
+    if stat.S_ISDIR(created_info.st_mode):
+        if not stat.S_ISDIR(current.st_mode):
+            fail(f"{label} changed kind before rollback")
+        path.rmdir()
+        return
+    if stat.S_ISREG(created_info.st_mode):
+        if not stat.S_ISREG(current.st_mode) or current.st_nlink != 1:
+            fail(f"{label} changed kind before rollback")
+        path.unlink()
+        return
+    fail(f"{label} has unsupported rollback kind")
+
+
+def rollback_unpublished_path(
+    path: Path,
+    created_info: os.stat_result | None,
+    parent_fd: int,
+    parent_info: os.stat_result,
+    label: str,
+) -> None:
+    if created_info is not None:
+        remove_unpublished_path(path, created_info, label)
+        os.fsync(parent_fd)
+    restore_directory_metadata_fd(parent_fd, parent_info, f"{label} parent")
+    os.fsync(parent_fd)
+
+
+def rollback_unpublished_path_after_open(
+    path: Path,
+    created_info: os.stat_result | None,
+    parent_fd: int,
+    parent_info: os.stat_result,
+    label: str,
+) -> None:
+    try:
+        rollback_unpublished_path(path, created_info, parent_fd, parent_info, label)
+    finally:
+        os.close(parent_fd)
+
+
+@dataclass
+class DirectoryCreationSpan:
+    path: Path
+    created_info: os.stat_result
+    parent_fd: int
+    parent_info: os.stat_result
+    label: str
+    closed: bool = False
+
+    def rollback(self) -> None:
+        if self.closed:
+            return
+        try:
+            rollback_unpublished_path(
+                self.path,
+                self.created_info,
+                self.parent_fd,
+                self.parent_info,
+                self.label,
+            )
+        finally:
+            os.close(self.parent_fd)
+            self.closed = True
+
+    def commit_parent_metadata(self) -> None:
+        if self.closed:
+            return
+        try:
+            restore_directory_metadata_fd(self.parent_fd, self.parent_info, f"{self.label} parent")
+            os.fsync(self.parent_fd)
+        finally:
+            os.close(self.parent_fd)
+            self.closed = True
+
+
+def validate_external_lock_root(root: Path, info: os.stat_result | None) -> None:
+    if info is None:
+        fail("external lifecycle lock root is missing")
+    if not stat.S_ISDIR(info.st_mode):
+        fail("external lifecycle lock root must be a real directory")
+    if not is_current_owner(info):
+        fail("external lifecycle lock root must be owned by the current user")
+    if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
+        fail("external lifecycle lock root mode must be 0700")
+
+
+def ensure_external_lock_root_with_span() -> tuple[Path, DirectoryCreationSpan | None]:
     root = fixed_system_temp_root() / EXTERNAL_LOCK_ROOT_NAME
     info = stat_existing(root, "external lifecycle lock root")
     if info is None:
+        parent_fd = open_directory_fd(root.parent, "external lifecycle lock root parent")
+        parent_info = os.fstat(parent_fd)
+        created_info: os.stat_result | None = None
         try:
-            root.mkdir(mode=OWNER_DIRECTORY_MODE)
-        except FileExistsError:
-            pass
-        else:
-            root.chmod(OWNER_DIRECTORY_MODE)
-        info = stat_existing(root, "external lifecycle lock root")
+            os.fsync(parent_fd)
+            try:
+                root.mkdir(mode=OWNER_DIRECTORY_MODE)
+            except FileExistsError:
+                pass
+            else:
+                created_info = require_real_directory(root, "external lifecycle lock root")
+                root.chmod(OWNER_DIRECTORY_MODE)
+            os.fsync(parent_fd)
+            info = stat_existing(root, "external lifecycle lock root")
+            validate_external_lock_root(root, info)
+        except BaseException:
+            rollback_unpublished_path_after_open(
+                root,
+                created_info,
+                parent_fd,
+                parent_info,
+                "external lifecycle lock root",
+            )
+            raise
+        if created_info is None:
+            os.close(parent_fd)
+            return root, None
+        return root, DirectoryCreationSpan(
+            path=root,
+            created_info=created_info,
+            parent_fd=parent_fd,
+            parent_info=parent_info,
+            label="external lifecycle lock root",
+        )
+    validate_external_lock_root(root, info)
+    return root, None
+
+
+def ensure_external_lock_root() -> Path:
+    root, span = ensure_external_lock_root_with_span()
+    if span is not None:
+        span.commit_parent_metadata()
+    return root
+
+
+def bootstrap_lock_path(target: Path, canonical_target: str | None = None) -> Path:
+    canonical = canonical_target if canonical_target is not None else lock_canonical_target(target)
+    return bootstrap_lock_path_for_root(ensure_external_lock_root(), canonical)
+
+
+def product_lock_path(root: Path) -> Path:
+    return root / PRODUCT_LOCK_NAME
+
+
+def target_lock_root_path(root: Path) -> Path:
+    return root / TARGET_LOCK_ROOT_NAME
+
+
+def bootstrap_lock_path_for_root(root: Path, canonical_target: str) -> Path:
+    digest = sha256_bytes(f"{EXTERNAL_LOCK_NAMESPACE}\0{canonical_target}".encode("utf-8"))
+    return target_lock_root_path(root) / f"{digest}.{EXTERNAL_LOCK_SUFFIX}"
+
+
+def external_lock_root_no_create() -> Path | None:
+    root = fixed_system_temp_root() / EXTERNAL_LOCK_ROOT_NAME
+    info = stat_existing(root, "external lifecycle lock root")
     if info is None:
-        fail("external lifecycle lock root is missing")
+        return None
     if not stat.S_ISDIR(info.st_mode):
         fail("external lifecycle lock root must be a real directory")
     if not is_current_owner(info):
@@ -465,10 +644,87 @@ def ensure_external_lock_root() -> Path:
     return root
 
 
-def bootstrap_lock_path(target: Path, canonical_target: str | None = None) -> Path:
-    canonical = canonical_target if canonical_target is not None else lock_canonical_target(target)
-    digest = sha256_bytes(f"{EXTERNAL_LOCK_NAMESPACE}\0{canonical}".encode("utf-8"))
-    return ensure_external_lock_root() / f"{digest}.{EXTERNAL_LOCK_SUFFIX}"
+def bootstrap_lock_path_no_create(canonical_target: str) -> Path | None:
+    root = external_lock_root_no_create()
+    if root is None:
+        return None
+    target_root = target_lock_root_path(root)
+    if stat_existing(target_root, "external target lock root") is None:
+        return None
+    return bootstrap_lock_path_for_root(root, canonical_target)
+
+
+def bounded_directory_entries(path: Path, label: str) -> list[Path]:
+    entries: list[Path] = []
+    try:
+        iterator = path.iterdir()
+        for entry in iterator:
+            entries.append(entry)
+            if len(entries) > LOCK_PARENT_ENTRY_MAX:
+                fail(f"{label} has too many entries")
+    except OSError as exc:
+        fail(f"{label} could not be inspected: {exc}")
+    return sorted(entries, key=lambda item: item.name)
+
+
+def validate_external_target_lock_root(info: os.stat_result | None) -> None:
+    if info is None:
+        fail("external target lock root is missing")
+    if not stat.S_ISDIR(info.st_mode):
+        fail("external target lock root must be a directory")
+    if not is_current_owner(info):
+        fail("external target lock root must be owned by the current user")
+    if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
+        fail("external target lock root mode must be 0700")
+
+
+def ensure_external_target_lock_root_with_span(root: Path) -> tuple[Path, DirectoryCreationSpan | None]:
+    target_root = target_lock_root_path(root)
+    info = stat_existing(target_root, "external target lock root")
+    if info is None:
+        parent_fd = open_directory_fd(root, "external target lock root parent")
+        parent_info = os.fstat(parent_fd)
+        created_info: os.stat_result | None = None
+        try:
+            os.fsync(parent_fd)
+            try:
+                target_root.mkdir(mode=OWNER_DIRECTORY_MODE)
+            except FileExistsError:
+                pass
+            else:
+                created_info = require_real_directory(target_root, "external target lock root")
+                target_root.chmod(OWNER_DIRECTORY_MODE)
+            os.fsync(parent_fd)
+            info = stat_existing(target_root, "external target lock root")
+            validate_external_target_lock_root(info)
+        except BaseException:
+            rollback_unpublished_path_after_open(
+                target_root,
+                created_info,
+                parent_fd,
+                parent_info,
+                "external target lock root",
+            )
+            raise
+        if created_info is None:
+            os.close(parent_fd)
+            return target_root, None
+        return target_root, DirectoryCreationSpan(
+            path=target_root,
+            created_info=created_info,
+            parent_fd=parent_fd,
+            parent_info=parent_info,
+            label="external target lock root",
+        )
+    validate_external_target_lock_root(info)
+    return target_root, None
+
+
+def ensure_external_target_lock_root(root: Path) -> Path:
+    target_root, span = ensure_external_target_lock_root_with_span(root)
+    if span is not None:
+        span.commit_parent_metadata()
+    return target_root
 
 
 def ensure_lock_parent(target: Path) -> Path:
@@ -519,24 +775,189 @@ def write_all(fd: int, data: bytes) -> None:
 
 
 def write_lock_stage_file(path: Path, payload: bytes, label: str) -> None:
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
+    parent_fd = open_directory_fd(path.parent, f"{label} parent")
+    parent_info = os.fstat(parent_fd)
+    fd: int | None = None
+    created_info: os.stat_result | None = None
     try:
-        try:
-            write_all(fd, payload)
-            os.fchmod(fd, OWNER_FILE_MODE)
-            os.fsync(fd)
-        finally:
-            os.close(fd)
+        os.fsync(parent_fd)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(path, flags, OWNER_FILE_MODE)
+        created_info = os.fstat(fd)
+        write_all(fd, payload)
+        os.fchmod(fd, OWNER_FILE_MODE)
+        os.fsync(fd)
+        os.close(fd)
+        fd = None
+        info = stat_existing(path, label)
+        if info is None:
+            fail(f"{label} staged file is missing")
+        validate_lock_info(info, label)
+        if read_existing_file(path, max_bytes=METADATA_MAX_BYTES, label=label) != payload:
+            fail(f"{label} staged binding postcondition failed")
     except BaseException:
-        with contextlib.suppress(FileNotFoundError):
-            path.unlink()
+        if fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        rollback_unpublished_path(
+            path,
+            created_info,
+            parent_fd,
+            parent_info,
+            label,
+        )
         raise
-    info = stat_existing(path, label)
+    finally:
+        os.close(parent_fd)
+
+
+def lock_stage_prefix(path: Path) -> str:
+    return f".{path.name}.nddev.tmp."
+
+
+def lock_stage_aliases(path: Path, label: str) -> list[Path]:
+    parent = path.parent
+    parent_info = stat_existing(parent, f"{label} parent")
+    if parent_info is None:
+        return []
+    if not stat.S_ISDIR(parent_info.st_mode):
+        fail(f"{label} parent must be a directory")
+    if not is_current_owner(parent_info):
+        fail(f"{label} parent must be owned by the current user")
+    parent_mode = stat.S_IMODE(parent_info.st_mode)
+    if parent_mode not in {OWNER_DIRECTORY_MODE, 0o500}:
+        fail(f"{label} parent mode must be 0700 or protected 0500")
+    prefix = lock_stage_prefix(path)
+    aliases: list[Path] = []
+    for child in bounded_directory_entries(parent, f"{label} parent"):
+        if not child.name.startswith(prefix):
+            continue
+        suffix = child.name[len(prefix) :]
+        pieces = suffix.split(".")
+        if (
+            len(pieces) != 2
+            or not pieces[0].isdecimal()
+            or not pieces[1].isdecimal()
+            or len(pieces[0]) > 20
+            or len(pieces[1]) > 30
+        ):
+            fail(f"{label} staged binding alias is malformed")
+        aliases.append(child)
+        if len(aliases) > LOCK_STAGE_ALIAS_MAX:
+            fail(f"{label} has too many staged binding aliases")
+    return aliases
+
+
+def read_valid_lock_stage_payload(
+    stage: Path,
+    path: Path,
+    label: str,
+    *,
+    canonical_target: str,
+    kind: str,
+) -> os.stat_result:
+    info = stat_existing(stage, f"{label} staged binding")
     if info is None:
-        fail(f"{label} staged file is missing")
-    validate_lock_info(info, label)
-    if read_existing_file(path, max_bytes=METADATA_MAX_BYTES, label=label) != payload:
-        fail(f"{label} staged binding postcondition failed")
+        fail(f"{label} staged binding is missing")
+    validate_lock_info(info, f"{label} staged binding")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(stage, flags)
+    except OSError as exc:
+        fail(f"{label} staged binding could not be opened safely: {exc}")
+    try:
+        opened = os.fstat(fd)
+        validate_lock_info(opened, f"{label} staged binding")
+        if opened.st_dev != info.st_dev or opened.st_ino != info.st_ino:
+            fail(f"{label} staged binding changed while opening")
+        if opened.st_size > METADATA_MAX_BYTES:
+            fail(f"{label} staged binding is too large")
+        data = os.read(fd, METADATA_MAX_BYTES + 1)
+        if len(data) > METADATA_MAX_BYTES:
+            fail(f"{label} staged binding is too large")
+        after = os.fstat(fd)
+        if after.st_dev != opened.st_dev or after.st_ino != opened.st_ino or after.st_size != opened.st_size:
+            fail(f"{label} staged binding changed while reading")
+    finally:
+        os.close(fd)
+    try:
+        payload = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        fail(f"{label} staged binding is malformed")
+    if not isinstance(payload, dict):
+        fail(f"{label} staged binding is malformed")
+    validate_lock_binding(
+        payload,
+        kind=kind,
+        canonical_target=canonical_target,
+        path=path,
+        label=f"{label} staged binding",
+    )
+    if data != canonical_json(payload):
+        fail(f"{label} staged binding is not canonical")
+    current = stat_existing(stage, f"{label} staged binding")
+    if current is None:
+        fail(f"{label} staged binding disappeared")
+    validate_lock_info(current, f"{label} staged binding")
+    if (
+        current.st_dev != after.st_dev
+        or current.st_ino != after.st_ino
+        or current.st_mode != after.st_mode
+        or current.st_nlink != after.st_nlink
+        or current.st_size != after.st_size
+        or current.st_mtime_ns != after.st_mtime_ns
+    ):
+        fail(f"{label} staged binding changed after validation")
+    return current
+
+
+def revalidate_lock_stage_identity(stage: Path, expected: os.stat_result, label: str) -> None:
+    current = stat_existing(stage, f"{label} staged binding")
+    if current is None:
+        fail(f"{label} staged binding disappeared")
+    validate_lock_info(current, f"{label} staged binding")
+    if (
+        current.st_dev != expected.st_dev
+        or current.st_ino != expected.st_ino
+        or current.st_mode != expected.st_mode
+        or current.st_nlink != expected.st_nlink
+        or current.st_size != expected.st_size
+        or current.st_mtime_ns != expected.st_mtime_ns
+    ):
+        fail(f"{label} staged binding changed before promotion")
+
+
+def open_directory_fd(path: Path, label: str) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    if not hasattr(os, "O_NOFOLLOW"):
+        fail(f"{label} open requires O_NOFOLLOW support")
+    flags |= os.O_NOFOLLOW
+    try:
+        return os.open(path, flags)
+    except OSError as exc:
+        fail(f"{label} could not be opened safely: {exc}")
+
+
+def restore_directory_metadata_fd(fd: int, info: os.stat_result, label: str) -> None:
+    current = os.fstat(fd)
+    if current.st_dev != info.st_dev or current.st_ino != info.st_ino:
+        fail(f"{label} changed before metadata restore")
+    if not stat.S_ISDIR(current.st_mode):
+        fail(f"{label} must be a directory")
+    if stat.S_IMODE(current.st_mode) != stat.S_IMODE(info.st_mode):
+        os.fchmod(fd, stat.S_IMODE(info.st_mode))
+    os.utime(fd, ns=(info.st_atime_ns, info.st_mtime_ns))
+
+
+def restore_directory_metadata(path: Path, info: os.stat_result, label: str) -> None:
+    fd = open_directory_fd(path, label)
+    try:
+        restore_directory_metadata_fd(fd, info, label)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def cleanup_lock_stage_file(path: Path) -> None:
@@ -596,17 +1017,41 @@ def rename_no_replace(source: Path, destination: Path, label: str) -> bool:
     fail(f"{label} no-replace publication failed: {os.strerror(error)}")
 
 
+def promote_lock_stage_alias(stage: Path, path: Path, label: str) -> bool:
+    try:
+        return rename_no_replace(stage, path, label)
+    except KimicodeSetupError:
+        if not path_exists_no_follow(stage) and path_exists_no_follow(path):
+            return False
+        raise
+
+
 def publish_missing_lock_file(path: Path, label: str, *, canonical_target: str, kind: str) -> None:
     parent = path.parent
     if stat_existing(parent, f"{label} parent") is None:
         fail(f"{label} parent is missing")
     payload = canonical_json(lock_payload(kind, canonical_target, path))
-    stage = path.with_name(f".{path.name}.nddev.tmp.{os.getpid()}.{time.time_ns()}")
+    aliases = lock_stage_aliases(path, label)
+    if aliases:
+        identities: dict[Path, os.stat_result] = {}
+        for alias in aliases:
+            identities[alias] = read_valid_lock_stage_payload(
+                alias,
+                path,
+                label,
+                canonical_target=canonical_target,
+                kind=kind,
+            )
+        promoting = aliases[0]
+        revalidate_lock_stage_identity(promoting, identities[promoting], label)
+        if promote_lock_stage_alias(promoting, path, label):
+            fsync_directory(parent)
+        return
+    stage = path.with_name(f"{lock_stage_prefix(path)}{os.getpid()}.{time.time_ns()}")
     published = False
     try:
         write_lock_stage_file(stage, payload, f"{label} staged binding")
         if not rename_no_replace(stage, path, label):
-            cleanup_lock_stage_file(stage)
             return
         published = True
         fsync_directory(parent)
@@ -629,6 +1074,40 @@ def publish_missing_lock_file(path: Path, label: str, *, canonical_target: str, 
             )
         finally:
             os.close(fd)
+
+
+def drain_lock_stage_aliases_after_lock(
+    fd: int,
+    path: Path,
+    label: str,
+    *,
+    canonical_target: str,
+    kind: str,
+) -> None:
+    aliases = lock_stage_aliases(path, label)
+    if not aliases:
+        return
+    identities: dict[Path, os.stat_result] = {}
+    for alias in aliases:
+        identities[alias] = read_valid_lock_stage_payload(alias, path, label, canonical_target=canonical_target, kind=kind)
+    parent_fd = open_directory_fd(path.parent, f"{label} parent")
+    parent_info = os.fstat(parent_fd)
+    for alias in aliases:
+        revalidate_lock_stage_identity(alias, identities[alias], label)
+        try:
+            alias.unlink()
+        except FileNotFoundError:
+            continue
+    try:
+        os.fsync(parent_fd)
+        restore_directory_metadata_fd(parent_fd, parent_info, f"{label} parent")
+        os.fsync(parent_fd)
+        fd_info = os.fstat(fd)
+        current = verify_lock_fd_path(fd, path, label)
+        if current.st_dev != fd_info.st_dev or current.st_ino != fd_info.st_ino or current.st_nlink != 1:
+            fail(f"{label} changed while draining staged aliases")
+    finally:
+        os.close(parent_fd)
 
 
 def open_lock_file(path: Path, label: str, *, create: bool = False) -> int | None:
@@ -723,21 +1202,42 @@ def validate_lock_binding(
         fail(f"{label} is bound to a different canonical target")
     if payload.get("path") != str(path):
         fail(f"{label} is bound to a different lock path")
+    if not isinstance(payload.get("pid"), int) or payload.get("pid") < 0:
+        fail(f"{label} binding is malformed")
 
 
-def acquire_lock_file(path: Path, label: str, *, canonical_target: str, kind: str) -> int:
+def acquire_lock_file(
+    path: Path,
+    label: str,
+    *,
+    canonical_target: str,
+    kind: str,
+    create: bool,
+    exclusive: bool,
+) -> int | None:
     if stat_existing(path, label) is None:
-        publish_missing_lock_file(
-            path,
-            label,
-            canonical_target=canonical_target,
-            kind=kind,
-        )
+        if create:
+            publish_missing_lock_file(
+                path,
+                label,
+                canonical_target=canonical_target,
+                kind=kind,
+            )
+        else:
+            aliases = lock_stage_aliases(path, label)
+            for alias in aliases:
+                read_valid_lock_stage_payload(alias, path, label, canonical_target=canonical_target, kind=kind)
+            if aliases:
+                fail(f"{label} has incomplete staged publication")
+            return None
     fd = open_lock_file(path, label, create=False)
     if fd is None:
-        fail(f"{label} is missing")
+        if create:
+            fail(f"{label} is missing")
+        return None
+    lock_mode = fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(fd, lock_mode | fcntl.LOCK_NB)
     except OSError as exc:
         os.close(fd)
         if exc.errno in {errno.EACCES, errno.EAGAIN}:
@@ -752,6 +1252,20 @@ def acquire_lock_file(path: Path, label: str, *, canonical_target: str, kind: st
             path=path,
             label=label,
         )
+        if exclusive:
+            drain_lock_stage_aliases_after_lock(
+                fd,
+                path,
+                label,
+                canonical_target=canonical_target,
+                kind=kind,
+            )
+        else:
+            aliases = lock_stage_aliases(path, label)
+            for alias in aliases:
+                read_valid_lock_stage_payload(alias, path, label, canonical_target=canonical_target, kind=kind)
+            if aliases:
+                fail(f"{label} has incomplete staged publication")
     except BaseException:
         with contextlib.suppress(OSError):
             fcntl.flock(fd, fcntl.LOCK_UN)
@@ -781,6 +1295,259 @@ def protect_internal_lock_parent(path: Path) -> ProtectedDirectory:
     return protected
 
 
+def product_lock_binding_target() -> str:
+    return PRODUCT_NAME
+
+
+def expected_product_lock_payload(path: Path) -> bytes:
+    return canonical_json(lock_payload("external-product", product_lock_binding_target(), path))
+
+
+def validate_product_namespace(root: Path, *, allow_target_stage_aliases: bool) -> None:
+    entries = bounded_directory_entries(root, "external lifecycle lock root")
+    allowed = {PRODUCT_LOCK_NAME, TARGET_LOCK_ROOT_NAME}
+    unknown = sorted(entry.name for entry in entries if entry.name not in allowed)
+    if unknown:
+        fail(f"external lifecycle lock root contains unknown entries: {', '.join(unknown[:4])}")
+    target_root = target_lock_root_path(root)
+    if path_exists_no_follow(target_root):
+        info = stat_existing(target_root, "external target lock root")
+        if info is None:
+            fail("external target lock root is missing")
+        if not stat.S_ISDIR(info.st_mode):
+            fail("external target lock root must be a directory")
+        if not is_current_owner(info):
+            fail("external target lock root must be owned by the current user")
+        if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
+            fail("external target lock root mode must be 0700")
+        for entry in bounded_directory_entries(target_root, "external target lock root"):
+            if entry.name.endswith(f".{EXTERNAL_LOCK_SUFFIX}") and re.fullmatch(
+                r"[0-9a-f]{64}\." + re.escape(EXTERNAL_LOCK_SUFFIX),
+                entry.name,
+            ):
+                info = stat_existing(entry, "external target lifecycle lock")
+                if info is None:
+                    raise ReadLifecycleRetry
+                validate_lock_info(info, "external target lifecycle lock")
+                continue
+            if entry.name.startswith(".") and ".nddev.tmp." in entry.name:
+                if allow_target_stage_aliases:
+                    continue
+                fail("external target lock root has incomplete staged publication")
+            fail(f"external target lock root contains unknown entry: {entry.name}")
+
+
+def ensure_product_namespace_ready_for_publication(root: Path, path: Path, label: str) -> None:
+    aliases = lock_stage_aliases(path, label)
+    alias_names = {alias.name for alias in aliases}
+    unknown = [entry.name for entry in bounded_directory_entries(root, "external lifecycle lock root") if entry.name not in alias_names]
+    if unknown:
+        fail(f"external lifecycle lock root contains unknown entries: {', '.join(unknown[:4])}")
+
+
+def finish_directory_creation_span(span: DirectoryCreationSpan | None, final_path: Path) -> None:
+    if span is None:
+        return
+    if path_exists_no_follow(final_path):
+        span.commit_parent_metadata()
+    else:
+        span.rollback()
+
+
+def acquire_product_lock(*, create: bool, exclusive: bool) -> ProductLockHandle | None:
+    root_span: DirectoryCreationSpan | None = None
+    path: Path | None = None
+    try:
+        if create:
+            root, root_span = ensure_external_lock_root_with_span()
+        else:
+            root = external_lock_root_no_create()
+        if root is None:
+            return None
+        path = product_lock_path(root)
+        if create and stat_existing(path, "external product lifecycle lock") is None:
+            ensure_product_namespace_ready_for_publication(root, path, "external product lifecycle lock")
+        fd = acquire_lock_file(
+            path,
+            "external product lifecycle lock",
+            canonical_target=product_lock_binding_target(),
+            kind="external-product",
+            create=create,
+            exclusive=exclusive,
+        )
+        if fd is None:
+            finish_directory_creation_span(root_span, path)
+            return None
+    except BaseException:
+        if path is not None:
+            finish_directory_creation_span(root_span, path)
+        elif root_span is not None:
+            root_span.rollback()
+        raise
+    try:
+        validate_product_namespace(root, allow_target_stage_aliases=exclusive)
+        handle = ProductLockHandle(fd=fd, path=path, root=root)
+    except BaseException:
+        release_lock_file(fd, path, remove_file=False)
+        finish_directory_creation_span(root_span, path)
+        raise
+    try:
+        finish_directory_creation_span(root_span, path)
+    except BaseException:
+        release_lock_file(handle.fd, handle.path, remove_file=False)
+        raise
+    return handle
+
+
+def release_product_lock(handle: ProductLockHandle | None) -> None:
+    if handle is None:
+        return
+    release_lock_file(handle.fd, handle.path, remove_file=False)
+
+
+def acquire_external_target_lock(
+    product_root: Path,
+    canonical_target: str,
+    *,
+    create: bool,
+    exclusive: bool,
+) -> ExternalTargetLockHandle | None:
+    target_span: DirectoryCreationSpan | None = None
+    path = bootstrap_lock_path_for_root(product_root, canonical_target)
+    try:
+        if create:
+            target_root, target_span = ensure_external_target_lock_root_with_span(product_root)
+        else:
+            target_root = target_lock_root_path(product_root)
+        if not create and stat_existing(target_root, "external target lock root") is None:
+            return None
+        fd = acquire_lock_file(
+            path,
+            "external target lifecycle lock",
+            canonical_target=canonical_target,
+            kind="external-bootstrap",
+            create=create,
+            exclusive=exclusive,
+        )
+        if fd is None:
+            finish_directory_creation_span(target_span, path)
+            return None
+    except BaseException:
+        finish_directory_creation_span(target_span, path)
+        raise
+    try:
+        validate_product_namespace(product_root, allow_target_stage_aliases=exclusive)
+        handle = ExternalTargetLockHandle(fd=fd, path=path, canonical_target=canonical_target)
+    except BaseException:
+        release_lock_file(fd, path, remove_file=False)
+        finish_directory_creation_span(target_span, path)
+        raise
+    try:
+        finish_directory_creation_span(target_span, path)
+    except BaseException:
+        release_lock_file(handle.fd, handle.path, remove_file=False)
+        raise
+    return handle
+
+
+def release_external_target_lock(handle: ExternalTargetLockHandle | None) -> None:
+    if handle is None:
+        return
+    release_lock_file(handle.fd, handle.path, remove_file=False)
+
+
+def cold_product_namespace_snapshot(root: Path) -> tuple[Any, ...]:
+    info = stat_existing(root, "external lifecycle lock root")
+    if info is None:
+        return ("absent",)
+    if not stat.S_ISDIR(info.st_mode):
+        fail("external lifecycle lock root must be a real directory")
+    if not is_current_owner(info):
+        fail("external lifecycle lock root must be owned by the current user")
+    if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
+        fail("external lifecycle lock root mode must be 0700")
+    entries = bounded_directory_entries(root, "external lifecycle lock root")
+    if entries:
+        if any(entry.name == PRODUCT_LOCK_NAME for entry in entries):
+            raise ReadLifecycleRetry
+        names = ", ".join(entry.name for entry in entries[:4])
+        fail(f"external lifecycle lock root must be empty without product anchor: {names}")
+    return (
+        "present-empty",
+        info.st_dev,
+        info.st_ino,
+        stat.S_IMODE(info.st_mode),
+        info.st_uid,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+    )
+
+
+@contextlib.contextmanager
+def read_lifecycle_coordination(target: Path):
+    product = acquire_product_lock(create=False, exclusive=False)
+    external: ExternalTargetLockHandle | None = None
+    if product is None:
+        root = fixed_system_temp_root() / EXTERNAL_LOCK_ROOT_NAME
+        before = cold_product_namespace_snapshot(root)
+        try:
+            canonical = validate_target(target, create=False)
+            yield canonical
+            after = cold_product_namespace_snapshot(root)
+            if after != before:
+                raise ReadLifecycleRetry
+        except KimicodeSetupError:
+            if cold_product_namespace_snapshot(root) != before:
+                raise ReadLifecycleRetry
+            raise
+        return
+    try:
+        canonical = validate_target(target, create=False)
+        identity = str(canonical)
+        external = acquire_external_target_lock(
+            product.root,
+            identity,
+            create=False,
+            exclusive=False,
+        )
+        if external is not None:
+            releasing_product = product
+            product = None
+            release_product_lock(releasing_product)
+        yield canonical
+        if external is None and product is not None:
+            target_path = bootstrap_lock_path_for_root(product.root, identity)
+            if path_exists_no_follow(target_path):
+                raise ReadLifecycleRetry
+            aliases = lock_stage_aliases(target_path, "external target lifecycle lock")
+            for alias in aliases:
+                read_valid_lock_stage_payload(
+                    alias,
+                    target_path,
+                    "external target lifecycle lock",
+                    canonical_target=identity,
+                    kind="external-bootstrap",
+                )
+            if aliases:
+                fail("external target lifecycle lock has incomplete staged publication")
+    finally:
+        release_external_target_lock(external)
+        release_product_lock(product)
+
+
+def read_lifecycle_payload(target: Path, reader: Any) -> Any:
+    for attempt in range(READ_LIFECYCLE_MAX_ATTEMPTS):
+        try:
+            with read_lifecycle_coordination(target) as coordinated_target:
+                return reader(coordinated_target)
+        except ReadLifecycleRetry:
+            if attempt + 1 >= READ_LIFECYCLE_MAX_ATTEMPTS:
+                fail("read-only lifecycle coordination changed during inspection")
+            continue
+    fail("read-only lifecycle coordination changed during inspection")
+
+
 @contextlib.contextmanager
 def target_lock(target: Path, *, create_parent: bool = False):
     transaction = DirectoryTransaction([])
@@ -793,18 +1560,26 @@ def target_lock(target: Path, *, create_parent: bool = False):
         transaction.cleanup()
         raise
     canonical_target = lock_canonical_target(target)
-    bootstrap_path = bootstrap_lock_path(target, canonical_target)
-    bootstrap_fd: int | None = None
+    product_lock: ProductLockHandle | None = None
+    external_lock: ExternalTargetLockHandle | None = None
     internal_path: Path | None = None
     internal_fd: int | None = None
     internal_parent: ProtectedDirectory | None = None
     try:
-        bootstrap_fd = acquire_lock_file(
-            bootstrap_path,
-            "external bootstrap lifecycle lock",
-            canonical_target=canonical_target,
-            kind="external-bootstrap",
+        product_lock = acquire_product_lock(create=True, exclusive=True)
+        if product_lock is None:
+            fail("external product lifecycle lock was not created")
+        external_lock = acquire_external_target_lock(
+            product_lock.root,
+            canonical_target,
+            create=True,
+            exclusive=True,
         )
+        if external_lock is None:
+            fail("external target lifecycle lock was not created")
+        releasing_product = product_lock
+        product_lock = None
+        release_product_lock(releasing_product)
         target_info = stat_existing(target, "target")
         if target_info is None and create_parent:
             target.mkdir(mode=OWNER_DIRECTORY_MODE)
@@ -823,7 +1598,11 @@ def target_lock(target: Path, *, create_parent: bool = False):
                 "target lifecycle lock",
                 canonical_target=canonical_target,
                 kind="target-internal",
+                create=True,
+                exclusive=True,
             )
+            if internal_fd is None:
+                fail("target lifecycle lock was not created")
             internal_parent = protect_internal_lock_parent(lock_parent)
         failed = False
         try:
@@ -844,10 +1623,10 @@ def target_lock(target: Path, *, create_parent: bool = False):
                         internal_parent = None
                         restoring_parent.restore()
                 finally:
-                    if bootstrap_fd is not None:
-                        releasing_bootstrap_fd = bootstrap_fd
-                        bootstrap_fd = None
-                        release_lock_file(releasing_bootstrap_fd, bootstrap_path, remove_file=False)
+                    if external_lock is not None:
+                        releasing_external = external_lock
+                        external_lock = None
+                        release_external_target_lock(releasing_external)
             if failed:
                 transaction.cleanup()
     except BaseException:
@@ -859,10 +1638,14 @@ def target_lock(target: Path, *, create_parent: bool = False):
             restoring_parent = internal_parent
             internal_parent = None
             restoring_parent.restore()
-        if bootstrap_fd is not None:
-            releasing_bootstrap_fd = bootstrap_fd
-            bootstrap_fd = None
-            release_lock_file(releasing_bootstrap_fd, bootstrap_path, remove_file=False)
+        if external_lock is not None:
+            releasing_external = external_lock
+            external_lock = None
+            release_external_target_lock(releasing_external)
+        if product_lock is not None:
+            releasing_product = product_lock
+            product_lock = None
+            release_product_lock(releasing_product)
         transaction.cleanup()
         raise
 
@@ -1386,6 +2169,10 @@ def auth_state(target: Path) -> dict[str, str]:
 
 
 def status_payload(target: Path) -> dict[str, Any]:
+    return read_lifecycle_payload(target, _status_payload)
+
+
+def _status_payload(target: Path) -> dict[str, Any]:
     canonical = validate_target(target, create=False)
     if stat_existing(target, "target") is None:
         return {
@@ -1416,7 +2203,7 @@ def status_payload(target: Path) -> dict[str, Any]:
     descriptor = stamp_descriptor(stamp)
     drift = drift_for_stamp(target, stamp)
     current = stamp_is_current(stamp)
-    software = software_status_payload(canonical)
+    software = _software_status_payload(canonical)
     return {
         "state": "managed" if current else "legacy-managed",
         "managed": True,
@@ -1722,7 +2509,7 @@ def plan_payload(target: Path, setup: dict[str, Any], profile_data: dict[str, An
         "operation": operation,
         "content_setup_id": setup["id"],
         "permission_profile_id": profile_data["id"],
-        "target": str(validate_target(target, create=False)),
+        "target": status["canonical_target"],
         "current_content_setup_id": status["content_setup_id"],
         "current_permission_profile_id": status["permission_profile_id"],
         "legacy_setup_id": status["legacy_setup_id"],
@@ -1833,6 +2620,10 @@ def software_current_binary(target: Path) -> Path:
 
 
 def software_status_payload(target: Path) -> dict[str, Any]:
+    return read_lifecycle_payload(target, _software_status_payload)
+
+
+def _software_status_payload(target: Path) -> dict[str, Any]:
     canonical = canonical_target_readonly(target)
     payload: dict[str, Any] = {
         "installed": False,
@@ -2336,8 +3127,9 @@ def reject_managed_launch_overrides(child_args: list[str]) -> None:
         for flag in FORBIDDEN_LAUNCH_VALUE_FLAGS:
             if flag.startswith("--") and arg.startswith(flag + "="):
                 fail(f"launch flag is managed by nddev-kimicode-app: {flag}")
-        if arg.startswith("-m") and arg != "-m":
-            fail("launch flag is managed by nddev-kimicode-app: -m")
+        for flag in FORBIDDEN_LAUNCH_SHORT_VALUE_FLAGS:
+            if arg.startswith(flag) and arg != flag:
+                fail(f"launch flag is managed by nddev-kimicode-app: {flag}")
         index += 1
 
 
@@ -2529,14 +3321,14 @@ def revalidate_launch_executable(
 
 
 def prepare_launch_invocation_locked(target: Path, child_args: list[str], workspace: Path) -> LaunchInvocation:
-    status = status_payload(target)
+    status = _status_payload(target)
     if not status["managed"]:
         fail("launch requires a managed target")
     if status["state"] == "legacy-managed":
         fail("launch refuses legacy managed setup state; run migrate first")
     if status["drift"]:
         fail(f"managed target has drift: {', '.join(status['drift'])}")
-    software = software_status_payload(target)
+    software = _software_status_payload(target)
     if software["legacy"]:
         fail("launch refuses legacy Bun software state; run migrate-cli first")
     if not software["current"]:
