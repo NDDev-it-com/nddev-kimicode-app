@@ -56,6 +56,7 @@ EXTERNAL_LOCK_ROOT_NAME = (
 )
 EXTERNAL_LOCK_NAMESPACE = f"{PRODUCT_NAME}:external-bootstrap:v1"
 EXTERNAL_LOCK_SUFFIX = "external.lock"
+EXTERNAL_LOCK_NAMESPACE_MAX_ENTRIES = 128
 EXTERNAL_PRODUCT_ANCHOR_NAME = "global.lock"
 EXTERNAL_PRODUCT_ANCHOR_CANONICAL_TARGET = f"{PRODUCT_NAME}:product-anchor:v1"
 AT_FDCWD_BY_SYSTEM = {"darwin": -2, "linux": -100}
@@ -945,6 +946,59 @@ def validate_existing_external_lock_root(path: Path) -> Path | None:
     return path
 
 
+def cold_external_namespace_entry_error(path: Path, info: os.stat_result) -> str:
+    name = path.name
+    if stat.S_ISREG(info.st_mode):
+        if not is_current_owner(info):
+            return "external lifecycle namespace entry must be owned by the current user"
+        if stat.S_IMODE(info.st_mode) != OWNER_FILE_MODE:
+            return "external lifecycle namespace entry mode must be 0600"
+        if info.st_nlink != 1:
+            return "external lifecycle namespace entry must not be a hardlink"
+        if name.startswith(f".{EXTERNAL_PRODUCT_ANCHOR_NAME}.nddev.tmp."):
+            return "external product lifecycle publication alias is pending"
+        if name.endswith(f".{EXTERNAL_LOCK_SUFFIX}") or (
+            name.startswith(".") and f".{EXTERNAL_LOCK_SUFFIX}.nddev.tmp." in name
+        ):
+            return "external target lifecycle anchor is orphaned"
+        return "external lifecycle namespace contains unknown entry"
+    if stat.S_ISDIR(info.st_mode):
+        if not is_current_owner(info):
+            return "external lifecycle namespace directory must be owned by the current user"
+        if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
+            return "external lifecycle namespace directory mode must be 0700"
+        return "external lifecycle namespace contains unknown directory"
+    return "external lifecycle namespace contains unsupported entry"
+
+
+def cold_empty_external_namespace_signature(
+    external_lock_root: Path,
+) -> DirectoryObjectSignature | None:
+    info = stat_existing(external_lock_root, "external lifecycle lock root")
+    if info is None:
+        return None
+    validate_existing_external_lock_root(external_lock_root)
+    root_signature = directory_object_signature(
+        external_lock_root,
+        "external lifecycle lock root",
+    )
+    try:
+        children = sorted(external_lock_root.iterdir(), key=lambda item: item.name)
+    except OSError as exc:
+        fail(f"external lifecycle lock root could not be listed safely: {exc}")
+    if len(children) > EXTERNAL_LOCK_NAMESPACE_MAX_ENTRIES:
+        fail("external lifecycle lock root contains too many entries")
+    for child in children:
+        child_info = stat_existing(child, "external lifecycle namespace entry")
+        if child_info is None:
+            raise RetryReadOnlyLifecycle("external lifecycle namespace changed during read")
+        if child.name == EXTERNAL_PRODUCT_ANCHOR_NAME:
+            validate_lock_info(child_info, "external product lifecycle anchor")
+            raise RetryReadOnlyLifecycle("external product lifecycle anchor appeared during read")
+        fail(cold_external_namespace_entry_error(child, child_info))
+    return root_signature
+
+
 def write_lock_stage_file(path: Path, payload: bytes, label: str) -> None:
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
@@ -1452,17 +1506,31 @@ def readonly_external_lifecycle_lock(target: Path):
             )
             is None
         ):
+            empty_namespace_signature = cold_empty_external_namespace_signature(
+                external_lock_root
+            )
             canonical_target_path = canonicalize_target_under_product_lock(target)
             canonical_target = str(canonical_target_path)
-            yield canonical_target
-            if (
-                stat_existing(
-                    external_product_anchor_path(external_lock_root),
-                    "external product lifecycle anchor",
-                )
-                is not None
-            ):
-                raise RetryReadOnlyLifecycle("external lifecycle anchor appeared during read")
+            try:
+                yield canonical_target
+            except BaseException:
+                raise
+            else:
+                if (
+                    stat_existing(
+                        external_product_anchor_path(external_lock_root),
+                        "external product lifecycle anchor",
+                    )
+                    is not None
+                ):
+                    raise RetryReadOnlyLifecycle("external lifecycle anchor appeared during read")
+                if (
+                    cold_empty_external_namespace_signature(external_lock_root)
+                    != empty_namespace_signature
+                ):
+                    raise RetryReadOnlyLifecycle(
+                        "external lifecycle namespace changed during read"
+                    )
             return
         product_fd = acquire_product_coordination_lock(
             external_lock_root,

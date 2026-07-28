@@ -328,6 +328,7 @@
     "external_anchor_hardlink_publication": false,
     "read_only_external_anchor_no_create": true,
     "read_only_cold_no_anchor_double_check": true,
+    "read_only_cold_namespace_must_be_empty": true,
     "different_targets_concurrent_after_product_handoff": true,
     "cleanup_journal_no_replace_publication": true,
     "cleanup_journal_relative_tombstones": true,

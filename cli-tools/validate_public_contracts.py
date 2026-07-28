@@ -1250,6 +1250,8 @@ def validate_metadata() -> None:
         raise ValueError("contract must state read-only commands do not create external anchors")
     if contract["safety"].get("read_only_cold_no_anchor_double_check") is not True:
         raise ValueError("contract must state cold read-only double-checks anchor absence")
+    if contract["safety"].get("read_only_cold_namespace_must_be_empty") is not True:
+        raise ValueError("contract must state cold read-only requires an empty namespace")
     cleanup_safety_keys = (
         "cleanup_journal_two_phase_no_replace",
         "cleanup_journal_path_safe_relative_tombstones",
@@ -1363,6 +1365,7 @@ def validate_metadata() -> None:
         "external_anchor_hardlink_publication": False,
         "read_only_external_anchor_no_create": True,
         "read_only_cold_no_anchor_double_check": True,
+        "read_only_cold_namespace_must_be_empty": True,
         "different_targets_concurrent_after_product_handoff": True,
         "cleanup_journal_no_replace_publication": True,
         "cleanup_journal_relative_tombstones": True,
@@ -1680,10 +1683,26 @@ def validate_runtime_contract_sources() -> None:
         "publish_missing=False",
         "lock_mode=fcntl.LOCK_SH",
         "RetryReadOnlyLifecycle",
+        "cold_empty_external_namespace_signature(external_lock_root)",
+        "external lifecycle namespace changed during read",
         "stat_existing(\n                external_product_anchor_path(external_lock_root)",
     ):
         if required not in readonly_source:
             raise ValueError(f"read-only lifecycle path is missing {required}")
+    cold_namespace_source = manager_text[
+        manager_text.index("def cold_external_namespace_entry_error") : manager_text.index(
+            "def write_lock_stage_file"
+        )
+    ]
+    for required in (
+        "EXTERNAL_LOCK_NAMESPACE_MAX_ENTRIES",
+        "external lifecycle lock root contains too many entries",
+        "external product lifecycle anchor appeared during read",
+        "external target lifecycle anchor is orphaned",
+        "external lifecycle namespace contains unknown entry",
+    ):
+        if required not in cold_namespace_source:
+            raise ValueError(f"cold read-only namespace validation is missing {required}")
     target_lock_start = manager_text.index("def target_lock")
     target_lock_end = manager_text.index("def safe_target_path")
     target_lock_source = manager_text[target_lock_start:target_lock_end]

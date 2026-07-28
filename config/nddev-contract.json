@@ -65,6 +65,7 @@
     "external_target_anchor_monotonic": true,
     "read_only_commands_do_not_create_external_anchors": true,
     "read_only_cold_no_anchor_double_check": true,
+    "read_only_cold_namespace_must_be_empty": true,
     "cleanup_journal_two_phase_no_replace": true,
     "cleanup_journal_path_safe_relative_tombstones": true,
     "cleanup_pending_read_only_report_only": true,
