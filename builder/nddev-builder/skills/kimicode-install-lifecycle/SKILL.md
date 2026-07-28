@@ -26,9 +26,9 @@ Lifecycle rules:
 - `software-status` is structural and must not execute `kimi`.
 - `launch` requires current setup schema and current official-binary software schema.
 - Legacy Bun state may be read for status, migrated, restored, or removed; it must never launch.
-- Rollback restores prior binary tree, entrypoint, and stamp on failure.
-- Official binary state is target-owned under `.nddev-kimicode-software/current` plus `bin/kimi`.
+- Rollback restores prior target-owned software state on failure.
 - Ubuntu desktop and server share the same `ID=ubuntu` glibc host check, and the upstream baseline records no official Ubuntu/glibc version floor.
 
-Do not add unsupported host categories: `windows`, `non-ubuntu-linux`,
-`linux-musl`, or `unsupported-architecture`.
+Do not copy the unsupported-category or platform-asset table into this Skill;
+those values belong in `config/nddev-contract.json` and
+`references/kimi-code-baseline.json`.

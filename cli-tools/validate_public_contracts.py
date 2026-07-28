@@ -85,7 +85,7 @@ PUBLIC_VALIDATION_DOCS = (
     Path("builder/nddev-builder/skills/nddev-builder/references/public-validation.md"),
     Path("builder/nddev-builder/skills/kimicode-create-check-release/SKILL.md"),
 )
-PUBLISHED_PUBLIC_VALIDATION_COMMANDS = (
+CACHE_FREE_PUBLIC_COMMANDS = (
     ("python3", "cli-tools/validate_public_contracts.py"),
     ("python3", "cli-tools/nddev_kimicode.py", "list", "--json"),
     ("python3", "cli-tools/nddev_kimicode.py", "--help"),
@@ -668,13 +668,13 @@ def frontmatter(text: str, path: Path) -> dict[str, str]:
     return fields
 
 
-def public_validation_doc_commands(path: Path) -> set[tuple[str, ...]]:
+def public_validation_doc_commands(path: Path) -> dict[int, tuple[str, ...]]:
     text = path.read_text(encoding="utf-8")
     relative = path.relative_to(ROOT)
     for forbidden in FORBIDDEN_PUBLIC_VALIDATION_COMMAND_TERMS:
         if forbidden in text:
             raise ValueError(f"{relative}: public validation docs must not publish {forbidden}")
-    commands: set[tuple[str, ...]] = set()
+    commands: dict[int, tuple[str, ...]] = {}
     for line_number, raw_line in enumerate(text.splitlines(), start=1):
         stripped = raw_line.strip()
         if not stripped.startswith("python3 "):
@@ -685,21 +685,52 @@ def public_validation_doc_commands(path: Path) -> set[tuple[str, ...]]:
             raise ValueError(f"{relative}:{line_number}: public validation command is not parseable: {exc}") from exc
         if any(term in command for term in FORBIDDEN_PUBLIC_VALIDATION_COMMAND_TERMS):
             raise ValueError(f"{relative}:{line_number}: public validation command uses cache-producing compiler")
-        commands.add(command)
+        commands[line_number] = command
     return commands
 
 
+def validate_documented_public_command(command: tuple[str, ...], relative: Path, line_number: int) -> None:
+    if len(command) < 2 or command[0] != "python3":
+        raise ValueError(f"{relative}:{line_number}: public validation command must start with python3")
+    script = Path(command[1])
+    if script.is_absolute() or ".." in script.parts:
+        raise ValueError(f"{relative}:{line_number}: public validation command script path is unsafe")
+    script_path = ROOT / script
+    if not script_path.is_file():
+        raise ValueError(f"{relative}:{line_number}: public validation command script is missing")
+    argv = list(command[2:])
+    module = load_source_for_parse(script_path)
+    parse_args = getattr(module, "parse_args", None)
+    if parse_args is None:
+        raise ValueError(f"{relative}:{line_number}: public validation command has no parse_args owner")
+    try:
+        parse_args(argv)
+    except SystemExit as exc:
+        if exc.code not in (None, 0):
+            raise ValueError(f"{relative}:{line_number}: public validation command argv is rejected") from exc
+
+
+def load_source_for_parse(path: Path) -> Any:
+    module_name = "_nddev_kimicode_doc_parse_" + re.sub(r"[^A-Za-z0-9_]", "_", path.as_posix())
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise ValueError(f"could not load {path.relative_to(ROOT)} for documented command parsing")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:  # pragma: no cover - surfaced as validator failure.
+        raise ValueError(f"could not import {path.relative_to(ROOT)}: {exc}") from exc
+    return module
+
+
 def validate_public_validation_docs() -> None:
-    expected = set(PUBLISHED_PUBLIC_VALIDATION_COMMANDS)
     for relative in PUBLIC_VALIDATION_DOCS:
         path = ROOT / relative
         if not path.is_file():
             raise ValueError(f"missing public validation document {relative}")
-        commands = public_validation_doc_commands(path)
-        missing = expected - commands
-        if missing:
-            rendered = ", ".join(shlex.join(command) for command in sorted(missing))
-            raise ValueError(f"{relative}: missing public validation command(s): {rendered}")
+        for line_number, command in public_validation_doc_commands(path).items():
+            validate_documented_public_command(command, relative, line_number)
 
 
 def extract_git_archive(destination: Path) -> None:
@@ -734,7 +765,7 @@ def validate_archive_public_commands_cache_free() -> None:
         env = os.environ.copy()
         env["PYTHONDONTWRITEBYTECODE"] = "1"
         env.pop("PYTHONPATH", None)
-        for command in PUBLISHED_PUBLIC_VALIDATION_COMMANDS:
+        for command in CACHE_FREE_PUBLIC_COMMANDS:
             completed = subprocess.run(
                 list(command),
                 cwd=archive_root,

@@ -27,8 +27,6 @@ Do not copy volatile release pins or checksum lists into prose. Use these owners
 
 ## Public Checks
 
-```bash
-python3 cli-tools/validate_public_contracts.py
-python3 cli-tools/nddev_kimicode.py list --json
-python3 cli-tools/nddev_kimicode.py --help
-```
+`cli-tools/validate_public_contracts.py` owns the public validation contract and
+its cache-free command regression. Do not duplicate the current check list in
+documentation.

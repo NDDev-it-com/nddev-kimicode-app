@@ -4,25 +4,14 @@
 
 ## Managed Content
 
-The manager writes NDDev-owned content to these target paths:
-
-- `config.toml`
-- `tui.toml`
-- `AGENTS.md`
-- `mcp.json`
-- `skills/`
-- `agents/nddev-builder.md`
-- `hooks/nddev-builder-pretooluse.py`
-- `NDDEV-KIMICODE-SETUP.json`
-
+The manager writes NDDev-owned setup content into the explicit target. The exact
+managed path set is owned by `cli-tools/nddev_kimicode.py:content_managed_paths`.
 Managed TOML and Markdown content is written inside NDDev marker blocks so local
 state outside those blocks survives install, profile switches, migration,
 restore, and remove.
 
-The manager does not write runtime-owned plugin install state:
-
-- `plugins/installed.json`
-- `plugins/managed/`
+Runtime plugin install state remains Kimi-owned and is not written directly by
+the manager.
 
 ## Profiles
 
@@ -41,17 +30,16 @@ binary presence, entrypoint digest, and installed tree digest without executing
 `kimi`.
 
 `install-cli` installs a verified official Kimi binary into target-owned state
-on `macos-arm64`, `macos-x64`, `ubuntu-glibc-arm64`, or
-`ubuntu-glibc-x64`. `update-cli` repairs or updates current official-binary
-state. `migrate-cli` is the only transition from legacy Bun schema to
-official-binary schema.
+on supported macOS and Ubuntu hosts. `update-cli` repairs or updates current
+official-binary state. `migrate-cli` is the only transition from legacy Bun
+schema to official-binary schema.
 
 Legacy Bun state may be read for status, migrated, restored, or removed. It must
 never launch.
 
 Release versions, URLs, manifest hashes, upstream platform assets, product host
 mapping, and the no-official-floor Ubuntu/glibc observation are owned by
-`references/kimi-code-baseline.json`.
+`references/kimi-code-baseline.json` and `config/nddev-contract.json`.
 
 ## Launch Isolation
 
@@ -80,6 +68,6 @@ model selection, Skill directories, agents, sessions, extra workspace scope, or
 software migration/update behavior are rejected before the target-owned binary
 is spawned.
 
-Unsupported host categories are `windows`, `non-ubuntu-linux`, `linux-musl`,
-and `unsupported-architecture`. Ubuntu desktop and server share the same
+Unsupported host categories and exact product host IDs are owned by
+`config/nddev-contract.json`. Ubuntu desktop and server share the same
 `ID=ubuntu` glibc check.

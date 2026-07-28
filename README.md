@@ -17,28 +17,15 @@ launches `bin/kimi` with isolated `HOME`, `TMPDIR`, and `KIMI_CODE_HOME`.
 - Safe permission profile: `safe`, mapped to documented native Kimi `manual`
   mode.
 
-The module does not ship `balanced` or `yolo`. Supported product hosts are
-`macos-arm64`, `macos-x64`, `ubuntu-glibc-arm64`, and `ubuntu-glibc-x64`;
-unsupported host categories are `windows`, `non-ubuntu-linux`, `linux-musl`,
-and `unsupported-architecture`.
+The module does not ship `balanced` or `yolo`. Production host support is
+macOS plus Ubuntu desktop/server on the supported architectures. Exact product
+host IDs, unsupported categories, and vendor asset mapping are owned by
+`config/nddev-contract.json`.
 
 ## Commands
 
-```bash
-python3 cli-tools/nddev_kimicode.py list --json
-python3 cli-tools/nddev_kimicode.py plan --target /absolute/target --json
-python3 cli-tools/nddev_kimicode.py install --target /absolute/target --json
-python3 cli-tools/nddev_kimicode.py switch-profile --profile safe --target /absolute/target --json
-python3 cli-tools/nddev_kimicode.py migrate --target /absolute/target --json
-python3 cli-tools/nddev_kimicode.py status --target /absolute/target --json
-python3 cli-tools/nddev_kimicode.py restore --backup 0 --target /absolute/target --json
-python3 cli-tools/nddev_kimicode.py remove --target /absolute/target --json
-python3 cli-tools/nddev_kimicode.py software-status --target /absolute/target --json
-python3 cli-tools/nddev_kimicode.py install-cli --target /absolute/target --json
-python3 cli-tools/nddev_kimicode.py update-cli --target /absolute/target --json
-python3 cli-tools/nddev_kimicode.py migrate-cli --target /absolute/target --json
-python3 cli-tools/nddev_kimicode.py launch --target /absolute/target --
-```
+`cli-tools/nddev_kimicode.py` owns the command parser and JSON payloads. Use
+`--help` from the repository root when you need the current command surface.
 
 ## Runtime Baseline
 
@@ -65,8 +52,8 @@ not an OS sandbox against deliberate same-UID tampering outside the manager.
 
 ## Builder Toolkit
 
-The `nddev-builder` content setup projects the full public builder toolkit under
-`builder/nddev-builder/skills/` into `$KIMI_CODE_HOME/skills/`, plus the custom
-agent, MCP JSON, AGENTS.md block, and hook source file. Plugin source packaging
-is provided at `builder/nddev-builder/kimi.plugin.json`, but the manager never
-writes Kimi runtime-owned `plugins/installed.json`.
+The `nddev-builder` content setup projects the public builder toolkit into the
+explicit target. The exact managed path set is owned by
+`cli-tools/nddev_kimicode.py:content_managed_paths`; plugin source packaging is
+provided for native Kimi workflows, but runtime plugin install state remains
+Kimi-owned.

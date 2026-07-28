@@ -1,37 +1,21 @@
 # Kimi Native Surfaces
 
-This reference names stable Kimi Code paths and schema owners used by
-`nddev-kimicode-app`. Volatile release pins and checksums are owned by
-`references/kimi-code-baseline.json` and the manager.
+This reference names the source-of-truth owners for Kimi Code surfaces used by
+`nddev-kimicode-app`. Volatile release pins, checksums, managed paths, and
+generated target files are owned by machine-readable sources.
 
 ## Target Root
 
-The manager launches Kimi with `KIMI_CODE_HOME` set to the explicit target.
-Kimi-specific user state lives under that root:
-
-- `config.toml`: runtime config, permission mode, loop control, background limits, hooks, extra skill and agent dirs.
-- `tui.toml`: TUI preferences, including `[upgrade].auto_install`.
-- `AGENTS.md`: global Kimi-specific instructions.
-- `mcp.json`: user-level MCP declarations.
-- `skills/`: Kimi-specific user Agent Skills.
-- `agents/`: Kimi-specific custom agents and subagents.
-- `hooks/`: regular-file hook adapters available to profiles that explicitly activate `[[hooks]]`.
-- `credentials/`, `sessions/`, `logs/`, `updates/`, `user-history/`: runtime-owned Kimi state.
+The manager launches Kimi with `KIMI_CODE_HOME` set to the explicit target. The
+exact managed path set is owned by
+`cli-tools/nddev_kimicode.py:content_managed_paths`, and the public contract
+summary is owned by `config/nddev-contract.json`.
 
 ## Runtime-Owned Paths
 
-Do not write these directly:
-
-- `plugins/installed.json`
-- `plugins/managed/`
-- `credentials/`
-- `sessions/`
-- `logs/`
-- `updates/`
-- `user-history/`
-
 Use Kimi's native UI or slash commands for runtime-owned plugin and auth state.
-The NDDev manager only writes the documented configuration and content projection.
+The NDDev manager only writes the documented setup projection owned by the
+manager and contract.
 
 ## CLI Parser Owner
 
