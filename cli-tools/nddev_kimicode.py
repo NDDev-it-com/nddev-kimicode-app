@@ -2976,9 +2976,54 @@ def validate_cleanup_graph_state(
     return current_relatives == expected_relatives
 
 
+def read_final_cleanup_journal_json(target: Path) -> dict[str, Any]:
+    journal_path = cleanup_journal_path(target)
+    info = stat_existing(journal_path, CLEANUP_JOURNAL_NAME)
+    if info is None:
+        fail("cleanup journal is missing")
+    if not stat.S_ISREG(info.st_mode):
+        fail("cleanup journal must be a regular file")
+    if not is_current_owner(info):
+        fail("cleanup journal must be owned by the current user")
+    if stat.S_IMODE(info.st_mode) != OWNER_FILE_MODE:
+        fail("cleanup journal must be private with mode 0600")
+    if info.st_nlink != 1:
+        fail("cleanup journal must not be a hardlink")
+    if info.st_size > METADATA_MAX_BYTES:
+        fail("cleanup journal is too large")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(journal_path, flags)
+    except OSError as exc:
+        fail(f"cleanup journal could not be opened safely: {exc}")
+    try:
+        opened = os.fstat(fd)
+        if opened.st_dev != info.st_dev or opened.st_ino != info.st_ino:
+            fail("cleanup journal changed while opening")
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or not is_current_owner(opened)
+            or stat.S_IMODE(opened.st_mode) != OWNER_FILE_MODE
+            or opened.st_nlink != 1
+            or opened.st_size > METADATA_MAX_BYTES
+        ):
+            fail("cleanup journal metadata is invalid")
+        data = os.read(fd, METADATA_MAX_BYTES + 1)
+    finally:
+        os.close(fd)
+    if len(data) > METADATA_MAX_BYTES:
+        fail("cleanup journal is too large")
+    try:
+        value = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        fail(f"cleanup journal is invalid JSON: {exc}")
+    if not isinstance(value, dict):
+        fail("cleanup journal must contain a JSON object")
+    return value
+
+
 def validate_cleanup_journal(target: Path) -> dict[str, Any] | None:
     journal_dir = cleanup_journal_dir(target)
-    journal_path = cleanup_journal_path(target)
     dir_info = stat_existing(journal_dir, "cleanup journal directory")
     if dir_info is None:
         return None
@@ -2993,7 +3038,7 @@ def validate_cleanup_journal(target: Path) -> dict[str, Any] | None:
         fail("cleanup journal directory contains unjournaled tombstones")
     if entries.count(CLEANUP_JOURNAL_NAME) != 1:
         fail("cleanup journal directory contains unknown entries")
-    journal = read_json_file(journal_path, max_bytes=METADATA_MAX_BYTES, label=CLEANUP_JOURNAL_NAME)
+    journal = read_final_cleanup_journal_json(target)
     expected_keys = {"schema_version", "product_name", "canonical_target", "entries"}
     if set(journal) != expected_keys:
         fail("cleanup journal schema is invalid")

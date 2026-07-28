@@ -2220,6 +2220,83 @@ def validate_readonly_external_lock_no_residue_regression(manager: Any) -> None:
         temp.cleanup()
 
 
+def validate_cleanup_journal_final_metadata_regression(manager: Any) -> None:
+    def create_pending_journal(target: Path) -> None:
+        setup = manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP)
+        profile = manager.load_profile(manager.DEFAULT_PROFILE)
+        manager.write_setup(target, setup, profile)
+        source = target / ".nddev-backup-old.public-validator"
+        source.write_bytes(b"public validator pending cleanup\n")
+        source.chmod(0o600)
+        promotion = manager.promote_cleanup_tombstones(
+            target,
+            [(source, "public validator cleanup tombstone", manager.METADATA_MAX_BYTES, 4)],
+        )
+        result = manager.publish_cleanup_journal(target, promotion.entries)
+        if not result.published:
+            raise ValueError("public cleanup journal metadata fixture did not publish")
+
+    def expect_readonly_rejected(label: str, mutate: Any, expected: str) -> None:
+        temp, target = make_isolated_target(f"cleanup-journal-{label}-")
+        try:
+            create_pending_journal(target)
+            setup = manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP)
+            profile = manager.load_profile(manager.DEFAULT_PROFILE)
+            journal_path = manager.cleanup_journal_path(target)
+            mutate(journal_path)
+            before_target = path_graph_snapshot(target, max_file_bytes=manager.METADATA_MAX_BYTES)
+            before_namespace = fixed_namespace_snapshot(manager)
+            for command, operation in (
+                ("status", lambda: manager.status_payload(target)),
+                ("plan", lambda: manager.plan_payload(target, setup, profile)),
+                ("software-status", lambda: manager.software_status_payload(target)),
+            ):
+                try:
+                    operation()
+                except manager.KimicodeSetupError as exc:
+                    if expected not in str(exc):
+                        raise ValueError(
+                            f"{label} {command} returned unstable error: {exc}"
+                        ) from exc
+                else:
+                    raise ValueError(f"{label} {command} unexpectedly succeeded")
+                if (
+                    path_graph_snapshot(target, max_file_bytes=manager.METADATA_MAX_BYTES)
+                    != before_target
+                ):
+                    raise ValueError(f"{label} {command} mutated target cleanup state")
+                if fixed_namespace_snapshot(manager) != before_namespace:
+                    raise ValueError(f"{label} {command} repaired external namespace")
+        finally:
+            temp.cleanup()
+
+    expect_readonly_rejected(
+        "wrong-mode",
+        lambda journal: journal.chmod(0o644),
+        "cleanup journal must be private with mode 0600",
+    )
+
+    def replace_with_directory(journal: Path) -> None:
+        journal.unlink()
+        journal.mkdir(mode=0o700)
+        journal.chmod(0o700)
+
+    expect_readonly_rejected(
+        "wrong-kind",
+        replace_with_directory,
+        "cleanup journal must be a regular file",
+    )
+
+    def add_hardlink(journal: Path) -> None:
+        os.link(journal, journal.with_name(f".{journal.name}.nddev.tmp.public-validator"))
+
+    expect_readonly_rejected(
+        "wrong-nlink",
+        add_hardlink,
+        "cleanup journal must not be a hardlink",
+    )
+
+
 def fork_wait(pid: int, label: str, timeout_seconds: float = 5.0) -> None:
     deadline = time.monotonic() + timeout_seconds
     status_value: int | None = None
@@ -2689,6 +2766,10 @@ def validate_runtime_regressions() -> None:
     for required in (
         "relative_name",
         "cleanup_journal_stage_alias_pattern",
+        "read_final_cleanup_journal_json(target)",
+        "stat.S_IMODE(info.st_mode) != OWNER_FILE_MODE",
+        "info.st_nlink != 1",
+        "opened.st_nlink != 1",
         "recover_cleanup_journal_publication_alias_for_mutation(target)",
         "read_cleanup_journal_with_publication_alias",
         "rename_no_replace(stage, journal_path, CLEANUP_JOURNAL_NAME)",
@@ -2844,6 +2925,7 @@ def validate_runtime_regressions() -> None:
         validate_remove_cli_regression(manager)
         validate_lifecycle_lock_order_regression(manager)
         validate_readonly_external_lock_no_residue_regression(manager)
+        validate_cleanup_journal_final_metadata_regression(manager)
         validate_unsupported_command_preflight_regression(manager)
         validate_unsupported_launch_preflight_regression(manager)
         validate_external_lock_binding_regression(manager)
