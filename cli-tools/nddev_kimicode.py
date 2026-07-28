@@ -75,6 +75,7 @@ OWNER_FILE_MODE = 0o600
 OWNER_DIRECTORY_MODE = 0o700
 MANAGED_MAX_BYTES = 8 * 1024 * 1024
 METADATA_MAX_BYTES = 256 * 1024
+CLEANUP_JOURNAL_MAX_BYTES = METADATA_MAX_BYTES
 CONTENT_MANAGED_BASE_PATHS = (
     "config.toml",
     "tui.toml",
@@ -510,6 +511,8 @@ class BackupCommitResult:
 @dataclass(frozen=True)
 class CleanupPromotion:
     entries: list[dict[str, Any]]
+    journal: dict[str, Any]
+    serialized_journal: bytes
     moved: list[tuple[Path, Path]]
     parent_signature: DirectoryObjectSignature | None
 
@@ -2645,10 +2648,11 @@ def cleanup_entry_for_tombstone(
     label: str,
     max_file_bytes: int,
     max_paths: int,
+    require_tombstone_bound: bool = True,
 ) -> dict[str, Any] | None:
     if not path_exists_no_follow(path):
         return None
-    if not cleanup_tombstone_is_allowed(target, path):
+    if require_tombstone_bound and not cleanup_tombstone_is_allowed(target, path):
         fail(f"cleanup tombstone is outside declared bounds: {path}")
     info = stat_existing(path, label)
     if info is None:
@@ -2689,6 +2693,29 @@ def cleanup_entry_for_tombstone(
     }
 
 
+def cleanup_journal_payload(target: Path, entries: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "schema_version": CLEANUP_SCHEMA,
+        "product_name": PRODUCT_NAME,
+        "canonical_target": str(validate_target(target, create=False)),
+        "entries": entries,
+    }
+
+
+def serialized_cleanup_journal_bytes(journal: dict[str, Any]) -> bytes:
+    data = canonical_json(journal)
+    if len(data) > CLEANUP_JOURNAL_MAX_BYTES:
+        fail("cleanup journal serialized size exceeds bound")
+    return data
+
+
+def build_cleanup_journal_for_entries(
+    target: Path, entries: list[dict[str, Any]]
+) -> tuple[dict[str, Any], bytes]:
+    journal = cleanup_journal_payload(target, entries)
+    return journal, serialized_cleanup_journal_bytes(journal)
+
+
 def promote_cleanup_tombstones(
     target: Path,
     paths: list[tuple[Path | None, str, int, int]],
@@ -2699,42 +2726,63 @@ def promote_cleanup_tombstones(
         if path is not None and path_exists_no_follow(path)
     ]
     if not present_paths:
-        return CleanupPromotion(entries=[], moved=[], parent_signature=None)
+        journal, serialized = build_cleanup_journal_for_entries(target, [])
+        return CleanupPromotion(
+            entries=[],
+            journal=journal,
+            serialized_journal=serialized,
+            moved=[],
+            parent_signature=None,
+        )
+    entries: list[dict[str, Any]] = []
+    move_plan: list[tuple[Path, Path]] = []
+    for index, (path, label, max_file_bytes, max_paths) in enumerate(present_paths):
+        if not cleanup_source_name_allowed(path):
+            fail(f"cleanup source is outside declared tombstone names: {path}")
+        relative_name = cleanup_tombstone_name(path, index)
+        tombstone = cleanup_journal_dir(target) / relative_name
+        entry = cleanup_entry_for_tombstone(
+            target,
+            path,
+            relative_name=relative_name,
+            label=label,
+            max_file_bytes=max_file_bytes,
+            max_paths=max_paths,
+            require_tombstone_bound=False,
+        )
+        if entry is not None:
+            entries.append(entry)
+            move_plan.append((path, tombstone))
+    if len(entries) > CLEANUP_MAX_ENTRIES:
+        fail("cleanup journal entry bound exceeded")
+    journal, serialized = build_cleanup_journal_for_entries(target, entries)
     parent_signature = directory_object_signature(target, "cleanup journal parent")
     cleanup_dir = cleanup_journal_dir(target)
     ensure_private_directory(cleanup_dir, "cleanup journal directory")
-    entries: list[dict[str, Any]] = []
     moved: list[tuple[Path, Path]] = []
     try:
-        for index, (path, label, max_file_bytes, max_paths) in enumerate(present_paths):
-            if not cleanup_source_name_allowed(path):
-                fail(f"cleanup source is outside declared tombstone names: {path}")
-            relative_name = cleanup_tombstone_name(path, index)
-            tombstone = cleanup_dir / relative_name
+        for path, tombstone in move_plan:
+            relative_name = tombstone.name
             if path_exists_no_follow(tombstone):
                 fail(f"cleanup tombstone already exists: {relative_name}")
             os.replace(path, tombstone)
             fsync_directory(path.parent)
             fsync_directory(cleanup_dir)
             moved.append((path, tombstone))
-            entry = cleanup_entry_for_tombstone(
-                target,
-                tombstone,
-                relative_name=relative_name,
-                label=label,
-                max_file_bytes=max_file_bytes,
-                max_paths=max_paths,
-            )
-            if entry is not None:
-                entries.append(entry)
-        if len(entries) > CLEANUP_MAX_ENTRIES:
-            fail("cleanup journal entry bound exceeded")
-        return CleanupPromotion(entries=entries, moved=moved, parent_signature=parent_signature)
+        return CleanupPromotion(
+            entries=entries,
+            journal=journal,
+            serialized_journal=serialized,
+            moved=moved,
+            parent_signature=parent_signature,
+        )
     except BaseException:
         rollback_cleanup_promotion(
             target,
             CleanupPromotion(
                 entries=entries,
+                journal=journal,
+                serialized_journal=serialized,
                 moved=moved,
                 parent_signature=parent_signature,
             ),
@@ -2989,7 +3037,7 @@ def read_final_cleanup_journal_json(target: Path) -> dict[str, Any]:
         fail("cleanup journal must be private with mode 0600")
     if info.st_nlink != 1:
         fail("cleanup journal must not be a hardlink")
-    if info.st_size > METADATA_MAX_BYTES:
+    if info.st_size > CLEANUP_JOURNAL_MAX_BYTES:
         fail("cleanup journal is too large")
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
@@ -3005,13 +3053,13 @@ def read_final_cleanup_journal_json(target: Path) -> dict[str, Any]:
             or not is_current_owner(opened)
             or stat.S_IMODE(opened.st_mode) != OWNER_FILE_MODE
             or opened.st_nlink != 1
-            or opened.st_size > METADATA_MAX_BYTES
+            or opened.st_size > CLEANUP_JOURNAL_MAX_BYTES
         ):
             fail("cleanup journal metadata is invalid")
-        data = os.read(fd, METADATA_MAX_BYTES + 1)
+        data = os.read(fd, CLEANUP_JOURNAL_MAX_BYTES + 1)
     finally:
         os.close(fd)
-    if len(data) > METADATA_MAX_BYTES:
+    if len(data) > CLEANUP_JOURNAL_MAX_BYTES:
         fail("cleanup journal is too large")
     try:
         value = json.loads(data.decode("utf-8"))
@@ -3139,13 +3187,13 @@ def read_cleanup_journal_with_publication_alias(
             or not is_current_owner(opened)
             or stat.S_IMODE(opened.st_mode) != OWNER_FILE_MODE
             or opened.st_nlink != 2
-            or opened.st_size > METADATA_MAX_BYTES
+            or opened.st_size > CLEANUP_JOURNAL_MAX_BYTES
         ):
             fail("cleanup journal publication alias metadata is invalid")
-        data = os.read(fd, METADATA_MAX_BYTES + 1)
+        data = os.read(fd, CLEANUP_JOURNAL_MAX_BYTES + 1)
     finally:
         os.close(fd)
-    if len(data) > METADATA_MAX_BYTES:
+    if len(data) > CLEANUP_JOURNAL_MAX_BYTES:
         fail("cleanup journal is too large")
     try:
         journal = json.loads(data.decode("utf-8"))
@@ -3253,17 +3301,22 @@ def cleanup_pending_metadata(target: Path) -> list[dict[str, Any]]:
     ]
 
 
-def write_cleanup_journal_stage(stage: Path, journal: dict[str, Any]) -> None:
+def write_cleanup_journal_stage(stage: Path, serialized_journal: bytes) -> None:
+    if len(serialized_journal) > CLEANUP_JOURNAL_MAX_BYTES:
+        fail("cleanup journal serialized size exceeds bound")
     write_staged_file(
         stage,
-        canonical_json(journal),
+        serialized_journal,
         mode=OWNER_FILE_MODE,
         label=CLEANUP_JOURNAL_NAME,
     )
 
 
 def publish_cleanup_journal(
-    target: Path, entries: list[dict[str, Any]]
+    target: Path,
+    entries: list[dict[str, Any]],
+    journal: dict[str, Any] | None = None,
+    serialized_journal: bytes | None = None,
 ) -> CleanupJournalPublishResult:
     if not entries:
         return CleanupJournalPublishResult(published=False)
@@ -3272,16 +3325,16 @@ def publish_cleanup_journal(
         fail("cleanup journal is already pending")
     journal_dir = cleanup_journal_dir(target)
     ensure_private_directory(journal_dir, "cleanup journal directory")
-    journal = {
-        "schema_version": CLEANUP_SCHEMA,
-        "product_name": PRODUCT_NAME,
-        "canonical_target": str(validate_target(target, create=False)),
-        "entries": entries,
-    }
+    if journal is None or serialized_journal is None:
+        journal, serialized_journal = build_cleanup_journal_for_entries(target, entries)
+    else:
+        rebuilt_journal, rebuilt_serialized = build_cleanup_journal_for_entries(target, entries)
+        if rebuilt_journal != journal or rebuilt_serialized != serialized_journal:
+            fail("cleanup journal serialized content changed before publication")
     journal_path = cleanup_journal_path(target)
     stage = journal_path.with_name(f".{journal_path.name}.nddev.tmp.{os.getpid()}.{time.time_ns()}")
     published = False
-    write_cleanup_journal_stage(stage, journal)
+    write_cleanup_journal_stage(stage, serialized_journal)
     try:
         if not rename_no_replace(stage, journal_path, CLEANUP_JOURNAL_NAME):
             cleanup_lock_stage_file(stage, CLEANUP_JOURNAL_NAME)
@@ -3305,7 +3358,8 @@ def republish_cleanup_journal(target: Path, journal: dict[str, Any]) -> None:
     ensure_private_directory(journal_dir, "cleanup journal directory")
     journal_path = cleanup_journal_path(target)
     stage = journal_path.with_name(f".{journal_path.name}.nddev.tmp.{os.getpid()}.{time.time_ns()}")
-    write_cleanup_journal_stage(stage, journal)
+    serialized_journal = serialized_cleanup_journal_bytes(journal)
+    write_cleanup_journal_stage(stage, serialized_journal)
     try:
         if not rename_no_replace(stage, journal_path, CLEANUP_JOURNAL_NAME):
             cleanup_lock_stage_file(stage, CLEANUP_JOURNAL_NAME)
@@ -3430,7 +3484,12 @@ def finish_cleanup_journal(
     if not promotion.entries:
         return False
     try:
-        publish_result = publish_cleanup_journal(target, promotion.entries)
+        publish_result = publish_cleanup_journal(
+            target,
+            promotion.entries,
+            promotion.journal,
+            promotion.serialized_journal,
+        )
         if not publish_result.published:
             return False
         if publish_result.cleanup_pending:

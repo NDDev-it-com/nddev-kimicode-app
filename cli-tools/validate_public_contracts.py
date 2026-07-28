@@ -2687,6 +2687,8 @@ def validate_supported_host_detection_regression(manager: Any) -> None:
 def validate_runtime_regressions() -> None:
     manager = load_manager()
     manager_text = (ROOT / "cli-tools" / "nddev_kimicode.py").read_text(encoding="utf-8")
+    if manager.CLEANUP_JOURNAL_MAX_BYTES != manager.METADATA_MAX_BYTES:
+        raise ValueError("cleanup journal byte bound must share the metadata size bound")
     for forbidden in (
         "NDDEV_KIMICODE_TEST",
         "ENABLE_TEST_OVERRIDES",
@@ -2764,6 +2766,17 @@ def validate_runtime_regressions() -> None:
     cleanup_end = manager_text.index("def require_tree_entry_identity")
     cleanup_source = manager_text[cleanup_start:cleanup_end]
     for required in (
+        "CLEANUP_JOURNAL_MAX_BYTES = METADATA_MAX_BYTES",
+        "def serialized_cleanup_journal_bytes",
+        "def build_cleanup_journal_for_entries",
+        "len(data) > CLEANUP_JOURNAL_MAX_BYTES",
+        "len(serialized_journal) > CLEANUP_JOURNAL_MAX_BYTES",
+    ):
+        if required not in manager_text:
+            raise ValueError(
+                f"cleanup journal implementation is missing bound fragment: {required}"
+            )
+    for required in (
         "relative_name",
         "cleanup_journal_stage_alias_pattern",
         "read_final_cleanup_journal_json(target)",
@@ -2776,6 +2789,9 @@ def validate_runtime_regressions() -> None:
         "CleanupJournalPublishResult(published=True, cleanup_pending=True)",
         "unknown_entries = set(entries) - {CLEANUP_JOURNAL_NAME} - seen",
         "cleanup_pending_metadata",
+        "journal: dict[str, Any]",
+        "serialized_journal: bytes",
+        "write_cleanup_journal_stage(stage, serialized_journal)",
     ):
         if required not in cleanup_source:
             raise ValueError(f"cleanup journal implementation is missing {required}")
@@ -2787,6 +2803,23 @@ def validate_runtime_regressions() -> None:
     ):
         if forbidden in cleanup_source:
             raise ValueError(f"cleanup journal must not publish unsafe path state: {forbidden}")
+    write_stage_source = manager_text[
+        manager_text.index("def write_cleanup_journal_stage") : manager_text.index(
+            "def publish_cleanup_journal"
+        )
+    ]
+    if "canonical_json(" in write_stage_source:
+        raise ValueError("cleanup journal stage writer must use prebuilt bounded bytes")
+    finish_source = manager_text[
+        manager_text.index("def finish_cleanup_journal") : manager_text.index(
+            "def require_tree_entry_identity"
+        )
+    ]
+    if (
+        "promotion.journal" not in finish_source
+        or "promotion.serialized_journal" not in finish_source
+    ):
+        raise ValueError("cleanup journal publication must use the prebuilt bounded payload")
     readonly_status_source = manager_text[
         manager_text.index("def _status_payload_locked") : manager_text.index("def status_payload")
     ]
