@@ -49,7 +49,12 @@
     "mutable_runtime_state_writable_during_launch": true,
     "pre_handoff_executable_revalidation": true,
     "exact_inode_exec": false,
-    "runtime_dirs_private": true
+    "runtime_dirs_private": true,
+    "default_workspace_source": "captured-caller-cwd",
+    "manager_workspace_argument": "--workspace",
+    "explicit_child_cwd": true,
+    "native_cwd_flag": null,
+    "blocks_native_add_dir_workspace_expansion": true
   },
   "manager": "cli-tools/nddev_kimicode.py",
   "contract": "config/nddev-contract.json",

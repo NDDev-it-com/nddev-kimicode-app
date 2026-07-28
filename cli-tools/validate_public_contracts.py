@@ -738,6 +738,16 @@ def validate_metadata() -> None:
         raise ValueError("contract must document the dedicated lock directory")
     if "same-UID" not in runtime_launch.get("same_uid_tamper_boundary", ""):
         raise ValueError("contract must document the same-UID tamper boundary")
+    if runtime_launch.get("workspace_default_source") != "captured-caller-cwd":
+        raise ValueError("contract must document captured caller cwd as the default launch workspace")
+    if runtime_launch.get("manager_workspace_argument") != "--workspace":
+        raise ValueError("contract must document the manager workspace argument")
+    if runtime_launch.get("child_cwd_policy") != "explicit-subprocess-cwd":
+        raise ValueError("contract must document explicit subprocess cwd handoff")
+    if runtime_launch.get("native_cwd_flag") is not None:
+        raise ValueError("contract must not invent an upstream Kimi cwd flag")
+    if "--add-dir" not in runtime_launch.get("workspace_expansion_blocked", []):
+        raise ValueError("contract must document blocked native workspace expansion")
     if manifest.get("runtime_launch") != {
         "external_target_bound_lifecycle_lock": True,
         "external_lock_persistent_inode": True,
@@ -751,8 +761,13 @@ def validate_metadata() -> None:
         "pre_handoff_executable_revalidation": True,
         "exact_inode_exec": False,
         "runtime_dirs_private": True,
+        "default_workspace_source": "captured-caller-cwd",
+        "manager_workspace_argument": "--workspace",
+        "explicit_child_cwd": True,
+        "native_cwd_flag": None,
+        "blocks_native_add_dir_workspace_expansion": True,
     }:
-        raise ValueError("manifest must expose launch lock and executable revalidation facts")
+        raise ValueError("manifest must expose launch lock, executable revalidation, and workspace facts")
     software = contract["software_lifecycle"]
     if software.get("channel") != "official-binary" or software.get("manifest_sha256") != MANIFEST_SHA256:
         raise ValueError("contract software lifecycle must use official binary manifest")
@@ -1354,6 +1369,9 @@ def validate_runtime_regressions() -> None:
         "os.fchmod(fd, 0o500)",
         "lock_path(target).parent",
         "with protected_launch_path(invocation.target):",
+        "resolve_launch_workspace",
+        "cwd=str(invocation.workspace)",
+        "launch_parser.add_argument(\"--workspace\")",
         "expected_digest=invocation.expected_entrypoint_digest",
         "is_current_owner(opened)",
         "opened.st_dev != info.st_dev or opened.st_ino != info.st_ino",
@@ -1394,6 +1412,7 @@ def validate_runtime_regressions() -> None:
         validate_launch_protected_verified_path_regression(manager)
         validate_launch_executable_error_regression(manager)
         validate_launch_boundary_regression(manager)
+        validate_launch_workspace_scope_regression(manager)
 
     run_with_injected_bootstrap_root(manager, run_isolated_runtime_regressions)
 
@@ -1412,11 +1431,16 @@ def validate_launch_lock_concurrency_regression(manager: Any) -> None:
             write_stub_software(manager, target)
             lock = manager.lock_path(target)
 
-            def fake_run(command: list[str], *, env: dict[str, str], check: bool) -> SimpleNamespace:
+            workspace = target.parent / "workspace"
+            workspace.mkdir(mode=0o700)
+
+            def fake_run(command: list[str], *, env: dict[str, str], cwd: str, check: bool) -> SimpleNamespace:
                 if not lock.is_file():
                     raise ValueError("launch lifecycle lock was not held during child execution")
                 if command[0] != str(target / "bin" / manager.KIMI_COMMAND):
                     raise ValueError("launch did not hand off to the target-owned executable")
+                if cwd != str(workspace.resolve()):
+                    raise ValueError("launch did not hand off the explicit workspace as child cwd")
                 if env.get("KIMI_CODE_HOME") != str(target.resolve()):
                     raise ValueError("launch child environment is not target-scoped")
                 if (target.stat().st_mode & 0o777) != 0o700:
@@ -1488,7 +1512,7 @@ def validate_launch_lock_concurrency_regression(manager: Any) -> None:
                 return SimpleNamespace(returncode=23)
 
             manager.subprocess.run = fake_run
-            exit_code = manager.launch(target, ["--version"])
+            exit_code = manager.launch(target, ["--version"], workspace=str(workspace))
             if exit_code != 23:
                 raise ValueError("launch did not forward child exit code under lifecycle lock")
             if not lock.is_file():
@@ -1613,9 +1637,9 @@ def validate_launch_pre_handoff_swap_regression(manager: Any) -> None:
             entrypoint = target / "bin" / manager.KIMI_COMMAND
             swapped = False
 
-            def wrapped_prepare(status_target: Path, child_args: list[str]) -> Any:
+            def wrapped_prepare(status_target: Path, child_args: list[str], workspace: Path) -> Any:
                 nonlocal swapped
-                result = original_prepare(status_target, child_args)
+                result = original_prepare(status_target, child_args, workspace)
                 entrypoint.write_bytes(b"#!/bin/sh\nprintf 'swapped\\n'\n")
                 entrypoint.chmod(0o700)
                 swapped = True
@@ -1819,6 +1843,81 @@ def validate_launch_boundary_regression(manager: Any) -> None:
         "web",
     ):
         expect_launch_rejected(manager, [command], f"launch argument is managed by nddev-kimicode-app: {command}")
+    expect_launch_rejected(manager, ["--add-dir", "/tmp/project"], "launch flag is managed by nddev-kimicode-app: --add-dir")
+    expect_launch_rejected(manager, ["--add-dir=/tmp/project"], "launch flag is managed by nddev-kimicode-app: --add-dir")
+    expect_launch_rejected(
+        manager,
+        ["--version", "--add-dir", "/tmp/project"],
+        "launch flag is managed by nddev-kimicode-app: --add-dir",
+    )
+
+
+def validate_launch_workspace_scope_regression(manager: Any) -> None:
+    temp, target = make_isolated_target("launch-workspace-")
+    original_cwd = Path.cwd()
+    try:
+        manager.write_setup(
+            target,
+            manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP),
+            manager.load_profile(manager.DEFAULT_PROFILE),
+        )
+        original_platforms = manager.KIMI_BINARY_PLATFORMS
+        original_run = manager.subprocess.run
+        try:
+            write_stub_software(manager, target)
+            explicit_workspace = Path(temp.name) / "explicit-workspace"
+            default_workspace = Path(temp.name) / "default-workspace"
+            explicit_workspace.mkdir(mode=0o700)
+            default_workspace.mkdir(mode=0o700)
+            seen_cwds: list[str] = []
+
+            def fake_run(command: list[str], *, env: dict[str, str], cwd: str, check: bool) -> SimpleNamespace:
+                if command[0] != str(target / "bin" / manager.KIMI_COMMAND):
+                    raise ValueError("launch workspace regression did not hand off to target-owned executable")
+                if env.get("KIMI_CODE_HOME") != str(target.resolve()):
+                    raise ValueError("launch workspace regression lost target-scoped environment")
+                seen_cwds.append(cwd)
+                return SimpleNamespace(returncode=19)
+
+            manager.subprocess.run = fake_run
+            if manager.launch(target, ["--version"], workspace=str(explicit_workspace)) != 19:
+                raise ValueError("explicit workspace launch did not forward child exit code")
+            os.chdir(default_workspace)
+            try:
+                if manager.launch(target, ["--version"]) != 19:
+                    raise ValueError("default workspace launch did not forward child exit code")
+            finally:
+                os.chdir(original_cwd)
+            expected_cwds = [str(explicit_workspace.resolve()), str(default_workspace.resolve())]
+            if seen_cwds != expected_cwds:
+                raise ValueError(f"launch workspace cwd handoff changed: {seen_cwds}")
+
+            relative = "relative-workspace"
+            missing = Path(temp.name) / "missing-workspace"
+            file_workspace = Path(temp.name) / "not-a-directory"
+            file_workspace.write_text("not a directory\n", encoding="utf-8")
+            symlink_workspace = Path(temp.name) / "workspace-link"
+            symlink_workspace.symlink_to(explicit_workspace)
+            invalid_cases = (
+                (relative, "must be an absolute path"),
+                (str(missing), "is missing"),
+                (str(file_workspace), "must be a directory"),
+                (str(symlink_workspace), "must not be a symlink"),
+            )
+            for raw_workspace, expected in invalid_cases:
+                try:
+                    manager.resolve_launch_workspace(raw_workspace)
+                except manager.KimicodeSetupError as exc:
+                    if expected not in str(exc):
+                        raise ValueError(f"launch workspace error changed for {raw_workspace}: {exc}") from exc
+                else:
+                    raise ValueError(f"launch workspace unexpectedly accepted {raw_workspace}")
+        finally:
+            manager.subprocess.run = original_run
+            manager.KIMI_BINARY_PLATFORMS = original_platforms
+            os.chdir(original_cwd)
+    finally:
+        temp.cleanup()
 
 
 def main(argv: list[str] | None = None) -> int:

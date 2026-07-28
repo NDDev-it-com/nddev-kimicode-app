@@ -34,7 +34,7 @@
     "migrate_command": "python3 cli-tools/nddev_kimicode.py migrate --setup nddev-builder --profile full-auto --target /absolute/target --json",
     "restore_command": "python3 cli-tools/nddev_kimicode.py restore --backup 0 --target /absolute/target --json",
     "remove_command": "python3 cli-tools/nddev_kimicode.py remove --target /absolute/target --json",
-    "launch_command": "python3 cli-tools/nddev_kimicode.py launch --target /absolute/target --"
+    "launch_command": "python3 cli-tools/nddev_kimicode.py launch --target /absolute/target [--workspace /absolute/project] --"
   },
   "safety": {
     "absolute_target_required": true,
@@ -103,13 +103,19 @@
   "runtime_launch": {
     "command": "kimi",
     "direct_command": ["/absolute/target/bin/kimi"],
-    "manager_command": "python3 cli-tools/nddev_kimicode.py launch --target /absolute/target --",
+    "manager_command": "python3 cli-tools/nddev_kimicode.py launch --target /absolute/target [--workspace /absolute/project] --",
     "required_version": "0.29.2",
     "environment_variable": "NDDEV_KIMICODE_TARGET",
     "forwards_arguments": true,
     "forwards_child_exit_code": true,
     "streams_child_stdio": true,
     "json_manager_errors_supported": true,
+    "target_role": "manager-owned-runtime-home",
+    "workspace_default_source": "captured-caller-cwd",
+    "manager_workspace_argument": "--workspace",
+    "child_cwd_policy": "explicit-subprocess-cwd",
+    "native_cwd_flag": null,
+    "workspace_expansion_blocked": ["--add-dir", "--add-dir=<dir>"],
     "target_environment_scope": "target-owned /absolute/target/bin/kimi with isolated HOME, TMPDIR, and KIMI_CODE_HOME; credentials, sessions, logs, skills, agents, plugins, MCP, updates, and runtime data stay under the explicit target",
     "pre_login_supported": true,
     "lifecycle_lock_scope": "External bootstrap lock is acquired first before target creation or inspection, target-local internal lock is acquired second, and both are held from launch preflight through child process completion and cleanup; internal is released first and external last",

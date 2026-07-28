@@ -56,7 +56,10 @@ by `references/kimi-code-baseline.json`.
 It executes `/absolute/target/bin/kimi` with target-local `HOME`, `TMPDIR`, and
 `KIMI_CODE_HOME`, disables telemetry, stops background keep-alive on exit, and
 constructs a fresh child environment without live provider credentials or
-`KIMI_MODEL_*` variables.
+`KIMI_MODEL_*` variables. The child working directory is passed explicitly:
+by default it is the caller's current project directory captured at manager
+entry, and manager `--workspace /absolute/project` selects another existing
+project directory. Kimi has no native cwd flag in the managed launch surface.
 
 The lifecycle boundary is held from launch preflight through child process
 completion and cleanup. While it is held, install, update, migrate, restore,
@@ -75,4 +78,5 @@ against deliberate same-UID tampering outside the manager.
 Child arguments that override managed permission mode, plan mode, prompt mode,
 model selection, Skill directories, agents, sessions, extra workspace scope, or
 software migration/update behavior are rejected before the target-owned binary
-is spawned.
+is spawned. This includes native `--add-dir` workspace expansion in split or
+assignment form.

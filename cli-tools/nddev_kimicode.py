@@ -215,6 +215,7 @@ class VerifiedLaunchExecutable:
 @dataclass
 class LaunchInvocation:
     target: Path
+    workspace: Path
     command: list[str]
     child_env: dict[str, str]
     expected_entrypoint_digest: str
@@ -2340,6 +2341,51 @@ def reject_managed_launch_overrides(child_args: list[str]) -> None:
         index += 1
 
 
+def resolve_launch_workspace(raw_workspace: str | None) -> Path:
+    if raw_workspace is None:
+        try:
+            workspace = Path.cwd()
+        except OSError as exc:
+            fail(f"launch workspace current directory is unavailable: {exc}")
+        label = "launch workspace"
+    else:
+        workspace = Path(raw_workspace)
+        if not workspace.is_absolute():
+            fail("launch workspace must be an absolute path")
+        label = "launch workspace"
+
+    info = stat_existing(workspace, label)
+    if info is None:
+        fail(f"{label} is missing")
+    if not stat.S_ISDIR(info.st_mode):
+        fail(f"{label} must be a directory")
+    if not hasattr(os, "O_NOFOLLOW"):
+        fail("launch workspace validation requires O_NOFOLLOW support")
+    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_DIRECTORY", 0)
+    try:
+        fd = os.open(workspace, flags)
+    except OSError as exc:
+        fail(f"{label} could not be opened safely: {exc}")
+    try:
+        opened = os.fstat(fd)
+        if opened.st_dev != info.st_dev or opened.st_ino != info.st_ino:
+            fail(f"{label} changed while opening")
+        if not stat.S_ISDIR(opened.st_mode):
+            fail(f"{label} must be a directory")
+        try:
+            resolved = workspace.resolve(strict=True)
+        except OSError as exc:
+            fail(f"{label} could not be resolved: {exc}")
+        resolved_info = stat_existing(resolved, label)
+        if resolved_info is None:
+            fail(f"{label} is missing")
+        if resolved_info.st_dev != opened.st_dev or resolved_info.st_ino != opened.st_ino:
+            fail(f"{label} changed while resolving")
+        return resolved
+    finally:
+        os.close(fd)
+
+
 def ensure_launch_runtime_directories(canonical: Path) -> tuple[Path, Path, Path]:
     runtime = canonical / ".nddev-kimicode-runtime"
     home = runtime / "home"
@@ -2482,7 +2528,7 @@ def revalidate_launch_executable(
         raise
 
 
-def prepare_launch_invocation_locked(target: Path, child_args: list[str]) -> LaunchInvocation:
+def prepare_launch_invocation_locked(target: Path, child_args: list[str], workspace: Path) -> LaunchInvocation:
     status = status_payload(target)
     if not status["managed"]:
         fail("launch requires a managed target")
@@ -2521,6 +2567,7 @@ def prepare_launch_invocation_locked(target: Path, child_args: list[str]) -> Lau
     }
     return LaunchInvocation(
         target=canonical,
+        workspace=workspace,
         command=[str(software_entrypoint(canonical)), *child_args],
         child_env=child_env,
         expected_entrypoint_digest=expected_binary["checksum"],
@@ -2528,17 +2575,23 @@ def prepare_launch_invocation_locked(target: Path, child_args: list[str]) -> Lau
     )
 
 
-def prepare_launch_invocation(target: Path, child_args: list[str]) -> tuple[list[str], dict[str, str]]:
+def prepare_launch_invocation(
+    target: Path,
+    child_args: list[str],
+    workspace: str | None = None,
+) -> tuple[list[str], dict[str, str], Path]:
     reject_managed_launch_overrides(child_args)
+    launch_workspace = resolve_launch_workspace(workspace)
     with target_lock(target):
-        invocation = prepare_launch_invocation_locked(target, child_args)
-        return invocation.command, invocation.child_env
+        invocation = prepare_launch_invocation_locked(target, child_args, launch_workspace)
+        return invocation.command, invocation.child_env, invocation.workspace
 
 
-def launch(target: Path, child_args: list[str]) -> int:
+def launch(target: Path, child_args: list[str], workspace: str | None = None) -> int:
     reject_managed_launch_overrides(child_args)
+    launch_workspace = resolve_launch_workspace(workspace)
     with target_lock(target):
-        invocation = prepare_launch_invocation_locked(target, child_args)
+        invocation = prepare_launch_invocation_locked(target, child_args, launch_workspace)
         with protected_launch_path(invocation.target):
             executable = revalidate_launch_executable(
                 invocation.target,
@@ -2547,7 +2600,12 @@ def launch(target: Path, child_args: list[str]) -> int:
             )
             try:
                 try:
-                    completed = subprocess.run(invocation.command, env=invocation.child_env, check=False)
+                    completed = subprocess.run(
+                        invocation.command,
+                        env=invocation.child_env,
+                        cwd=str(invocation.workspace),
+                        check=False,
+                    )
                 except FileNotFoundError:
                     fail("target-owned kimi executable is missing")
                 return int(completed.returncode)
@@ -2601,6 +2659,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
     launch_parser = subparsers.add_parser("launch")
     launch_parser.add_argument("--target", required=True)
+    launch_parser.add_argument("--workspace")
     launch_parser.add_argument("child_args", nargs=argparse.REMAINDER)
     return parser.parse_args(argv)
 
@@ -2669,7 +2728,7 @@ def dispatch(args: argparse.Namespace) -> int:
         child_args = list(args.child_args)
         if child_args[:1] == ["--"]:
             child_args = child_args[1:]
-        return launch(require_absolute_target(args.target), child_args)
+        return launch(require_absolute_target(args.target), child_args, workspace=args.workspace)
     fail(f"unknown command: {args.command}")
 
 
