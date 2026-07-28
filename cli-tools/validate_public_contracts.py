@@ -2225,16 +2225,27 @@ def validate_cleanup_journal_final_metadata_regression(manager: Any) -> None:
         setup = manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP)
         profile = manager.load_profile(manager.DEFAULT_PROFILE)
         manager.write_setup(target, setup, profile)
-        source = target / ".nddev-backup-old.public-validator"
-        source.write_bytes(b"public validator pending cleanup\n")
-        source.chmod(0o600)
+        pool = manager.backup_pool(target)
+        manager.ensure_private_directory(pool, "backup pool")
+        source = pool / f".0.nddev-backup-old.{os.getpid()}.{time.time_ns()}"
+        source.mkdir(mode=0o700)
+        source.chmod(0o700)
+        payload = source / manager.BACKUP_NAME
+        payload.write_bytes(b"public validator pending cleanup\n")
+        payload.chmod(0o600)
         promotion = manager.promote_cleanup_tombstones(
             target,
-            [(source, "public validator cleanup tombstone", manager.METADATA_MAX_BYTES, 4)],
+            [(source, "old backup slot", manager.METADATA_MAX_BYTES, 4)],
         )
-        result = manager.publish_cleanup_journal(target, promotion.entries)
+        result = manager.publish_cleanup_journal(
+            target,
+            promotion.entries,
+            promotion.journal,
+            promotion.serialized_journal,
+        )
         if not result.published:
             raise ValueError("public cleanup journal metadata fixture did not publish")
+        manager.remove_cleanup_intent_file(target)
 
     def expect_readonly_rejected(label: str, mutate: Any, expected: str) -> None:
         temp, target = make_isolated_target(f"cleanup-journal-{label}-")
@@ -2295,6 +2306,39 @@ def validate_cleanup_journal_final_metadata_regression(manager: Any) -> None:
         add_hardlink,
         "cleanup journal must not be a hardlink",
     )
+
+
+def validate_cleanup_source_admission_regression(manager: Any) -> None:
+    temp, target = make_isolated_target("cleanup-source-admission-")
+    try:
+        setup = manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP)
+        profile = manager.load_profile(manager.DEFAULT_PROFILE)
+        manager.write_setup(target, setup, profile)
+        lookalike = (
+            target / f".{manager.KIMI_COMMAND}.nddev.rollback.{os.getpid()}.{time.time_ns()}"
+        )
+        lookalike.write_bytes(b"user lookalike must not be adopted\n")
+        lookalike.chmod(0o600)
+        before = path_graph_snapshot(target, max_file_bytes=manager.METADATA_MAX_BYTES)
+        try:
+            manager.finish_cleanup_journal(
+                target,
+                [(lookalike, "Kimi Code entrypoint", manager.SOFTWARE_MAX_BYTES, 1)],
+            )
+        except manager.KimicodeSetupError as exc:
+            if "cleanup source is not a declared machine-generated object" not in str(exc):
+                raise ValueError(
+                    f"lookalike cleanup source returned unstable error: {exc}"
+                ) from exc
+        else:
+            raise ValueError("lookalike cleanup source was adopted")
+        after = path_graph_snapshot(target, max_file_bytes=manager.METADATA_MAX_BYTES)
+        if after != before:
+            raise ValueError("lookalike cleanup source rejection mutated target state")
+        if (target / manager.CLEANUP_DIR_NAME).exists():
+            raise ValueError("lookalike cleanup source rejection left cleanup residue")
+    finally:
+        temp.cleanup()
 
 
 def fork_wait(pid: int, label: str, timeout_seconds: float = 5.0) -> None:
@@ -2767,8 +2811,22 @@ def validate_runtime_regressions() -> None:
     cleanup_source = manager_text[cleanup_start:cleanup_end]
     for required in (
         "CLEANUP_JOURNAL_MAX_BYTES = METADATA_MAX_BYTES",
+        "CLEANUP_INTENT_MAX_BYTES",
+        "class CleanupSourceAdmission",
+        "def cleanup_operation_kind_for_source",
+        "def cleanup_source_admission",
+        "def validate_cleanup_source_binding",
+        "def cleanup_parent_binding",
+        'validate_cleanup_parent_binding(target, intent.get("cleanup_parent"))',
+        '"operation_kind"',
+        '"parent_st_dev"',
+        '"parent_st_ino"',
+        "cleanup source is not a declared machine-generated object",
         "def serialized_cleanup_journal_bytes",
+        "def serialized_cleanup_intent_bytes",
         "def build_cleanup_journal_for_entries",
+        "def build_cleanup_intent",
+        "def recover_cleanup_intent_for_mutation",
         "len(data) > CLEANUP_JOURNAL_MAX_BYTES",
         "len(serialized_journal) > CLEANUP_JOURNAL_MAX_BYTES",
     ):
@@ -2791,7 +2849,11 @@ def validate_runtime_regressions() -> None:
         "cleanup_pending_metadata",
         "journal: dict[str, Any]",
         "serialized_journal: bytes",
+        "intent: dict[str, Any]",
+        "serialized_intent: bytes",
         "write_cleanup_journal_stage(stage, serialized_journal)",
+        "publish_cleanup_intent(target, intent, serialized_intent)",
+        "remove_cleanup_intent_file(target)",
     ):
         if required not in cleanup_source:
             raise ValueError(f"cleanup journal implementation is missing {required}")
@@ -2800,6 +2862,7 @@ def validate_runtime_regressions() -> None:
         '"absolute_path"',
         "os.replace(stage, journal_path)",
         "atomic_write(journal_path",
+        "fragment in path.name",
     ):
         if forbidden in cleanup_source:
             raise ValueError(f"cleanup journal must not publish unsafe path state: {forbidden}")
@@ -2818,13 +2881,32 @@ def validate_runtime_regressions() -> None:
     if (
         "promotion.journal" not in finish_source
         or "promotion.serialized_journal" not in finish_source
+        or "remove_cleanup_intent_file(target)" not in finish_source
     ):
         raise ValueError("cleanup journal publication must use the prebuilt bounded payload")
+    write_setup_source = manager_text[
+        manager_text.index("def write_setup") : manager_text.index("def restore_backup")
+    ]
+    update_setup_source = manager_text[
+        manager_text.index("def update_setup") : manager_text.index("def _plan_payload_locked")
+    ]
+    for label, source in (
+        ("write_setup", write_setup_source),
+        ("update_setup", update_setup_source),
+    ):
+        if "backup_cleanup_sources = backup_result.cleanup_sources" not in source:
+            raise ValueError(f"{label} must defer backup retirement cleanup")
+        if source.index("file_transaction.commit()") > source.index(
+            "finish_cleanup_journal(target, list(backup_cleanup_sources))"
+        ):
+            raise ValueError(f"{label} must commit file transaction before backup cleanup")
     readonly_status_source = manager_text[
         manager_text.index("def _status_payload_locked") : manager_text.index("def status_payload")
     ]
     if "cleanup_pending_metadata(target)" not in readonly_status_source:
         raise ValueError("status must report cleanup_pending without draining")
+    if 'software["current"] and not cleanup_metadata' not in readonly_status_source:
+        raise ValueError("status launch_allowed must be false while cleanup is pending")
     readonly_software_source = manager_text[
         manager_text.index("def _software_status_payload_locked") : manager_text.index(
             "def software_status_payload"
@@ -2913,6 +2995,22 @@ def validate_runtime_regressions() -> None:
         "_software_status_payload_locked(target)"
     ):
         raise ValueError("software install/update status must run after target_lock acquisition")
+    software_commit_start = manager_text.index("def commit_software_transactions")
+    software_commit_end = manager_text.index("def rollback_software_transactions")
+    software_commit_source = manager_text[software_commit_start:software_commit_end]
+    for required in (
+        "software_cleanup_tombstones(",
+        "stage_root=stage_root",
+        "return finish_cleanup_journal(",
+    ):
+        if required not in software_commit_source:
+            raise ValueError(f"software cleanup commit is missing {required}")
+    if "commit_software_transactions(" not in install_source:
+        raise ValueError("software install/update must use coordinated cleanup commit")
+    if install_source.index("verify_installed_software_postcondition(") > install_source.index(
+        "commit_software_transactions("
+    ):
+        raise ValueError("software cleanup commit must follow installed-state postcondition")
     remove_start = manager_text.index("def remove_software")
     remove_end = manager_text.index("def reject_managed_launch_overrides")
     remove_source = manager_text[remove_start:remove_end]
@@ -2920,6 +3018,12 @@ def validate_runtime_regressions() -> None:
         "_software_status_payload_locked(target)"
     ):
         raise ValueError("remove-cli status must run after target_lock acquisition")
+    if "commit_software_transactions(" not in remove_source:
+        raise ValueError("remove-cli must use coordinated cleanup commit")
+    if remove_source.index("verify_removed_software_postcondition(target)") > remove_source.index(
+        "commit_software_transactions("
+    ):
+        raise ValueError("remove-cli cleanup commit must follow removed-state postcondition")
     dispatch_start = manager_text.index("def dispatch")
     dispatch_end = manager_text.index("def main")
     dispatch_source = manager_text[dispatch_start:dispatch_end]
@@ -2946,6 +3050,13 @@ def validate_runtime_regressions() -> None:
         "host_platform_key = require_supported_product_host().vendor_platform_key"
     ) > launch_source.index("with target_lock(target):"):
         raise ValueError("launch must reject unsupported hosts before acquiring lifecycle locks")
+    for label, source in (("prepare launch", prepare_source), ("launch", launch_source)):
+        if "drain_cleanup_journal(target)" not in source:
+            raise ValueError(f"{label} must drain cleanup before persistent launch state")
+        if source.index("drain_cleanup_journal(target)") > source.index(
+            "prepare_launch_invocation_locked("
+        ):
+            raise ValueError(f"{label} must drain cleanup before launch preparation")
 
     def run_isolated_runtime_regressions() -> None:
         validate_supported_host_detection_regression(manager)
@@ -2959,6 +3070,7 @@ def validate_runtime_regressions() -> None:
         validate_lifecycle_lock_order_regression(manager)
         validate_readonly_external_lock_no_residue_regression(manager)
         validate_cleanup_journal_final_metadata_regression(manager)
+        validate_cleanup_source_admission_regression(manager)
         validate_unsupported_command_preflight_regression(manager)
         validate_unsupported_launch_preflight_regression(manager)
         validate_external_lock_binding_regression(manager)

@@ -45,7 +45,9 @@ BACKUP_NAME = "NDDEV-KIMICODE-BACKUP.json"
 BACKUP_SCHEMA = 2
 CLEANUP_DIR_NAME = ".nddev-kimicode-cleanup"
 CLEANUP_JOURNAL_NAME = "journal.json"
+CLEANUP_INTENT_NAME = "intent.json"
 CLEANUP_SCHEMA = 1
+CLEANUP_INTENT_SCHEMA = 1
 CLEANUP_MAX_ENTRIES = 8
 LOCK_DIR_NAME = ".nddev-kimicode-lock"
 LOCK_NAME = "lifecycle.lock"
@@ -76,6 +78,7 @@ OWNER_DIRECTORY_MODE = 0o700
 MANAGED_MAX_BYTES = 8 * 1024 * 1024
 METADATA_MAX_BYTES = 256 * 1024
 CLEANUP_JOURNAL_MAX_BYTES = METADATA_MAX_BYTES
+CLEANUP_INTENT_MAX_BYTES = METADATA_MAX_BYTES + 16 * 1024
 CONTENT_MANAGED_BASE_PATHS = (
     "config.toml",
     "tui.toml",
@@ -505,6 +508,7 @@ class PendingBackup:
 @dataclass(frozen=True)
 class BackupCommitResult:
     slot: int
+    cleanup_sources: tuple[tuple[Path | None, str, int, int], ...] = ()
     cleanup_pending: bool = False
 
 
@@ -513,14 +517,28 @@ class CleanupPromotion:
     entries: list[dict[str, Any]]
     journal: dict[str, Any]
     serialized_journal: bytes
+    intent: dict[str, Any]
+    serialized_intent: bytes
     moved: list[tuple[Path, Path]]
     parent_signature: DirectoryObjectSignature | None
+    source_parent_signatures: dict[Path, DirectoryObjectSignature | None]
 
 
 @dataclass(frozen=True)
 class CleanupJournalPublishResult:
     published: bool
     cleanup_pending: bool = False
+
+
+@dataclass(frozen=True)
+class CleanupSourceAdmission:
+    operation_kind: str
+    anchor: str
+    relative: str
+    parent_anchor: str
+    parent_relative: str
+    parent_st_dev: int
+    parent_st_ino: int
 
 
 @dataclass
@@ -2505,8 +2523,119 @@ def cleanup_journal_path(target: Path) -> Path:
     return cleanup_journal_dir(target) / CLEANUP_JOURNAL_NAME
 
 
+def cleanup_intent_path(target: Path) -> Path:
+    return cleanup_journal_dir(target) / CLEANUP_INTENT_NAME
+
+
 def cleanup_journal_stage_alias_pattern(journal_path: Path) -> re.Pattern[str]:
     return re.compile(rf"\.{re.escape(journal_path.name)}\.nddev\.tmp\.[0-9]+\.[0-9]+\Z")
+
+
+def cleanup_operation_kind_for_source(
+    target: Path,
+    path: Path,
+    *,
+    label: str,
+    max_file_bytes: int,
+    max_paths: int,
+) -> str:
+    name = path.name
+    if (
+        path.parent == backup_pool(target)
+        and label == "old backup slot"
+        and max_file_bytes == METADATA_MAX_BYTES
+        and max_paths <= 64
+        and re.fullmatch(r"\.[0-9]+\.nddev-backup-old\.[0-9]+\.[0-9]+\Z", name)
+    ):
+        return "backup-old-slot"
+    if (
+        path.parent == backup_pool(target)
+        and label == "backup stage"
+        and max_file_bytes == METADATA_MAX_BYTES
+        and max_paths <= 64
+        and re.fullmatch(r"\.[0-9]+\.nddev-backup-stage\.[0-9]+\.[0-9]+\Z", name)
+    ):
+        return "backup-stage"
+    if (
+        path.parent == target
+        and label == "software stage"
+        and max_file_bytes == SOFTWARE_MAX_BYTES
+        and max_paths <= SOFTWARE_MAX_PATHS + 16
+        and re.fullmatch(
+            rf"\.{re.escape(target.name)}{re.escape(SOFTWARE_STAGE_FRAGMENT)}\.[0-9]+\.[0-9]+\Z",
+            name,
+        )
+    ):
+        return "software-stage"
+    if (
+        path.parent == software_root(target)
+        and label == "current software tree"
+        and max_file_bytes == SOFTWARE_MAX_BYTES
+        and max_paths <= SOFTWARE_MAX_PATHS
+        and re.fullmatch(
+            rf"\.{re.escape(SOFTWARE_CURRENT_NAME)}\.nddev-kimicode-software-rollback\.[0-9]+\.[0-9]+\Z",
+            name,
+        )
+    ):
+        return "software-current-tree-rollback"
+    if (
+        path.parent == target
+        and label == "software root"
+        and max_file_bytes == SOFTWARE_MAX_BYTES
+        and max_paths <= SOFTWARE_MAX_PATHS
+        and re.fullmatch(
+            rf"\.{re.escape(SOFTWARE_DIR_NAME)}\.nddev-kimicode-software-rollback\.[0-9]+\.[0-9]+\Z",
+            name,
+        )
+    ):
+        return "software-root-tree-rollback"
+    if (
+        path.parent == target
+        and label == "Kimi Code bin parent"
+        and max_file_bytes == SOFTWARE_MAX_BYTES
+        and max_paths <= 16
+        and re.fullmatch(r"\.bin\.nddev-kimicode-software-rollback\.[0-9]+\.[0-9]+\Z", name)
+    ):
+        return "software-bin-tree-rollback"
+    if (
+        path.parent == software_entrypoint(target).parent
+        and label == "Kimi Code entrypoint"
+        and max_file_bytes == SOFTWARE_MAX_BYTES
+        and max_paths == 1
+        and re.fullmatch(rf"\.{re.escape(KIMI_COMMAND)}\.nddev\.tmp\.[0-9]+\.[0-9]+\Z", name)
+    ):
+        return "software-entrypoint-stage-file"
+    if (
+        path.parent == software_entrypoint(target).parent
+        and label == "Kimi Code entrypoint"
+        and max_file_bytes == SOFTWARE_MAX_BYTES
+        and max_paths == 1
+        and re.fullmatch(rf"\.{re.escape(KIMI_COMMAND)}\.nddev\.rollback\.[0-9]+\.[0-9]+\Z", name)
+    ):
+        return "software-entrypoint-rollback-file"
+    if (
+        path.parent == target
+        and label == SOFTWARE_STAMP_NAME
+        and max_file_bytes == METADATA_MAX_BYTES
+        and max_paths == 1
+        and re.fullmatch(
+            rf"\.{re.escape(SOFTWARE_STAMP_NAME)}\.nddev\.tmp\.[0-9]+\.[0-9]+\Z",
+            name,
+        )
+    ):
+        return "software-stamp-stage-file"
+    if (
+        path.parent == target
+        and label == SOFTWARE_STAMP_NAME
+        and max_file_bytes == METADATA_MAX_BYTES
+        and max_paths == 1
+        and re.fullmatch(
+            rf"\.{re.escape(SOFTWARE_STAMP_NAME)}\.nddev\.rollback\.[0-9]+\.[0-9]+\Z",
+            name,
+        )
+    ):
+        return "software-stamp-rollback-file"
+    fail(f"cleanup source is not a declared machine-generated object: {path}")
 
 
 def cleanup_tombstone_is_allowed(target: Path, path: Path) -> bool:
@@ -2514,15 +2643,23 @@ def cleanup_tombstone_is_allowed(target: Path, path: Path) -> bool:
         path.relative_to(cleanup_journal_dir(target))
     except ValueError:
         return False
-    fragments = (
-        ".nddev.tmp.",
-        ".nddev.rollback.",
-        ".nddev-backup-old.",
-        ".nddev-backup-stage.",
-        ".nddev-kimicode-software-stage.",
-        ".nddev-kimicode-software-rollback.",
+    return (
+        re.fullmatch(
+            r"[0-9]{2}-(?:"
+            r"\.[0-9]+\.nddev-backup-(?:old|stage)\.[0-9]+\.[0-9]+"
+            r"|"
+            + rf"\.{re.escape(KIMI_COMMAND)}\.nddev\.(?:tmp|rollback)\.[0-9]+\.[0-9]+"
+            + r"|"
+            + rf"\.{re.escape(SOFTWARE_STAMP_NAME)}\.nddev\.(?:tmp|rollback)\.[0-9]+\.[0-9]+"
+            + r"|"
+            + rf"\.{re.escape(target.name)}{re.escape(SOFTWARE_STAGE_FRAGMENT)}\.[0-9]+\.[0-9]+"
+            + r"|"
+            + rf"\.(?:{re.escape(SOFTWARE_CURRENT_NAME)}|{re.escape(SOFTWARE_DIR_NAME)}|bin)\.nddev-kimicode-software-rollback\.[0-9]+\.[0-9]+"
+            + r")\Z",
+            path.name,
+        )
+        is not None
     )
-    return any(fragment in path.name for fragment in fragments)
 
 
 def cleanup_tombstone_name(source: Path, index: int) -> str:
@@ -2530,16 +2667,212 @@ def cleanup_tombstone_name(source: Path, index: int) -> str:
     return f"{index:02d}-{safe}"
 
 
-def cleanup_source_name_allowed(path: Path) -> bool:
-    fragments = (
-        ".nddev.tmp.",
-        ".nddev.rollback.",
-        ".nddev-backup-old.",
-        ".nddev-backup-stage.",
-        ".nddev-kimicode-software-stage.",
-        ".nddev-kimicode-software-rollback.",
+def cleanup_relative_to_anchor(target: Path, path: Path) -> tuple[str, str]:
+    if path == target:
+        return "target", "."
+    if path == backup_pool(target):
+        return "backup_pool", "."
+    try:
+        relative = path.relative_to(target).as_posix()
+    except ValueError:
+        try:
+            relative = path.relative_to(backup_pool(target)).as_posix()
+        except ValueError:
+            fail(f"cleanup source is outside declared bounds: {path}")
+        anchor = "backup_pool"
+    else:
+        anchor = "target"
+    if relative == "":
+        relative = "."
+    relative_path = Path(relative)
+    if relative_path.is_absolute() or relative in {"", ".."} or ".." in relative_path.parts:
+        fail(f"cleanup source relative path is invalid: {path}")
+    return anchor, relative
+
+
+def cleanup_anchor_path(target: Path, anchor: str) -> Path:
+    if anchor == "target":
+        return target
+    if anchor == "backup_pool":
+        return backup_pool(target)
+    fail("cleanup source anchor is invalid")
+
+
+def cleanup_source_admission(
+    target: Path,
+    path: Path,
+    *,
+    label: str,
+    max_file_bytes: int,
+    max_paths: int,
+) -> CleanupSourceAdmission:
+    operation_kind = cleanup_operation_kind_for_source(
+        target,
+        path,
+        label=label,
+        max_file_bytes=max_file_bytes,
+        max_paths=max_paths,
     )
-    return any(fragment in path.name for fragment in fragments)
+    anchor, relative = cleanup_relative_to_anchor(target, path)
+    parent_anchor, parent_relative = cleanup_relative_to_anchor(target, path.parent)
+    parent_info = stat_existing(path.parent, "cleanup source parent")
+    if parent_info is None or not stat.S_ISDIR(parent_info.st_mode):
+        fail("cleanup source parent is invalid")
+    return CleanupSourceAdmission(
+        operation_kind=operation_kind,
+        anchor=anchor,
+        relative=relative,
+        parent_anchor=parent_anchor,
+        parent_relative=parent_relative,
+        parent_st_dev=parent_info.st_dev,
+        parent_st_ino=parent_info.st_ino,
+    )
+
+
+def cleanup_source_binding(
+    target: Path,
+    path: Path,
+    *,
+    label: str,
+    max_file_bytes: int,
+    max_paths: int,
+) -> dict[str, Any]:
+    admission = cleanup_source_admission(
+        target,
+        path,
+        label=label,
+        max_file_bytes=max_file_bytes,
+        max_paths=max_paths,
+    )
+    return {
+        "operation_kind": admission.operation_kind,
+        "anchor": admission.anchor,
+        "relative": admission.relative,
+        "parent_anchor": admission.parent_anchor,
+        "parent_relative": admission.parent_relative,
+        "parent_st_dev": admission.parent_st_dev,
+        "parent_st_ino": admission.parent_st_ino,
+    }
+
+
+def cleanup_parent_binding(target: Path, path: Path) -> dict[str, Any]:
+    anchor, relative = cleanup_relative_to_anchor(target, path)
+    if anchor != "target" or relative != CLEANUP_DIR_NAME:
+        fail("cleanup parent binding is outside declared bounds")
+    info = stat_existing(path, "cleanup journal directory")
+    if info is None or not stat.S_ISDIR(info.st_mode):
+        fail("cleanup journal directory is missing")
+    if not is_current_owner(info) or stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
+        fail("cleanup journal directory must be private and owned by the current user")
+    return {
+        "anchor": anchor,
+        "relative": relative,
+        "st_dev": info.st_dev,
+        "st_ino": info.st_ino,
+        "mode": stat.S_IMODE(info.st_mode),
+    }
+
+
+def validate_cleanup_parent_binding(target: Path, binding: Any) -> None:
+    if not isinstance(binding, dict) or set(binding) != {
+        "anchor",
+        "relative",
+        "st_dev",
+        "st_ino",
+        "mode",
+    }:
+        fail("cleanup intent parent binding schema is invalid")
+    if (
+        binding.get("anchor") != "target"
+        or binding.get("relative") != CLEANUP_DIR_NAME
+        or not isinstance(binding.get("st_dev"), int)
+        or not isinstance(binding.get("st_ino"), int)
+        or binding.get("mode") != OWNER_DIRECTORY_MODE
+    ):
+        fail("cleanup intent parent binding is invalid")
+    info = stat_existing(cleanup_journal_dir(target), "cleanup journal directory")
+    if info is None or not stat.S_ISDIR(info.st_mode):
+        fail("cleanup journal directory is missing")
+    if (
+        info.st_dev != binding["st_dev"]
+        or info.st_ino != binding["st_ino"]
+        or stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE
+        or not is_current_owner(info)
+    ):
+        fail("cleanup intent parent identity is invalid")
+
+
+def cleanup_source_path_from_binding(target: Path, binding: dict[str, Any]) -> Path:
+    if set(binding) != {
+        "operation_kind",
+        "anchor",
+        "relative",
+        "parent_anchor",
+        "parent_relative",
+        "parent_st_dev",
+        "parent_st_ino",
+    }:
+        fail("cleanup intent source binding schema is invalid")
+    anchor = binding.get("anchor")
+    relative = binding.get("relative")
+    if not isinstance(anchor, str) or not isinstance(relative, str):
+        fail("cleanup intent source relative path is invalid")
+    relative_path = Path(relative)
+    if relative_path.is_absolute() or relative in {"", ".."} or ".." in relative_path.parts:
+        fail("cleanup intent source relative path is invalid")
+    if relative == ".":
+        fail("cleanup intent source relative path is invalid")
+    return cleanup_anchor_path(target, anchor) / relative_path
+
+
+def cleanup_parent_path_from_binding(target: Path, binding: dict[str, Any]) -> Path:
+    parent_anchor = binding.get("parent_anchor")
+    parent_relative = binding.get("parent_relative")
+    if not isinstance(parent_anchor, str) or not isinstance(parent_relative, str):
+        fail("cleanup intent source parent binding is invalid")
+    parent_relative_path = Path(parent_relative)
+    if (
+        parent_relative_path.is_absolute()
+        or parent_relative in {"", ".."}
+        or ".." in parent_relative_path.parts
+    ):
+        fail("cleanup intent source parent relative path is invalid")
+    parent = cleanup_anchor_path(target, parent_anchor)
+    return parent if parent_relative == "." else parent / parent_relative_path
+
+
+def validate_cleanup_source_binding(
+    target: Path,
+    entry: dict[str, Any],
+    binding: dict[str, Any],
+) -> Path:
+    source_path = cleanup_source_path_from_binding(target, binding)
+    operation_kind = binding.get("operation_kind")
+    parent = cleanup_parent_path_from_binding(target, binding)
+    if not isinstance(operation_kind, str):
+        fail("cleanup intent source kind is invalid")
+    if parent != source_path.parent:
+        fail("cleanup intent source parent binding is invalid")
+    parent_info = stat_existing(parent, "cleanup source parent")
+    if parent_info is None or not stat.S_ISDIR(parent_info.st_mode):
+        fail("cleanup source parent is invalid")
+    if (
+        not isinstance(binding.get("parent_st_dev"), int)
+        or not isinstance(binding.get("parent_st_ino"), int)
+        or parent_info.st_dev != binding["parent_st_dev"]
+        or parent_info.st_ino != binding["parent_st_ino"]
+    ):
+        fail("cleanup intent source parent identity is invalid")
+    expected_kind = cleanup_operation_kind_for_source(
+        target,
+        source_path,
+        label=str(entry["label"]),
+        max_file_bytes=int(entry["max_file_bytes"]),
+        max_paths=int(entry["max_paths"]),
+    )
+    if operation_kind != expected_kind:
+        fail("cleanup intent source kind is invalid")
+    return source_path
 
 
 def tree_snapshot_summary(snapshot: TreeSnapshot) -> dict[str, Any]:
@@ -2716,10 +3049,206 @@ def build_cleanup_journal_for_entries(
     return journal, serialized_cleanup_journal_bytes(journal)
 
 
+def cleanup_intent_payload(
+    target: Path,
+    journal: dict[str, Any],
+    moves: list[dict[str, Any]],
+    cleanup_parent: dict[str, Any] | None,
+) -> dict[str, Any]:
+    return {
+        "schema_version": CLEANUP_INTENT_SCHEMA,
+        "product_name": PRODUCT_NAME,
+        "canonical_target": str(validate_target(target, create=False)),
+        "cleanup_parent": cleanup_parent,
+        "journal": journal,
+        "moves": moves,
+    }
+
+
+def serialized_cleanup_intent_bytes(intent: dict[str, Any]) -> bytes:
+    data = canonical_json(intent)
+    if len(data) > CLEANUP_INTENT_MAX_BYTES:
+        fail("cleanup intent serialized size exceeds bound")
+    return data
+
+
+def build_cleanup_intent(
+    target: Path,
+    journal: dict[str, Any],
+    moves: list[dict[str, Any]],
+    cleanup_parent: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any], bytes]:
+    intent = cleanup_intent_payload(target, journal, moves, cleanup_parent)
+    return intent, serialized_cleanup_intent_bytes(intent)
+
+
+def read_cleanup_intent_json(target: Path) -> dict[str, Any]:
+    intent_path = cleanup_intent_path(target)
+    info = stat_existing(intent_path, CLEANUP_INTENT_NAME)
+    if info is None:
+        fail("cleanup intent is missing")
+    if not stat.S_ISREG(info.st_mode):
+        fail("cleanup intent must be a regular file")
+    if not is_current_owner(info):
+        fail("cleanup intent must be owned by the current user")
+    if stat.S_IMODE(info.st_mode) != OWNER_FILE_MODE:
+        fail("cleanup intent must be private with mode 0600")
+    if info.st_nlink != 1:
+        fail("cleanup intent must not be a hardlink")
+    if info.st_size > CLEANUP_INTENT_MAX_BYTES:
+        fail("cleanup intent is too large")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(intent_path, flags)
+    except OSError as exc:
+        fail(f"cleanup intent could not be opened safely: {exc}")
+    try:
+        opened = os.fstat(fd)
+        if opened.st_dev != info.st_dev or opened.st_ino != info.st_ino:
+            fail("cleanup intent changed while opening")
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or not is_current_owner(opened)
+            or stat.S_IMODE(opened.st_mode) != OWNER_FILE_MODE
+            or opened.st_nlink != 1
+            or opened.st_size > CLEANUP_INTENT_MAX_BYTES
+        ):
+            fail("cleanup intent metadata is invalid")
+        data = os.read(fd, CLEANUP_INTENT_MAX_BYTES + 1)
+    finally:
+        os.close(fd)
+    if len(data) > CLEANUP_INTENT_MAX_BYTES:
+        fail("cleanup intent is too large")
+    try:
+        value = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        fail(f"cleanup intent is invalid JSON: {exc}")
+    if not isinstance(value, dict):
+        fail("cleanup intent must contain a JSON object")
+    return value
+
+
+def validate_cleanup_intent(target: Path) -> dict[str, Any] | None:
+    intent_path = cleanup_intent_path(target)
+    if stat_existing(intent_path, CLEANUP_INTENT_NAME) is None:
+        return None
+    intent = read_cleanup_intent_json(target)
+    if set(intent) != {
+        "schema_version",
+        "product_name",
+        "canonical_target",
+        "cleanup_parent",
+        "journal",
+        "moves",
+    }:
+        fail("cleanup intent schema is invalid")
+    if (
+        intent.get("schema_version") != CLEANUP_INTENT_SCHEMA
+        or intent.get("product_name") != PRODUCT_NAME
+    ):
+        fail("cleanup intent owner is invalid")
+    if intent.get("canonical_target") != str(validate_target(target, create=False)):
+        fail("cleanup intent target binding is invalid")
+    journal = intent.get("journal")
+    moves = intent.get("moves")
+    if not isinstance(journal, dict) or not isinstance(moves, list):
+        fail("cleanup intent payload is invalid")
+    validate_cleanup_parent_binding(target, intent.get("cleanup_parent"))
+    expected_journal, _serialized_journal = build_cleanup_journal_for_entries(
+        target, list(journal.get("entries", [])) if isinstance(journal.get("entries"), list) else []
+    )
+    if journal != expected_journal:
+        fail("cleanup intent journal payload is invalid")
+    entries = journal.get("entries")
+    if (
+        not isinstance(entries, list)
+        or not entries
+        or len(entries) > CLEANUP_MAX_ENTRIES
+        or len(moves) != len(entries)
+    ):
+        fail("cleanup intent moves are invalid")
+    seen: set[str] = set()
+    for entry, move in zip(entries, moves):
+        if not isinstance(entry, dict) or not isinstance(move, dict):
+            fail("cleanup intent entry is invalid")
+        if set(move) != {"relative_name", "source"}:
+            fail("cleanup intent move schema is invalid")
+        relative_name = move.get("relative_name")
+        if not isinstance(relative_name, str) or relative_name != entry.get("relative_name"):
+            fail("cleanup intent move binding is invalid")
+        if relative_name in seen:
+            fail("cleanup intent relative path set is invalid")
+        seen.add(relative_name)
+        source = move.get("source")
+        if not isinstance(source, dict):
+            fail("cleanup intent source binding is invalid")
+        validate_cleanup_source_binding(target, entry, source)
+        tombstone = cleanup_journal_dir(target) / relative_name
+        if not cleanup_tombstone_is_allowed(target, tombstone):
+            fail("cleanup intent tombstone is outside declared bounds")
+        cleanup_graph_map(entry)
+    return intent
+
+
+def write_cleanup_intent_stage(stage: Path, serialized_intent: bytes) -> None:
+    if len(serialized_intent) > CLEANUP_INTENT_MAX_BYTES:
+        fail("cleanup intent serialized size exceeds bound")
+    write_staged_file(
+        stage,
+        serialized_intent,
+        mode=OWNER_FILE_MODE,
+        label=CLEANUP_INTENT_NAME,
+    )
+
+
+def publish_cleanup_intent(target: Path, intent: dict[str, Any], serialized_intent: bytes) -> None:
+    if path_exists_no_follow(cleanup_intent_path(target)):
+        validate_cleanup_intent(target)
+        fail("cleanup intent is already pending")
+    journal_dir = cleanup_journal_dir(target)
+    ensure_private_directory(journal_dir, "cleanup journal directory")
+    intent_path = cleanup_intent_path(target)
+    stage = intent_path.with_name(f".{intent_path.name}.nddev.tmp.{os.getpid()}.{time.time_ns()}")
+    published = False
+    write_cleanup_intent_stage(stage, serialized_intent)
+    try:
+        if not rename_no_replace(stage, intent_path, CLEANUP_INTENT_NAME):
+            cleanup_lock_stage_file(stage, CLEANUP_INTENT_NAME)
+            fail("cleanup intent is already pending")
+        published = True
+        fsync_directory(journal_dir)
+        validate_cleanup_intent(target)
+    except BaseException:
+        if path_exists_no_follow(stage):
+            with contextlib.suppress(BaseException):
+                durable_unlink(stage)
+        if published and not path_exists_no_follow(cleanup_journal_path(target)):
+            with contextlib.suppress(BaseException):
+                durable_unlink(intent_path)
+        raise
+
+
+def remove_cleanup_intent_file(target: Path) -> None:
+    intent_path = cleanup_intent_path(target)
+    if not path_exists_no_follow(intent_path):
+        return
+    restore_with_retries(
+        lambda: durable_unlink(intent_path),
+        lambda: verify_file_snapshot(
+            intent_path,
+            FileSnapshot(data=None, mode=None),
+            CLEANUP_INTENT_NAME,
+            max_bytes=CLEANUP_INTENT_MAX_BYTES,
+        ),
+        CLEANUP_INTENT_NAME,
+    )
+
+
 def promote_cleanup_tombstones(
     target: Path,
     paths: list[tuple[Path | None, str, int, int]],
 ) -> CleanupPromotion:
+    recover_cleanup_intent_for_mutation(target)
     present_paths = [
         (path, label, max_file_bytes, max_paths)
         for path, label, max_file_bytes, max_paths in paths
@@ -2727,18 +3256,28 @@ def promote_cleanup_tombstones(
     ]
     if not present_paths:
         journal, serialized = build_cleanup_journal_for_entries(target, [])
+        intent, serialized_intent = build_cleanup_intent(target, journal, [])
         return CleanupPromotion(
             entries=[],
             journal=journal,
             serialized_journal=serialized,
+            intent=intent,
+            serialized_intent=serialized_intent,
             moved=[],
             parent_signature=None,
+            source_parent_signatures={},
         )
     entries: list[dict[str, Any]] = []
     move_plan: list[tuple[Path, Path]] = []
+    moves: list[dict[str, Any]] = []
     for index, (path, label, max_file_bytes, max_paths) in enumerate(present_paths):
-        if not cleanup_source_name_allowed(path):
-            fail(f"cleanup source is outside declared tombstone names: {path}")
+        cleanup_operation_kind_for_source(
+            target,
+            path,
+            label=label,
+            max_file_bytes=max_file_bytes,
+            max_paths=max_paths,
+        )
         relative_name = cleanup_tombstone_name(path, index)
         tombstone = cleanup_journal_dir(target) / relative_name
         entry = cleanup_entry_for_tombstone(
@@ -2753,14 +3292,37 @@ def promote_cleanup_tombstones(
         if entry is not None:
             entries.append(entry)
             move_plan.append((path, tombstone))
+            moves.append(
+                {
+                    "relative_name": relative_name,
+                    "source": cleanup_source_binding(
+                        target,
+                        path,
+                        label=label,
+                        max_file_bytes=max_file_bytes,
+                        max_paths=max_paths,
+                    ),
+                }
+            )
     if len(entries) > CLEANUP_MAX_ENTRIES:
         fail("cleanup journal entry bound exceeded")
     journal, serialized = build_cleanup_journal_for_entries(target, entries)
     parent_signature = directory_object_signature(target, "cleanup journal parent")
+    source_parent_signatures = {
+        path.parent: directory_object_signature(path.parent, "cleanup source parent")
+        for path, _tombstone in move_plan
+    }
     cleanup_dir = cleanup_journal_dir(target)
     ensure_private_directory(cleanup_dir, "cleanup journal directory")
+    intent, serialized_intent = build_cleanup_intent(
+        target,
+        journal,
+        moves,
+        cleanup_parent_binding(target, cleanup_dir),
+    )
     moved: list[tuple[Path, Path]] = []
     try:
+        publish_cleanup_intent(target, intent, serialized_intent)
         for path, tombstone in move_plan:
             relative_name = tombstone.name
             if path_exists_no_follow(tombstone):
@@ -2773,8 +3335,11 @@ def promote_cleanup_tombstones(
             entries=entries,
             journal=journal,
             serialized_journal=serialized,
+            intent=intent,
+            serialized_intent=serialized_intent,
             moved=moved,
             parent_signature=parent_signature,
+            source_parent_signatures=source_parent_signatures,
         )
     except BaseException:
         rollback_cleanup_promotion(
@@ -2783,8 +3348,11 @@ def promote_cleanup_tombstones(
                 entries=entries,
                 journal=journal,
                 serialized_journal=serialized,
+                intent=intent,
+                serialized_intent=serialized_intent,
                 moved=moved,
                 parent_signature=parent_signature,
+                source_parent_signatures=source_parent_signatures,
             ),
         )
         raise
@@ -2806,6 +3374,10 @@ def rollback_cleanup_promotion(target: Path, promotion: CleanupPromotion) -> Non
     if path_exists_no_follow(journal_path):
         errors.append("cleanup journal was already published")
     try:
+        remove_cleanup_intent_file(target)
+    except BaseException as exc:
+        errors.append(f"cleanup intent: {type(exc).__name__}: {exc}")
+    try:
         if path_exists_no_follow(cleanup_dir) and not any(cleanup_dir.iterdir()):
             durable_rmdir(cleanup_dir)
     except BaseException as exc:
@@ -2818,6 +3390,11 @@ def rollback_cleanup_promotion(target: Path, promotion: CleanupPromotion) -> Non
         )
     except BaseException as exc:
         errors.append(f"cleanup parent: {type(exc).__name__}: {exc}")
+    for parent, signature in promotion.source_parent_signatures.items():
+        try:
+            restore_directory_object_signature(parent, signature, "cleanup source parent")
+        except BaseException as exc:
+            errors.append(f"cleanup source parent: {type(exc).__name__}: {exc}")
     if errors:
         fail("cleanup tombstone rollback failed: " + "; ".join(errors))
 
@@ -2978,14 +3555,13 @@ def cleanup_object_matches_record(
         fail("cleanup tombstone file digest mismatch")
 
 
-def validate_cleanup_graph_state(
-    target: Path,
+def validate_cleanup_graph_state_at_root(
+    root: Path,
     entry: dict[str, Any],
     graph: dict[str, dict[str, Any]],
     *,
     require_full: bool,
 ) -> bool:
-    root = cleanup_journal_dir(target) / str(entry["relative_name"])
     current_relatives = current_cleanup_relatives(root, str(entry["kind"]))
     if not current_relatives:
         return False
@@ -3022,6 +3598,17 @@ def validate_cleanup_graph_state(
             full_directory_metadata=require_full or not missing_descendant,
         )
     return current_relatives == expected_relatives
+
+
+def validate_cleanup_graph_state(
+    target: Path,
+    entry: dict[str, Any],
+    graph: dict[str, dict[str, Any]],
+    *,
+    require_full: bool,
+) -> bool:
+    root = cleanup_journal_dir(target) / str(entry["relative_name"])
+    return validate_cleanup_graph_state_at_root(root, entry, graph, require_full=require_full)
 
 
 def read_final_cleanup_journal_json(target: Path) -> dict[str, Any]:
@@ -3234,6 +3821,55 @@ def read_cleanup_journal_with_publication_alias(
     return journal
 
 
+def recover_cleanup_intent_for_mutation(target: Path) -> None:
+    intent = validate_cleanup_intent(target)
+    if intent is None:
+        return
+    journal = intent["journal"]
+    moves = intent["moves"]
+    journal_path = cleanup_journal_path(target)
+    if path_exists_no_follow(journal_path):
+        final_journal = read_final_cleanup_journal_json(target)
+        if final_journal != journal:
+            fail("cleanup intent final journal binding is invalid")
+        remove_cleanup_intent_file(target)
+        validate_cleanup_journal(target)
+        return
+    cleanup_dir = cleanup_journal_dir(target)
+    entries = journal["entries"]
+    for entry, move in zip(entries, moves):
+        relative_name = str(entry["relative_name"])
+        tombstone = cleanup_dir / relative_name
+        source = validate_cleanup_source_binding(target, entry, move["source"])
+        graph = cleanup_graph_map(entry)
+        source_exists = path_exists_no_follow(source)
+        tombstone_exists = path_exists_no_follow(tombstone)
+        if source_exists and tombstone_exists:
+            fail("cleanup intent source and tombstone are both present")
+        if not source_exists and not tombstone_exists:
+            fail("cleanup intent source and tombstone are both absent")
+        if source_exists:
+            validate_cleanup_graph_state_at_root(source, entry, graph, require_full=True)
+            if path_exists_no_follow(tombstone):
+                fail(f"cleanup tombstone already exists: {relative_name}")
+            os.replace(source, tombstone)
+            fsync_directory(source.parent)
+            fsync_directory(cleanup_dir)
+        else:
+            validate_cleanup_graph_state_at_root(tombstone, entry, graph, require_full=False)
+    publish_result = publish_cleanup_journal(
+        target,
+        entries,
+        journal,
+        serialized_cleanup_journal_bytes(journal),
+        validate_final=False,
+    )
+    if not publish_result.published and not path_exists_no_follow(journal_path):
+        fail("cleanup intent recovery did not publish final journal")
+    remove_cleanup_intent_file(target)
+    validate_cleanup_journal(target)
+
+
 def recover_cleanup_journal_publication_alias_for_mutation(target: Path) -> None:
     journal_dir = cleanup_journal_dir(target)
     journal_path = cleanup_journal_path(target)
@@ -3317,6 +3953,8 @@ def publish_cleanup_journal(
     entries: list[dict[str, Any]],
     journal: dict[str, Any] | None = None,
     serialized_journal: bytes | None = None,
+    *,
+    validate_final: bool = True,
 ) -> CleanupJournalPublishResult:
     if not entries:
         return CleanupJournalPublishResult(published=False)
@@ -3346,10 +3984,15 @@ def publish_cleanup_journal(
             with contextlib.suppress(BaseException):
                 durable_unlink(stage)
         if published:
-            validate_cleanup_journal(target)
+            if validate_final:
+                validate_cleanup_journal(target)
             return CleanupJournalPublishResult(published=True, cleanup_pending=True)
         raise
-    validate_cleanup_journal(target)
+    if validate_final:
+        try:
+            validate_cleanup_journal(target)
+        except BaseException:
+            return CleanupJournalPublishResult(published=True, cleanup_pending=True)
     return CleanupJournalPublishResult(published=True)
 
 
@@ -3461,6 +4104,7 @@ def cleanup_journal_once(target: Path) -> None:
 
 
 def drain_cleanup_journal(target: Path) -> bool:
+    recover_cleanup_intent_for_mutation(target)
     recover_cleanup_journal_publication_alias_for_mutation(target)
     if validate_cleanup_journal(target) is None:
         return False
@@ -3489,9 +4133,15 @@ def finish_cleanup_journal(
             promotion.entries,
             promotion.journal,
             promotion.serialized_journal,
+            validate_final=False,
         )
         if not publish_result.published:
             return False
+        try:
+            remove_cleanup_intent_file(target)
+            validate_cleanup_journal(target)
+        except BaseException:
+            return True
         if publish_result.cleanup_pending:
             return True
     except BaseException:
@@ -4137,7 +4787,9 @@ def _status_payload_locked(target: Path) -> dict[str, Any]:
     return {
         "state": "managed" if current else "legacy-managed",
         "managed": True,
-        "launch_allowed": bool(current and not drift and software["current"]),
+        "launch_allowed": bool(
+            current and not drift and software["current"] and not cleanup_metadata
+        ),
         "canonical_target": str(canonical),
         "content_setup_id": descriptor["content_setup_id"],
         "permission_profile_id": descriptor["permission_profile_id"],
@@ -4591,18 +5243,15 @@ def commit_backup(target: Path, pending: PendingBackup) -> BackupCommitResult:
         os.replace(stage_dir, slot_dir)
         published = True
         fsync_directory(pool)
-        cleanup_pending = False
-        if path_exists_no_follow(old_dir):
-            cleanup_pending = finish_cleanup_journal(
-                target,
-                [(old_dir, "old backup slot", METADATA_MAX_BYTES, 64)],
-            )
         validate_backup_slot_directory(slot_dir, f"backup slot {pending.slot}")
         committed = read_json_file(
             slot_dir / BACKUP_NAME, max_bytes=METADATA_MAX_BYTES, label=BACKUP_NAME
         )
         validate_backup_envelope(target, pending.slot, committed)
-        return BackupCommitResult(slot=pending.slot, cleanup_pending=cleanup_pending)
+        cleanup_sources: tuple[tuple[Path | None, str, int, int], ...] = ()
+        if path_exists_no_follow(old_dir):
+            cleanup_sources = ((old_dir, "old backup slot", METADATA_MAX_BYTES, 64),)
+        return BackupCommitResult(slot=pending.slot, cleanup_sources=cleanup_sources)
     except BaseException:
         restore_with_retries(
             rollback_backup_once,
@@ -4739,6 +5388,7 @@ def write_setup(
             max_paths=64,
         )
         file_transaction: FileObjectTransaction | None = None
+        backup_cleanup_sources: tuple[tuple[Path | None, str, int, int], ...] = ()
         try:
             file_transaction = apply_setup_file_transaction(
                 target,
@@ -4750,7 +5400,7 @@ def write_setup(
             if pending_backup is not None:
                 backup_result = commit_backup(target, pending_backup)
                 backup_slot = backup_result.slot
-                cleanup_pending = cleanup_pending or backup_result.cleanup_pending
+                backup_cleanup_sources = backup_result.cleanup_sources
                 slot_dir = backup_pool(target) / str(backup_slot)
                 validate_backup_slot_directory(slot_dir, f"backup slot {backup_slot}")
                 committed = read_json_file(
@@ -4773,6 +5423,8 @@ def write_setup(
                 max_paths=64,
             )
             raise
+        if backup_cleanup_sources:
+            cleanup_pending = finish_cleanup_journal(target, list(backup_cleanup_sources))
         return {
             "content_setup_id": setup["id"],
             "permission_profile_id": profile_data["id"],
@@ -4977,6 +5629,7 @@ def update_setup(target: Path) -> dict[str, Any]:
         file_transaction: FileObjectTransaction | None = None
         backup_slot: int | None = None
         cleanup_pending = False
+        backup_cleanup_sources: tuple[tuple[Path | None, str, int, int], ...] = ()
         try:
             file_transaction = apply_setup_file_transaction(
                 target,
@@ -4987,7 +5640,7 @@ def update_setup(target: Path) -> dict[str, Any]:
             verify_setup_postcondition(target, desired_stamp, files, stale_paths)
             backup_result = commit_backup(target, pending_backup)
             backup_slot = backup_result.slot
-            cleanup_pending = backup_result.cleanup_pending
+            backup_cleanup_sources = backup_result.cleanup_sources
             committed = read_json_file(
                 backup_pool(target) / str(backup_slot) / BACKUP_NAME,
                 max_bytes=METADATA_MAX_BYTES,
@@ -5010,6 +5663,8 @@ def update_setup(target: Path) -> dict[str, Any]:
                 max_paths=64,
             )
             raise
+        if backup_cleanup_sources:
+            cleanup_pending = finish_cleanup_journal(target, list(backup_cleanup_sources))
         return {
             "content_setup_id": setup_id,
             "permission_profile_id": profile_id,
@@ -5990,10 +6645,12 @@ def install_or_update_software(target: Path, *, mode: str) -> dict[str, Any]:
             if mode == "migrate" and not status["legacy"]:
                 fail("migrate-cli requires legacy target-owned Bun software state")
 
-            parent = target.parent
-            stage_parent_signature = directory_object_signature(parent, "software stage parent")
+            stage_parent = target
+            stage_parent_signature = directory_object_signature(
+                stage_parent, "software stage parent"
+            )
             stage_root = create_transient_directory(
-                parent,
+                stage_parent,
                 f".{target.name}{SOFTWARE_STAGE_FRAGMENT}.",
                 "software stage",
             )
@@ -6053,13 +6710,11 @@ def install_or_update_software(target: Path, *, mode: str) -> dict[str, Any]:
                 tree_transaction.apply_once()
                 file_transaction.apply_once()
                 verify_installed_software_postcondition(target, stamp=stamp, binary=binary)
-                cleanup_pending = finish_cleanup_journal(
+                cleanup_pending = commit_software_transactions(
                     target,
-                    software_cleanup_tombstones(
-                        file_transaction,
-                        tree_transaction,
-                        stage_root=stage_root,
-                    ),
+                    file_transaction,
+                    tree_transaction,
+                    stage_root=stage_root,
                 )
             except BaseException:
                 file_transaction.rollback()
@@ -6160,15 +6815,20 @@ def software_cleanup_tombstones(
     return paths
 
 
-def commit_remove_software_transactions(
+def commit_software_transactions(
     target: Path,
     file_transaction: FileObjectTransaction,
     tree_transaction: TreeObjectTransaction,
+    *,
+    stage_root: Path | None = None,
 ) -> bool:
-    verify_removed_software_postcondition(target)
     return finish_cleanup_journal(
         target,
-        software_cleanup_tombstones(file_transaction, tree_transaction),
+        software_cleanup_tombstones(
+            file_transaction,
+            tree_transaction,
+            stage_root=stage_root,
+        ),
     )
 
 
@@ -6257,7 +6917,7 @@ def remove_software(target: Path) -> dict[str, Any]:
             tree_transaction.apply_once()
             file_transaction.apply_once()
             verify_removed_software_postcondition(target)
-            cleanup_pending = commit_remove_software_transactions(
+            cleanup_pending = commit_software_transactions(
                 target, file_transaction, tree_transaction
             )
         except BaseException as exc:
@@ -6450,6 +7110,8 @@ def revalidate_launch_executable(
 def prepare_launch_invocation_locked(
     target: Path, child_args: list[str], *, host_platform_key: str
 ) -> LaunchInvocation:
+    if cleanup_pending_metadata(target):
+        fail("launch requires no cleanup-pending lifecycle state")
     status = _status_payload_locked(target)
     if not status["managed"]:
         fail("launch requires a managed target")
@@ -6503,6 +7165,7 @@ def prepare_launch_invocation(
     reject_managed_launch_overrides(child_args)
     host_platform_key = require_supported_product_host().vendor_platform_key
     with target_lock(target):
+        drain_cleanup_journal(target)
         invocation = prepare_launch_invocation_locked(
             target, child_args, host_platform_key=host_platform_key
         )
@@ -6513,6 +7176,7 @@ def launch(target: Path, child_args: list[str]) -> int:
     reject_managed_launch_overrides(child_args)
     host_platform_key = require_supported_product_host().vendor_platform_key
     with target_lock(target):
+        drain_cleanup_journal(target)
         invocation = prepare_launch_invocation_locked(
             target, child_args, host_platform_key=host_platform_key
         )
