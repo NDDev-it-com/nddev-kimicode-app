@@ -28,7 +28,8 @@
     "manifest_url": "https://code.kimi.com/kimi-code/binaries/0.29.2/manifest.json",
     "manifest_sha256": "6057703f6430964741198c81617737bcec917082d1ce4aadd7a1b8c29787ae9b",
     "target_owned": true,
-    "status_executes_binary": false
+    "status_executes_binary": false,
+    "remove_absent_noop": true
   },
   "software_runtime": {
     "entrypoint": "bin/kimi",

@@ -2,7 +2,7 @@
 name: kimicode-install-lifecycle
 description: Create or review official Kimi binary installation, update, rollback, legacy Bun migration, and launch isolation in nddev-kimicode-app.
 type: prompt
-whenToUse: When changing install-cli, update-cli, migrate-cli, software-status, launch, binary provenance, rollback, or legacy software handling
+whenToUse: When changing install-cli, update-cli, migrate-cli, remove-cli, software-status, launch, binary provenance, rollback, or legacy software handling
 disableModelInvocation: false
 ---
 
@@ -23,6 +23,7 @@ Lifecycle rules:
 - `install-cli` installs only when no target-owned software presence exists.
 - `update-cli` repairs or updates current schema-2 official-binary state.
 - `migrate-cli` is the only path from legacy Bun schema to official-binary schema.
+- `remove-cli` owns target-owned software removal and preserves user/auth state.
 - `software-status` is structural and must not execute `kimi`.
 - `launch` requires current setup schema and current official-binary software schema.
 - Legacy Bun state may be read for status, migrated, restored, or removed; it must never launch.

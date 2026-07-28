@@ -32,7 +32,9 @@ binary presence, entrypoint digest, and installed tree digest without executing
 `install-cli` installs a verified official Kimi binary into target-owned state
 on supported macOS and Ubuntu hosts. `update-cli` repairs or updates current
 official-binary state. `migrate-cli` is the only transition from legacy Bun
-schema to official-binary schema.
+schema to official-binary schema. `remove-cli` removes only target-owned
+software paths and is a deterministic no-op when target-owned software presence
+is absent.
 
 Legacy Bun state may be read for status, migrated, restored, or removed. It must
 never launch.

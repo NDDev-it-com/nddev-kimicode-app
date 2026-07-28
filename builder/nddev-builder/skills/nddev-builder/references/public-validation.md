@@ -6,5 +6,5 @@ cache-free public command set is owned by
 Do not run private harness lanes from this public toolkit.
 
 For non-live lifecycle checks, use an isolated temporary target and do not run
-`install-cli`, `update-cli`, `migrate-cli`, or `launch` unless the caller has
+`install-cli`, `update-cli`, `migrate-cli`, `remove-cli`, or `launch` unless the caller has
 explicitly requested real Kimi software execution.

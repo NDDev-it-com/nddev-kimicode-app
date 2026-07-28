@@ -36,9 +36,10 @@ to upstream asset keys are owned by `config/nddev-contract.json`; command
 behavior is owned by `cli-tools/nddev_kimicode.py`.
 
 `software-status` is structural and does not execute `kimi`. `install-cli`,
-`update-cli`, and `migrate-cli` are the only commands that acquire target-owned
-Kimi software. Ubuntu desktop and server share the same `ID=ubuntu` glibc host
-check; upstream publishes no official Ubuntu/glibc version floor.
+`update-cli`, `migrate-cli`, and `remove-cli` own the target-owned Kimi software
+lifecycle. `remove-cli` is a deterministic no-op when target-owned software
+presence is absent. Ubuntu desktop and server share the same `ID=ubuntu` glibc
+host check; upstream publishes no official Ubuntu/glibc version floor.
 
 `launch` holds the managed lifecycle boundary until the child process exits, so
 setup, profile, software, restore, and remove mutations fail while the managed

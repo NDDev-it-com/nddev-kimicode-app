@@ -18,6 +18,7 @@ import shlex
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.error
@@ -40,9 +41,12 @@ DEFAULT_PROFILE = "full-auto"
 
 STAMP_NAME = "NDDEV-KIMICODE-SETUP.json"
 BACKUP_NAME = "NDDEV-KIMICODE-BACKUP.json"
+BACKUP_SCHEMA = 2
 LOCK_DIR_NAME = ".nddev-kimicode-lock"
 LOCK_NAME = "lifecycle.lock"
-EXTERNAL_LOCK_ROOT_NAME = f"{PRODUCT_NAME}.{os.getuid() if hasattr(os, 'getuid') else 'nouid'}.locks"
+EXTERNAL_LOCK_ROOT_NAME = (
+    f"{PRODUCT_NAME}.{os.getuid() if hasattr(os, 'getuid') else 'nouid'}.locks"
+)
 EXTERNAL_LOCK_NAMESPACE = f"{PRODUCT_NAME}:external-bootstrap:v1"
 EXTERNAL_LOCK_SUFFIX = "external.lock"
 CURRENT_SETUP_SCHEMA = 2
@@ -208,6 +212,21 @@ class KimicodeSetupError(Exception):
     """Safe user-facing lifecycle failure."""
 
 
+class KimicodeArgumentError(KimicodeSetupError):
+    """Safe JSON-facing parser failure."""
+
+
+class KimicodeArgumentParser(argparse.ArgumentParser):
+    def __init__(self, *args: Any, json_errors: bool = False, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.json_errors = json_errors
+
+    def error(self, message: str) -> NoReturn:
+        if self.json_errors:
+            raise KimicodeArgumentError(message)
+        super().error(message)
+
+
 @dataclass
 class DirectoryTransaction:
     created: list[Path]
@@ -216,6 +235,39 @@ class DirectoryTransaction:
         for path in reversed(self.created):
             with contextlib.suppress(OSError):
                 path.rmdir()
+
+
+@dataclass(frozen=True)
+class FileSnapshot:
+    data: bytes | None
+    mode: int | None
+
+
+@dataclass(frozen=True)
+class TreeEntry:
+    kind: str
+    mode: int
+    data: bytes | None = None
+
+
+@dataclass(frozen=True)
+class TreeSnapshot:
+    entries: dict[str, TreeEntry] | None
+
+
+@dataclass(frozen=True)
+class SoftwareStateSnapshot:
+    software_tree: TreeSnapshot
+    entrypoint: FileSnapshot
+    stamp: FileSnapshot
+    entrypoint_parent_present: bool
+    entrypoint_parent_mode: int | None
+
+
+@dataclass(frozen=True)
+class PendingBackup:
+    slot: int
+    envelope: dict[str, Any]
 
 
 @dataclass
@@ -640,18 +692,21 @@ def acquire_lock_file(path: Path, label: str, *, canonical_target: str, kind: st
         fail(f"{label} could not be locked: {exc}")
     try:
         verify_lock_fd_path(fd, path, label)
+        current_payload = read_lock_payload(fd, label)
         validate_lock_binding(
-            read_lock_payload(fd, label),
+            current_payload,
             kind=kind,
             canonical_target=canonical_target,
             path=path,
             label=label,
         )
-        payload = canonical_json(lock_payload(kind, canonical_target, path))
-        os.ftruncate(fd, 0)
-        os.lseek(fd, 0, os.SEEK_SET)
-        os.write(fd, payload)
-        os.fsync(fd)
+        desired_payload = lock_payload(kind, canonical_target, path)
+        if current_payload != desired_payload:
+            payload = canonical_json(desired_payload)
+            os.ftruncate(fd, 0)
+            os.lseek(fd, 0, os.SEEK_SET)
+            os.write(fd, payload)
+            os.fsync(fd)
     except BaseException:
         with contextlib.suppress(OSError):
             fcntl.flock(fd, fcntl.LOCK_UN)
@@ -660,7 +715,9 @@ def acquire_lock_file(path: Path, label: str, *, canonical_target: str, kind: st
     return fd
 
 
-def release_lock_file(fd: int, path: Path, *, remove_file: bool = True, remove_empty_parent: bool = False) -> None:
+def release_lock_file(
+    fd: int, path: Path, *, remove_file: bool = True, remove_empty_parent: bool = False
+) -> None:
     try:
         with contextlib.suppress(OSError):
             fcntl.flock(fd, fcntl.LOCK_UN)
@@ -681,6 +738,16 @@ def protect_internal_lock_parent(path: Path) -> ProtectedDirectory:
     return protected
 
 
+def restore_lock_snapshot(path: Path, snapshot: TreeSnapshot, label: str) -> None:
+    restore_tree_snapshot(
+        path,
+        snapshot,
+        label,
+        max_file_bytes=METADATA_MAX_BYTES,
+        max_paths=128,
+    )
+
+
 @contextlib.contextmanager
 def target_lock(target: Path, *, create_parent: bool = False):
     transaction = DirectoryTransaction([])
@@ -693,11 +760,23 @@ def target_lock(target: Path, *, create_parent: bool = False):
         transaction.cleanup()
         raise
     canonical_target = lock_canonical_target(target)
-    bootstrap_path = bootstrap_lock_path(target, canonical_target)
+    try:
+        external_lock_root = fixed_system_temp_root() / EXTERNAL_LOCK_ROOT_NAME
+        external_lock_snapshot = snapshot_tree(
+            external_lock_root,
+            "external lifecycle lock root",
+            max_file_bytes=METADATA_MAX_BYTES,
+            max_paths=128,
+        )
+        bootstrap_path = bootstrap_lock_path(target, canonical_target)
+    except BaseException:
+        transaction.cleanup()
+        raise
     bootstrap_fd: int | None = None
     internal_path: Path | None = None
     internal_fd: int | None = None
     internal_parent: ProtectedDirectory | None = None
+    internal_lock_snapshot: TreeSnapshot | None = None
     try:
         bootstrap_fd = acquire_lock_file(
             bootstrap_path,
@@ -716,6 +795,12 @@ def target_lock(target: Path, *, create_parent: bool = False):
                 fail("target must be a real directory")
             if not is_owner_private_directory(target_info):
                 fail("target must be private and owned by the current user")
+            internal_lock_snapshot = snapshot_tree(
+                lock_parent_path(target),
+                "target lifecycle lock directory",
+                max_file_bytes=METADATA_MAX_BYTES,
+                max_paths=16,
+            )
             lock_parent = ensure_lock_parent(target)
             internal_path = lock_path(target)
             internal_fd = acquire_lock_file(
@@ -749,6 +834,17 @@ def target_lock(target: Path, *, create_parent: bool = False):
                         bootstrap_fd = None
                         release_lock_file(releasing_bootstrap_fd, bootstrap_path, remove_file=False)
             if failed:
+                if internal_lock_snapshot is not None:
+                    restore_lock_snapshot(
+                        lock_parent_path(target),
+                        internal_lock_snapshot,
+                        "target lifecycle lock directory",
+                    )
+                restore_lock_snapshot(
+                    external_lock_root,
+                    external_lock_snapshot,
+                    "external lifecycle lock root",
+                )
                 transaction.cleanup()
     except BaseException:
         if internal_fd is not None and internal_path is not None:
@@ -763,6 +859,17 @@ def target_lock(target: Path, *, create_parent: bool = False):
             releasing_bootstrap_fd = bootstrap_fd
             bootstrap_fd = None
             release_lock_file(releasing_bootstrap_fd, bootstrap_path, remove_file=False)
+        if internal_lock_snapshot is not None:
+            restore_lock_snapshot(
+                lock_parent_path(target),
+                internal_lock_snapshot,
+                "target lifecycle lock directory",
+            )
+        restore_lock_snapshot(
+            external_lock_root,
+            external_lock_snapshot,
+            "external lifecycle lock root",
+        )
         transaction.cleanup()
         raise
 
@@ -783,6 +890,7 @@ def ensure_real_parent(path: Path, target: Path) -> None:
         if info is None:
             current.mkdir(mode=OWNER_DIRECTORY_MODE)
             current.chmod(OWNER_DIRECTORY_MODE)
+            fsync_directory(current.parent)
             continue
         if not stat.S_ISDIR(info.st_mode):
             fail(f"managed parent is not a directory: {current}")
@@ -790,7 +898,9 @@ def ensure_real_parent(path: Path, target: Path) -> None:
             fail(f"managed parent must be private and owned by the current user: {current}")
 
 
-def require_existing_managed_file(path: Path, label: str, *, max_bytes: int) -> os.stat_result | None:
+def require_existing_managed_file(
+    path: Path, label: str, *, max_bytes: int
+) -> os.stat_result | None:
     info = stat_existing(path, label)
     if info is None:
         return None
@@ -847,56 +957,139 @@ def fsync_directory(path: Path) -> None:
         os.close(fd)
 
 
+def durable_unlink(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    if path.parent.exists():
+        fsync_directory(path.parent)
+
+
+def durable_rmdir(path: Path) -> None:
+    try:
+        path.rmdir()
+    except FileNotFoundError:
+        pass
+    if path.parent.exists():
+        fsync_directory(path.parent)
+
+
+def remove_empty_directory_if_empty(path: Path) -> None:
+    try:
+        path.rmdir()
+    except FileNotFoundError:
+        return
+    except OSError as exc:
+        if exc.errno in {errno.ENOTEMPTY, errno.EEXIST}:
+            return
+        raise
+    if path.parent.exists():
+        fsync_directory(path.parent)
+
+
+def restore_with_retries(operation, verify, label: str) -> None:
+    last_error: BaseException | None = None
+    for _attempt in range(3):
+        try:
+            operation()
+            verify()
+            return
+        except BaseException as exc:
+            last_error = exc
+    assert last_error is not None
+    fail(f"{label} rollback did not converge after retry: {last_error}")
+
+
 def snapshot_replace_destination(
     path: Path,
     label: str,
     *,
     max_bytes: int,
-) -> tuple[bytes | None, int | None]:
+) -> FileSnapshot:
     info = require_existing_managed_file(path, label, max_bytes=max_bytes)
     if info is None:
-        return None, None
+        return FileSnapshot(data=None, mode=None)
     fd, opened = open_regular_readonly(path, label, max_bytes=max_bytes)
     with os.fdopen(fd, "rb") as handle:
         data = handle.read(max_bytes + 1)
     if len(data) > max_bytes:
         fail(f"{label} is too large")
-    return data, stat.S_IMODE(opened.st_mode)
+    return FileSnapshot(data=data, mode=stat.S_IMODE(opened.st_mode))
+
+
+def verify_file_snapshot(path: Path, snapshot: FileSnapshot, label: str, *, max_bytes: int) -> None:
+    info = require_existing_managed_file(path, label, max_bytes=max_bytes)
+    if snapshot.data is None:
+        if info is not None:
+            fail(f"{label} rollback postcondition failed: expected absent")
+        return
+    if info is None:
+        fail(f"{label} rollback postcondition failed: expected present")
+    assert info is not None
+    if stat.S_IMODE(info.st_mode) != (snapshot.mode or OWNER_FILE_MODE):
+        fail(f"{label} rollback postcondition failed: mode mismatch")
+    data = read_existing_file(path, max_bytes=max_bytes, label=label)
+    if data != snapshot.data:
+        fail(f"{label} rollback postcondition failed: bytes mismatch")
+
+
+def restore_file_snapshot_once(
+    path: Path,
+    snapshot: FileSnapshot,
+    target: Path,
+    label: str,
+    *,
+    max_bytes: int,
+    default_mode: int = OWNER_FILE_MODE,
+) -> None:
+    current = snapshot_replace_destination(path, label, max_bytes=max_bytes)
+    if current == snapshot:
+        return
+    if snapshot.data is None:
+        durable_unlink(path)
+    else:
+        atomic_write(path, snapshot.data, target, mode=snapshot.mode or default_mode)
+    verify_file_snapshot(path, snapshot, label, max_bytes=max_bytes)
+
+
+def restore_file_snapshot(
+    path: Path,
+    snapshot: FileSnapshot,
+    target: Path,
+    label: str,
+    *,
+    max_bytes: int,
+    default_mode: int = OWNER_FILE_MODE,
+) -> None:
+    restore_with_retries(
+        lambda: restore_file_snapshot_once(
+            path,
+            snapshot,
+            target,
+            label,
+            max_bytes=max_bytes,
+            default_mode=default_mode,
+        ),
+        lambda: verify_file_snapshot(path, snapshot, label, max_bytes=max_bytes),
+        label,
+    )
 
 
 def rollback_replaced_destination(
     path: Path,
-    data: bytes | None,
-    mode: int | None,
+    snapshot: FileSnapshot,
+    target: Path,
+    label: str,
+    *,
+    max_bytes: int,
 ) -> None:
-    if data is None:
-        with contextlib.suppress(FileNotFoundError):
-            path.unlink()
-        with contextlib.suppress(OSError):
-            fsync_directory(path.parent)
-        return
-    temporary = path.with_name(f".{path.name}.nddev.rollback.{os.getpid()}.{time.time_ns()}")
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode or OWNER_FILE_MODE)
-    try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
-            handle.flush()
-            with contextlib.suppress(OSError):
-                os.fsync(handle.fileno())
-        os.replace(temporary, path)
-        if mode is not None:
-            os.chmod(path, mode)
-        with contextlib.suppress(OSError):
-            fsync_directory(path.parent)
-    except BaseException:
-        with contextlib.suppress(FileNotFoundError):
-            temporary.unlink()
-        raise
+    restore_file_snapshot(path, snapshot, target, label, max_bytes=max_bytes)
 
 
 def atomic_write(path: Path, data: bytes, target: Path, *, mode: int = OWNER_FILE_MODE) -> None:
     ensure_real_parent(path, target)
-    original_data, original_mode = snapshot_replace_destination(
+    original = snapshot_replace_destination(
         path,
         str(path),
         max_bytes=max(MANAGED_MAX_BYTES, SOFTWARE_MAX_BYTES),
@@ -907,19 +1100,196 @@ def atomic_write(path: Path, data: bytes, target: Path, *, mode: int = OWNER_FIL
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(data)
+            os.chmod(temporary, mode)
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(temporary, path)
         replaced = True
-        path.chmod(mode)
         fsync_directory(path.parent)
     except BaseException:
         if replaced:
-            rollback_replaced_destination(path, original_data, original_mode)
+            rollback_replaced_destination(
+                path,
+                original,
+                target,
+                str(path),
+                max_bytes=max(MANAGED_MAX_BYTES, SOFTWARE_MAX_BYTES),
+            )
         else:
-            with contextlib.suppress(FileNotFoundError):
-                temporary.unlink()
+            restore_with_retries(
+                lambda: durable_unlink(temporary),
+                lambda: verify_file_snapshot(
+                    temporary,
+                    FileSnapshot(data=None, mode=None),
+                    str(temporary),
+                    max_bytes=max(MANAGED_MAX_BYTES, SOFTWARE_MAX_BYTES),
+                ),
+                str(temporary),
+            )
         raise
+
+
+def tree_relative(path: Path, root: Path) -> str:
+    if path == root:
+        return "."
+    return path.relative_to(root).as_posix()
+
+
+def snapshot_tree(root: Path, label: str, *, max_file_bytes: int, max_paths: int) -> TreeSnapshot:
+    root_info = stat_existing(root, label)
+    if root_info is None:
+        return TreeSnapshot(entries=None)
+    if not stat.S_ISDIR(root_info.st_mode):
+        fail(f"{label} must be a directory")
+    entries: dict[str, TreeEntry] = {
+        ".": TreeEntry(kind="dir", mode=stat.S_IMODE(root_info.st_mode)),
+    }
+    count = 1
+    for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
+        count += 1
+        if count > max_paths:
+            fail(f"{label} has too many paths")
+        relative = tree_relative(path, root)
+        info = stat_existing(path, f"{label} entry {relative}")
+        if info is None:
+            fail(f"{label} entry disappeared while snapshotting: {relative}")
+        if stat.S_ISDIR(info.st_mode):
+            entries[relative] = TreeEntry(kind="dir", mode=stat.S_IMODE(info.st_mode))
+            continue
+        if not stat.S_ISREG(info.st_mode):
+            fail(f"{label} entry must be a regular file or directory: {relative}")
+        if info.st_nlink != 1:
+            fail(f"{label} entry must not be a hardlink: {relative}")
+        if info.st_size > max_file_bytes:
+            fail(f"{label} entry is too large: {relative}")
+        fd, opened = open_regular_readonly(
+            path, f"{label} entry {relative}", max_bytes=max_file_bytes
+        )
+        with os.fdopen(fd, "rb") as handle:
+            data = handle.read(max_file_bytes + 1)
+        if opened.st_size != info.st_size:
+            fail(f"{label} entry changed while snapshotting: {relative}")
+        if len(data) > max_file_bytes:
+            fail(f"{label} entry is too large: {relative}")
+        entries[relative] = TreeEntry(kind="file", mode=stat.S_IMODE(info.st_mode), data=data)
+    return TreeSnapshot(entries=entries)
+
+
+def verify_tree_snapshot(
+    root: Path, expected: TreeSnapshot, label: str, *, max_file_bytes: int, max_paths: int
+) -> None:
+    current = snapshot_tree(root, label, max_file_bytes=max_file_bytes, max_paths=max_paths)
+    if current != expected:
+        fail(f"{label} rollback postcondition failed: tree mismatch")
+
+
+def remove_tree_once(root: Path, label: str, *, max_file_bytes: int, max_paths: int) -> None:
+    current = snapshot_tree(root, label, max_file_bytes=max_file_bytes, max_paths=max_paths)
+    if current.entries is None:
+        return
+    for relative, entry in sorted(
+        ((relative, entry) for relative, entry in current.entries.items() if relative != "."),
+        key=lambda item: item[0].count("/"),
+        reverse=True,
+    ):
+        path = root / relative
+        if entry.kind == "dir":
+            durable_rmdir(path)
+        else:
+            durable_unlink(path)
+    durable_rmdir(root)
+
+
+def remove_tree_strict(root: Path, label: str, *, max_file_bytes: int, max_paths: int) -> None:
+    restore_with_retries(
+        lambda: remove_tree_once(root, label, max_file_bytes=max_file_bytes, max_paths=max_paths),
+        lambda: verify_tree_snapshot(
+            root,
+            TreeSnapshot(entries=None),
+            label,
+            max_file_bytes=max_file_bytes,
+            max_paths=max_paths,
+        ),
+        label,
+    )
+
+
+def restore_tree_snapshot_once(
+    root: Path, snapshot: TreeSnapshot, label: str, *, max_file_bytes: int, max_paths: int
+) -> None:
+    if snapshot.entries is None:
+        remove_tree_once(root, label, max_file_bytes=max_file_bytes, max_paths=max_paths)
+        return
+    current = snapshot_tree(root, label, max_file_bytes=max_file_bytes, max_paths=max_paths)
+    current_entries = current.entries or {}
+    expected_entries = snapshot.entries
+    for relative, entry in sorted(
+        (
+            (relative, entry)
+            for relative, entry in current_entries.items()
+            if relative not in expected_entries and relative != "."
+        ),
+        key=lambda item: item[0].count("/"),
+        reverse=True,
+    ):
+        path = root / relative
+        if entry.kind == "dir":
+            durable_rmdir(path)
+        else:
+            durable_unlink(path)
+    for relative, entry in sorted(
+        ((relative, entry) for relative, entry in expected_entries.items() if entry.kind == "dir"),
+        key=lambda item: item[0].count("/"),
+    ):
+        path = root if relative == "." else root / relative
+        info = stat_existing(path, f"{label} directory {relative}")
+        if info is None:
+            path.mkdir(mode=entry.mode)
+            path.chmod(entry.mode)
+            if path.parent.exists():
+                fsync_directory(path.parent)
+            continue
+        if not stat.S_ISDIR(info.st_mode):
+            fail(f"{label} directory restore collided with non-directory: {relative}")
+        if stat.S_IMODE(info.st_mode) != entry.mode:
+            path.chmod(entry.mode)
+            fsync_directory(path.parent)
+    for relative, entry in sorted(
+        ((relative, entry) for relative, entry in expected_entries.items() if entry.kind == "file"),
+        key=lambda item: item[0].count("/"),
+    ):
+        if entry.data is None:
+            fail(f"{label} file snapshot is missing data: {relative}")
+        restore_file_snapshot(
+            root / relative,
+            FileSnapshot(data=entry.data, mode=entry.mode),
+            root,
+            f"{label} file {relative}",
+            max_bytes=max_file_bytes,
+            default_mode=entry.mode,
+        )
+
+
+def restore_tree_snapshot(
+    root: Path, snapshot: TreeSnapshot, label: str, *, max_file_bytes: int, max_paths: int
+) -> None:
+    restore_with_retries(
+        lambda: restore_tree_snapshot_once(
+            root,
+            snapshot,
+            label,
+            max_file_bytes=max_file_bytes,
+            max_paths=max_paths,
+        ),
+        lambda: verify_tree_snapshot(
+            root,
+            snapshot,
+            label,
+            max_file_bytes=max_file_bytes,
+            max_paths=max_paths,
+        ),
+        label,
+    )
 
 
 def read_json_file(path: Path, *, max_bytes: int, label: str) -> dict[str, Any]:
@@ -1010,7 +1380,9 @@ def tree_sha256(root: Path) -> str:
         total += info.st_size
         if total > SOFTWARE_MAX_BYTES:
             fail("software tree is too large")
-        digest.update(f"F {relative} {stat.S_IMODE(info.st_mode):04o} {info.st_size}\n".encode("utf-8"))
+        digest.update(
+            f"F {relative} {stat.S_IMODE(info.st_mode):04o} {info.st_size}\n".encode("utf-8")
+        )
         fd, opened = open_regular_readonly(path, relative, max_bytes=SOFTWARE_MAX_BYTES)
         if opened.st_size != info.st_size:
             fail(f"software tree entry changed while hashing: {relative}")
@@ -1224,7 +1596,9 @@ def builder_skill_sources() -> dict[str, bytes]:
     if not skill_root.is_dir():
         fail("builder skills root is missing")
     files: dict[str, bytes] = {}
-    for path in sorted(skill_root.rglob("*"), key=lambda item: item.relative_to(skill_root).as_posix()):
+    for path in sorted(
+        skill_root.rglob("*"), key=lambda item: item.relative_to(skill_root).as_posix()
+    ):
         relative = path.relative_to(skill_root).as_posix()
         info = path.lstat()
         if stat.S_ISDIR(info.st_mode):
@@ -1244,14 +1618,26 @@ def content_managed_paths() -> tuple[str, ...]:
     return (*CONTENT_MANAGED_BASE_PATHS, *builder_skill_sources().keys())
 
 
-def desired_files(target: Path, setup: dict[str, Any], profile_data: dict[str, Any]) -> dict[str, bytes]:
-    existing_config = read_existing_file(target / "config.toml", max_bytes=MANAGED_MAX_BYTES, label="config.toml")
-    existing_tui = read_existing_file(target / "tui.toml", max_bytes=MANAGED_MAX_BYTES, label="tui.toml")
-    existing_agents = read_existing_file(target / "AGENTS.md", max_bytes=MANAGED_MAX_BYTES, label="AGENTS.md")
+def desired_files(
+    target: Path, setup: dict[str, Any], profile_data: dict[str, Any]
+) -> dict[str, bytes]:
+    existing_config = read_existing_file(
+        target / "config.toml", max_bytes=MANAGED_MAX_BYTES, label="config.toml"
+    )
+    existing_tui = read_existing_file(
+        target / "tui.toml", max_bytes=MANAGED_MAX_BYTES, label="tui.toml"
+    )
+    existing_agents = read_existing_file(
+        target / "AGENTS.md", max_bytes=MANAGED_MAX_BYTES, label="AGENTS.md"
+    )
     files = {
-        "config.toml": merge_managed_block("config.toml", existing_config, render_config(target, setup, profile_data)),
+        "config.toml": merge_managed_block(
+            "config.toml", existing_config, render_config(target, setup, profile_data)
+        ),
         "tui.toml": merge_managed_block("tui.toml", existing_tui, render_tui()),
-        "AGENTS.md": merge_managed_block("AGENTS.md", existing_agents, render_agents_block(setup, profile_data)),
+        "AGENTS.md": merge_managed_block(
+            "AGENTS.md", existing_agents, render_agents_block(setup, profile_data)
+        ),
         "mcp.json": canonical_json({"mcpServers": {}}),
         "agents/nddev-builder.md": builder_source("agents/nddev-builder.md"),
         "hooks/nddev-builder-pretooluse.py": builder_source("hooks/nddev-builder-pretooluse.py"),
@@ -1270,7 +1656,9 @@ def managed_digest_for_bytes(relative: str, data: bytes) -> str:
 
 
 def current_managed_digest(target: Path, relative: str) -> str | None:
-    data = read_existing_file(safe_target_path(target, relative), max_bytes=MANAGED_MAX_BYTES, label=relative)
+    data = read_existing_file(
+        safe_target_path(target, relative), max_bytes=MANAGED_MAX_BYTES, label=relative
+    )
     if data is None:
         return None
     digest = managed_digest_for_bytes(relative, data)
@@ -1364,7 +1752,11 @@ def status_payload(target: Path) -> dict[str, Any]:
             "permission_profile_id": None,
             "legacy_setup_id": None,
             "drift": [],
-            "auth_state": {"state": "absent", "path": str(target / "credentials"), "scope": "target KIMI_CODE_HOME"},
+            "auth_state": {
+                "state": "absent",
+                "path": str(target / "credentials"),
+                "scope": "target KIMI_CODE_HOME",
+            },
         }
     require_owner_private_directory(target, "target")
     stamp = read_stamp(target)
@@ -1411,38 +1803,74 @@ def stamp_managed_paths(stamp: dict[str, Any] | None) -> tuple[str, ...]:
     return tuple(str(path) for path in managed)
 
 
-def snapshot_files(target: Path, extra_paths: tuple[str, ...] = ()) -> dict[str, bytes | None]:
-    snapshot: dict[str, bytes | None] = {}
+def snapshot_files(target: Path, extra_paths: tuple[str, ...] = ()) -> dict[str, FileSnapshot]:
+    snapshot: dict[str, FileSnapshot] = {}
     for relative in (*content_managed_paths(), *extra_paths, STAMP_NAME):
-        snapshot[relative] = read_existing_file(safe_target_path(target, relative), max_bytes=MANAGED_MAX_BYTES, label=relative)
+        snapshot[relative] = snapshot_replace_destination(
+            safe_target_path(target, relative),
+            relative,
+            max_bytes=MANAGED_MAX_BYTES,
+        )
     return snapshot
 
 
-def restore_snapshot(target: Path, snapshot: dict[str, bytes | None]) -> None:
+def verify_snapshot(target: Path, snapshot: dict[str, FileSnapshot]) -> None:
     for relative, data in snapshot.items():
         path = safe_target_path(target, relative)
-        if data is None:
-            with contextlib.suppress(FileNotFoundError):
-                path.unlink()
-            continue
-        atomic_write(path, data, target)
+        verify_file_snapshot(path, data, relative, max_bytes=MANAGED_MAX_BYTES)
+
+
+def restore_snapshot_once(target: Path, snapshot: dict[str, FileSnapshot]) -> None:
+    for relative, data in snapshot.items():
+        restore_file_snapshot(
+            safe_target_path(target, relative),
+            data,
+            target,
+            relative,
+            max_bytes=MANAGED_MAX_BYTES,
+        )
     prune_empty_managed_dirs(target, tuple(snapshot))
 
 
+def restore_snapshot(target: Path, snapshot: dict[str, FileSnapshot]) -> None:
+    restore_with_retries(
+        lambda: restore_snapshot_once(target, snapshot),
+        lambda: verify_snapshot(target, snapshot),
+        "managed setup snapshot",
+    )
+
+
+def require_backup_pool_if_present(pool: Path) -> bool:
+    info = stat_existing(pool, "backup pool")
+    if info is None:
+        return False
+    if not stat.S_ISDIR(info.st_mode):
+        fail("backup pool must be a directory")
+    if not is_current_owner(info):
+        fail("backup pool must be owned by the current user")
+    if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
+        fail("backup pool must be private with mode 0700")
+    return True
+
+
 def choose_backup_slot(pool: Path) -> int:
-    ensure_private_directory(pool, "backup pool")
+    if not require_backup_pool_if_present(pool):
+        return 0
     for slot in range(10):
         if not path_exists_no_follow(pool / str(slot)):
             return slot
     return min(range(10), key=lambda item: (pool / str(item)).lstat().st_mtime_ns)
 
 
-def ensure_private_directory(path: Path, label: str, *, transaction: DirectoryTransaction | None = None) -> None:
+def ensure_private_directory(
+    path: Path, label: str, *, transaction: DirectoryTransaction | None = None
+) -> None:
     info = stat_existing(path, label)
     if info is None:
         require_owner_private_directory(path.parent, f"{label} parent")
         path.mkdir(mode=OWNER_DIRECTORY_MODE)
         path.chmod(OWNER_DIRECTORY_MODE)
+        fsync_directory(path.parent)
         if transaction is not None:
             transaction.created.append(path)
         return
@@ -1454,38 +1882,254 @@ def ensure_private_directory(path: Path, label: str, *, transaction: DirectoryTr
         fail(f"{label} must be private with mode 0700")
 
 
-def create_backup(target: Path, stamp: dict[str, Any]) -> int:
+def backup_entry(data: bytes | None) -> dict[str, Any]:
+    if data is None:
+        return {
+            "present": False,
+            "size_bytes": 0,
+            "sha256": None,
+            "data_base64": None,
+        }
+    return {
+        "present": True,
+        "size_bytes": len(data),
+        "sha256": sha256_bytes(data),
+        "data_base64": base64.b64encode(data).decode("ascii"),
+    }
+
+
+def backup_path_set(stamp: dict[str, Any]) -> tuple[str, ...]:
+    return tuple(dict.fromkeys((*content_managed_paths(), *stamp_managed_paths(stamp), STAMP_NAME)))
+
+
+def validate_backup_restored_stamp(target: Path, data: bytes | None) -> dict[str, Any]:
+    if data is None:
+        fail("backup setup stamp entry must be present")
+    try:
+        stamp = json.loads(data.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        fail(f"backup setup stamp entry is invalid JSON: {exc}")
+    if not isinstance(stamp, dict):
+        fail("backup setup stamp entry must contain a JSON object")
+    if stamp.get("product_name") != PRODUCT_NAME:
+        fail("backup setup stamp belongs to another product")
+    if stamp.get("canonical_target") != str(validate_target(target, create=False)):
+        fail("backup setup stamp is bound to a different canonical target")
+    managed = stamp.get("managed_files")
+    if not isinstance(managed, dict):
+        fail("backup setup stamp managed_files is invalid")
+    for relative, digest in managed.items():
+        if not isinstance(relative, str) or not isinstance(digest, str):
+            fail("backup setup stamp managed file digest is invalid")
+        safe_target_path(target, relative)
+    return stamp
+
+
+def backup_entry_data(relative: str, entry: Any) -> bytes | None:
+    if not isinstance(entry, dict):
+        fail("backup file entry is invalid")
+    exact_keys(
+        entry, {"present", "size_bytes", "sha256", "data_base64"}, f"backup file entry {relative}"
+    )
+    present = entry.get("present")
+    size_bytes = entry.get("size_bytes")
+    digest = entry.get("sha256")
+    encoded = entry.get("data_base64")
+    if present is False:
+        if size_bytes != 0 or digest is not None or encoded is not None:
+            fail("absent backup file entry is invalid")
+        return None
+    if present is not True:
+        fail("backup file entry present flag is invalid")
+    if not isinstance(size_bytes, int) or size_bytes < 0 or size_bytes > MANAGED_MAX_BYTES:
+        fail("backup file entry size is invalid")
+    if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+        fail("backup file entry sha256 is invalid")
+    if not isinstance(encoded, str):
+        fail("backup file payload is invalid")
+    try:
+        data = base64.b64decode(encoded.encode("ascii"), validate=True)
+    except (binascii.Error, ValueError):
+        fail("backup file payload is invalid base64")
+    if len(data) != size_bytes:
+        fail("backup file payload size mismatch")
+    if sha256_bytes(data) != digest:
+        fail("backup file payload sha256 mismatch")
+    return data
+
+
+def validate_backup_envelope(
+    target: Path, slot: int, envelope: dict[str, Any]
+) -> dict[str, bytes | None]:
+    exact_keys(
+        envelope,
+        {
+            "schema_version",
+            "product_name",
+            "build_version",
+            "slot",
+            "canonical_target",
+            "source",
+            "created_at",
+            "managed_paths",
+            "files",
+        },
+        BACKUP_NAME,
+    )
+    if envelope.get("schema_version") != BACKUP_SCHEMA:
+        fail("backup schema is unsupported")
+    if envelope.get("product_name") != PRODUCT_NAME:
+        fail("backup belongs to another product")
+    if envelope.get("slot") != slot:
+        fail("backup slot binding is invalid")
+    if envelope.get("canonical_target") != str(validate_target(target, create=False)):
+        fail("backup is bound to a different canonical target")
+    if not isinstance(envelope.get("build_version"), str):
+        fail("backup build version is invalid")
+    if not isinstance(envelope.get("created_at"), int):
+        fail("backup created_at is invalid")
+    source = exact_keys(
+        envelope.get("source"),
+        {
+            "schema_version",
+            "content_setup_id",
+            "permission_profile_id",
+            "legacy_setup_id",
+            "legacy",
+        },
+        "backup source",
+    )
+    if not isinstance(source.get("legacy"), bool):
+        fail("backup source legacy flag is invalid")
+    managed_paths = envelope.get("managed_paths")
+    if not isinstance(managed_paths, list) or not managed_paths:
+        fail("backup managed_paths is invalid")
+    normalized_paths: list[str] = []
+    for relative in managed_paths:
+        if not isinstance(relative, str):
+            fail("backup managed path is invalid")
+        safe_target_path(target, relative)
+        normalized_paths.append(relative)
+    if len(set(normalized_paths)) != len(normalized_paths):
+        fail("backup managed_paths contains duplicates")
+    if STAMP_NAME not in normalized_paths:
+        fail("backup managed_paths must include setup stamp")
+    files = envelope.get("files")
+    if not isinstance(files, dict):
+        fail("backup files are invalid")
+    if set(files) != set(normalized_paths):
+        fail("backup files path set is invalid")
+    decoded: dict[str, bytes | None] = {}
+    for relative in normalized_paths:
+        decoded[relative] = backup_entry_data(relative, files[relative])
+    restored_stamp = validate_backup_restored_stamp(target, decoded.get(STAMP_NAME))
+    expected_paths = list(backup_path_set(restored_stamp))
+    if normalized_paths != expected_paths:
+        fail("backup managed_paths do not match restored stamp")
+    if set(files) != set(expected_paths):
+        fail("backup files path set does not match restored stamp")
+    return decoded
+
+
+def prepare_backup(target: Path, stamp: dict[str, Any]) -> PendingBackup:
     pool = backup_pool(target)
     slot = choose_backup_slot(pool)
-    slot_dir = pool / str(slot)
-    slot_info = stat_existing(slot_dir, f"backup slot {slot}")
-    if slot_info is not None:
-        if not stat.S_ISDIR(slot_info.st_mode):
-            fail(f"backup slot {slot} must be a directory")
-        shutil.rmtree(slot_dir)
-    slot_dir.mkdir(mode=OWNER_DIRECTORY_MODE)
     files: dict[str, Any] = {}
-    backup_paths = tuple(dict.fromkeys((*content_managed_paths(), *stamp_managed_paths(stamp), STAMP_NAME)))
+    backup_paths = backup_path_set(stamp)
     for relative in backup_paths:
-        data = read_existing_file(safe_target_path(target, relative), max_bytes=MANAGED_MAX_BYTES, label=relative)
-        files[relative] = None if data is None else base64.b64encode(data).decode("ascii")
+        data = read_existing_file(
+            safe_target_path(target, relative), max_bytes=MANAGED_MAX_BYTES, label=relative
+        )
+        files[relative] = backup_entry(data)
     descriptor = stamp_descriptor(stamp)
     envelope = {
-        "schema_version": 1,
+        "schema_version": BACKUP_SCHEMA,
         "product_name": PRODUCT_NAME,
         "build_version": VERSION,
         "slot": slot,
         "canonical_target": str(validate_target(target, create=False)),
         "source": descriptor,
         "created_at": int(time.time()),
+        "managed_paths": list(backup_paths),
         "files": files,
     }
-    atomic_write(slot_dir / BACKUP_NAME, canonical_json(envelope), slot_dir)
-    return slot
+    validate_backup_envelope(target, slot, envelope)
+    return PendingBackup(slot=slot, envelope=envelope)
 
 
-def build_stamp(target: Path, setup: dict[str, Any], profile_data: dict[str, Any], files: dict[str, bytes]) -> dict[str, Any]:
-    managed = {relative: managed_digest_for_bytes(relative, data) for relative, data in files.items()}
+def validate_backup_slot_directory(path: Path, label: str) -> None:
+    info = stat_existing(path, label)
+    if info is None:
+        fail(f"{label} is missing")
+    if not stat.S_ISDIR(info.st_mode):
+        fail(f"{label} must be a directory")
+    if not is_current_owner(info):
+        fail(f"{label} must be owned by the current user")
+    if stat.S_IMODE(info.st_mode) != OWNER_DIRECTORY_MODE:
+        fail(f"{label} must be private with mode 0700")
+    entries = sorted(child.name for child in path.iterdir())
+    if entries != [BACKUP_NAME]:
+        fail(f"{label} must contain only {BACKUP_NAME}")
+
+
+def commit_backup(target: Path, pending: PendingBackup) -> int:
+    pool = backup_pool(target)
+    pool_snapshot = snapshot_tree(
+        pool,
+        "backup pool",
+        max_file_bytes=METADATA_MAX_BYTES,
+        max_paths=64,
+    )
+    ensure_private_directory(pool, "backup pool")
+    slot_dir = pool / str(pending.slot)
+    stage_dir = pool / f".{pending.slot}.nddev-backup-stage.{os.getpid()}.{time.time_ns()}"
+    old_dir = pool / f".{pending.slot}.nddev-backup-old.{os.getpid()}.{time.time_ns()}"
+    try:
+        stage_dir.mkdir(mode=OWNER_DIRECTORY_MODE)
+        stage_dir.chmod(OWNER_DIRECTORY_MODE)
+        fsync_directory(pool)
+        atomic_write(stage_dir / BACKUP_NAME, canonical_json(pending.envelope), stage_dir)
+        reread = read_json_file(
+            stage_dir / BACKUP_NAME, max_bytes=METADATA_MAX_BYTES, label=BACKUP_NAME
+        )
+        validate_backup_envelope(target, pending.slot, reread)
+        slot_info = stat_existing(slot_dir, f"backup slot {pending.slot}")
+        if slot_info is not None:
+            validate_backup_slot_directory(slot_dir, f"backup slot {pending.slot}")
+            os.replace(slot_dir, old_dir)
+            fsync_directory(pool)
+        os.replace(stage_dir, slot_dir)
+        fsync_directory(pool)
+        if path_exists_no_follow(old_dir):
+            remove_tree_strict(
+                old_dir,
+                "old backup slot",
+                max_file_bytes=METADATA_MAX_BYTES,
+                max_paths=64,
+            )
+        validate_backup_slot_directory(slot_dir, f"backup slot {pending.slot}")
+        committed = read_json_file(
+            slot_dir / BACKUP_NAME, max_bytes=METADATA_MAX_BYTES, label=BACKUP_NAME
+        )
+        validate_backup_envelope(target, pending.slot, committed)
+        return pending.slot
+    except BaseException:
+        restore_tree_snapshot(
+            pool,
+            pool_snapshot,
+            "backup pool",
+            max_file_bytes=METADATA_MAX_BYTES,
+            max_paths=64,
+        )
+        raise
+
+
+def build_stamp(
+    target: Path, setup: dict[str, Any], profile_data: dict[str, Any], files: dict[str, bytes]
+) -> dict[str, Any]:
+    managed = {
+        relative: managed_digest_for_bytes(relative, data) for relative, data in files.items()
+    }
     return {
         "schema_version": CURRENT_SETUP_SCHEMA,
         "product_name": PRODUCT_NAME,
@@ -1510,6 +2154,24 @@ def setup_change_sets(
     removed = sorted(relative for relative in stamp_managed_paths(current) if relative not in files)
     changed_paths = sorted(dict.fromkeys((*changed, *removed)))
     return changed, removed, changed_paths
+
+
+def verify_setup_postcondition(
+    target: Path,
+    desired_stamp: dict[str, Any],
+    files: dict[str, bytes],
+    removed: tuple[str, ...],
+) -> None:
+    for relative, data in files.items():
+        expected = managed_digest_for_bytes(relative, data)
+        if current_managed_digest(target, relative) != expected:
+            fail(f"postcondition failed for managed path: {relative}")
+    for relative in removed:
+        if current_managed_digest(target, relative) is not None:
+            fail(f"postcondition failed for removed managed path: {relative}")
+    stamp = read_stamp(target)
+    if stamp != desired_stamp:
+        fail("postcondition failed for setup stamp")
 
 
 def write_setup(
@@ -1545,31 +2207,67 @@ def write_setup(
         files = desired_files(target, setup, profile_data)
         desired_stamp = build_stamp(target, setup, profile_data, files)
         changed, removed, changed_paths = setup_change_sets(target, files, current)
-        backup_slot = None
-        if current is not None:
-            descriptor = stamp_descriptor(current)
-            if (
+        descriptor = stamp_descriptor(current)
+        backup_required = bool(
+            current is not None
+            and (
                 descriptor["legacy"]
                 or descriptor["content_setup_id"] != setup["id"]
                 or descriptor["permission_profile_id"] != profile_data["id"]
-            ):
-                backup_slot = create_backup(target, current)
+            )
+        )
+        if current is not None and not backup_required and not changed and not removed:
+            return {
+                "content_setup_id": setup["id"],
+                "permission_profile_id": profile_data["id"],
+                "changed": [],
+                "changed_paths": [],
+                "removed": [],
+                "backup_slot": None,
+                "target": str(validate_target(target, create=False)),
+            }
+        pending_backup = (
+            prepare_backup(target, current) if backup_required and current is not None else None
+        )
+        backup_slot = None
         stale_paths = tuple(removed)
         snapshot = snapshot_files(target, stale_paths)
+        backup_snapshot = snapshot_tree(
+            backup_pool(target),
+            "backup pool",
+            max_file_bytes=METADATA_MAX_BYTES,
+            max_paths=64,
+        )
         try:
             for relative in stale_paths:
                 path = safe_target_path(target, relative)
                 if relative in MERGED_MARKER_PATHS:
                     remove_managed_block_from_target(target, relative)
                 else:
-                    with contextlib.suppress(FileNotFoundError):
-                        path.unlink()
+                    durable_unlink(path)
             for relative, data in files.items():
                 atomic_write(safe_target_path(target, relative), data, target)
             atomic_write(stamp_path(target), canonical_json(desired_stamp), target)
+            verify_setup_postcondition(target, desired_stamp, files, stale_paths)
+            if pending_backup is not None:
+                backup_slot = commit_backup(target, pending_backup)
+                slot_dir = backup_pool(target) / str(backup_slot)
+                validate_backup_slot_directory(slot_dir, f"backup slot {backup_slot}")
+                committed = read_json_file(
+                    slot_dir / BACKUP_NAME, max_bytes=METADATA_MAX_BYTES, label=BACKUP_NAME
+                )
+                validate_backup_envelope(target, backup_slot, committed)
             prune_empty_managed_dirs(target, stale_paths)
+            verify_setup_postcondition(target, desired_stamp, files, stale_paths)
         except BaseException:
             restore_snapshot(target, snapshot)
+            restore_tree_snapshot(
+                backup_pool(target),
+                backup_snapshot,
+                "backup pool",
+                max_file_bytes=METADATA_MAX_BYTES,
+                max_paths=64,
+            )
             raise
         return {
             "content_setup_id": setup["id"],
@@ -1588,31 +2286,46 @@ def restore_backup(target: Path, slot: int) -> dict[str, Any]:
     with target_lock(target, create_parent=True) as transaction:
         validate_target(target, create=True, transaction=transaction)
         envelope_path = backup_pool(target) / str(slot) / BACKUP_NAME
+        validate_backup_slot_directory(envelope_path.parent, f"backup slot {slot}")
         envelope = read_json_file(envelope_path, max_bytes=METADATA_MAX_BYTES, label=BACKUP_NAME)
-        if envelope.get("product_name") != PRODUCT_NAME:
-            fail("backup belongs to another product")
-        if envelope.get("canonical_target") != str(validate_target(target, create=False)):
-            fail("backup is bound to a different canonical target")
-        files = envelope.get("files")
-        if not isinstance(files, dict):
-            fail("backup files are invalid")
-        snapshot = snapshot_files(target, tuple(files))
+        files = validate_backup_envelope(target, slot, envelope)
+        current = read_stamp(target)
+        restore_paths = tuple(
+            dict.fromkeys(
+                (*content_managed_paths(), *stamp_managed_paths(current), *files, STAMP_NAME)
+            )
+        )
+        desired = {
+            relative: FileSnapshot(
+                data=files.get(relative),
+                mode=OWNER_FILE_MODE if files.get(relative) is not None else None,
+            )
+            for relative in restore_paths
+        }
+        snapshot = snapshot_files(target, restore_paths)
         try:
-            for relative in (*files.keys(),):
-                encoded = files.get(relative)
-                path = safe_target_path(target, relative)
-                if encoded is None:
-                    with contextlib.suppress(FileNotFoundError):
-                        path.unlink()
-                    continue
-                if not isinstance(encoded, str):
-                    fail("backup file payload is invalid")
-                try:
-                    decoded = base64.b64decode(encoded.encode("ascii"), validate=True)
-                except (binascii.Error, ValueError):
-                    fail("backup file payload is invalid base64")
-                atomic_write(path, decoded, target)
-            prune_empty_managed_dirs(target, tuple(files))
+            for relative in restore_paths:
+                restore_file_snapshot(
+                    safe_target_path(target, relative),
+                    desired[relative],
+                    target,
+                    relative,
+                    max_bytes=MANAGED_MAX_BYTES,
+                )
+            restored_stamp = read_stamp(target)
+            if restored_stamp is None:
+                fail("backup restore postcondition failed: setup stamp is missing")
+            if list(backup_path_set(restored_stamp)) != list(files):
+                fail("backup restore postcondition failed: restored stamp path set")
+            for relative, expected in desired.items():
+                current = read_existing_file(
+                    safe_target_path(target, relative),
+                    max_bytes=MANAGED_MAX_BYTES,
+                    label=relative,
+                )
+                if current != expected.data:
+                    fail(f"backup restore postcondition failed: {relative}")
+            prune_empty_managed_dirs(target, restore_paths)
         except BaseException:
             restore_snapshot(target, snapshot)
             raise
@@ -1640,7 +2353,7 @@ def remove_managed_block_from_target(target: Path, relative: str) -> None:
     if updated.strip():
         atomic_write(path, updated.encode("utf-8"), target)
     else:
-        path.unlink()
+        durable_unlink(path)
 
 
 def prune_empty_managed_dirs(target: Path, extra_paths: tuple[str, ...] = ()) -> None:
@@ -1652,8 +2365,7 @@ def prune_empty_managed_dirs(target: Path, extra_paths: tuple[str, ...] = ()) ->
             directory = directory.parent
     directories = sorted(candidates, key=lambda item: len(item.parts), reverse=True)
     for directory in directories:
-        with contextlib.suppress(OSError):
-            directory.rmdir()
+        remove_empty_directory_if_empty(directory)
 
 
 def remove_setup(target: Path) -> dict[str, Any]:
@@ -1674,18 +2386,27 @@ def remove_setup(target: Path) -> dict[str, Any]:
                 if relative in MERGED_MARKER_PATHS:
                     remove_managed_block_from_target(target, relative)
                 else:
-                    with contextlib.suppress(FileNotFoundError):
-                        path.unlink()
-            with contextlib.suppress(FileNotFoundError):
-                stamp_path(target).unlink()
+                    durable_unlink(path)
+            durable_unlink(stamp_path(target))
             prune_empty_managed_dirs(target, remove_paths)
+            for relative in remove_paths:
+                if current_managed_digest(target, relative) is not None:
+                    fail(f"remove postcondition failed for managed path: {relative}")
+            if read_stamp(target) is not None:
+                fail("remove postcondition failed for setup stamp")
         except BaseException:
             restore_snapshot(target, snapshot)
             raise
         return {"removed": descriptor, "target": str(validate_target(target, create=False))}
 
 
-def plan_payload(target: Path, setup: dict[str, Any], profile_data: dict[str, Any], *, migrate_legacy: bool = False) -> dict[str, Any]:
+def plan_payload(
+    target: Path,
+    setup: dict[str, Any],
+    profile_data: dict[str, Any],
+    *,
+    migrate_legacy: bool = False,
+) -> dict[str, Any]:
     status = status_payload(target)
     operation = "install"
     backup_required = False
@@ -1693,7 +2414,10 @@ def plan_payload(target: Path, setup: dict[str, Any], profile_data: dict[str, An
         if status["state"] == "legacy-managed":
             operation = "migrate" if migrate_legacy else "blocked-legacy"
             backup_required = migrate_legacy
-        elif status["content_setup_id"] == setup["id"] and status["permission_profile_id"] == profile_data["id"]:
+        elif (
+            status["content_setup_id"] == setup["id"]
+            and status["permission_profile_id"] == profile_data["id"]
+        ):
             operation = "update"
         else:
             operation = "switch-profile" if status["content_setup_id"] == setup["id"] else "switch"
@@ -1791,8 +2515,12 @@ def validate_safe_partial_software_presence(target: Path) -> None:
     require_safe_partial_directory(software_entrypoint(target).parent, "bin")
     require_safe_partial_directory(software_root(target), "software root")
     require_safe_partial_directory(software_current(target), "current software tree")
-    require_safe_partial_file(software_entrypoint(target), "Kimi Code entrypoint", max_bytes=SOFTWARE_MAX_BYTES)
-    require_safe_partial_file(software_stamp_path(target), SOFTWARE_STAMP_NAME, max_bytes=METADATA_MAX_BYTES)
+    require_safe_partial_file(
+        software_entrypoint(target), "Kimi Code entrypoint", max_bytes=SOFTWARE_MAX_BYTES
+    )
+    require_safe_partial_file(
+        software_stamp_path(target), SOFTWARE_STAMP_NAME, max_bytes=METADATA_MAX_BYTES
+    )
 
 
 def read_software_stamp(target: Path) -> dict[str, Any] | None:
@@ -1874,10 +2602,14 @@ def software_status_payload(target: Path) -> dict[str, Any]:
             drift.append(SOFTWARE_CURRENT_NAME)
         elif stat.S_IMODE(current_info.st_mode) != OWNER_DIRECTORY_MODE:
             drift.append("software_current_mode")
-        entrypoint_info = validate_software_file(software_entrypoint(target), "Kimi Code entrypoint")
+        entrypoint_info = validate_software_file(
+            software_entrypoint(target), "Kimi Code entrypoint"
+        )
         if stat.S_IMODE(entrypoint_info.st_mode) != 0o700:
             drift.append("entrypoint_mode")
-        current_binary_info = validate_software_file(software_current_binary(target), "current Kimi Code binary")
+        current_binary_info = validate_software_file(
+            software_current_binary(target), "current Kimi Code binary"
+        )
         if stat.S_IMODE(current_binary_info.st_mode) != 0o700:
             drift.append("current_binary_mode")
         platform_key = stamp.get("platform")
@@ -1886,7 +2618,9 @@ def software_status_payload(target: Path) -> dict[str, Any]:
         if platform_key not in KIMI_BINARY_PLATFORMS:
             drift.append("platform")
         expected_binary = KIMI_BINARY_PLATFORMS.get(str(platform_key), {})
-        expected_url = f"{KIMI_BINARY_BASE}/{KIMI_PACKAGE_VERSION}/{expected_binary.get('filename')}"
+        expected_url = (
+            f"{KIMI_BINARY_BASE}/{KIMI_PACKAGE_VERSION}/{expected_binary.get('filename')}"
+        )
         if (
             not isinstance(binary, dict)
             or binary.get("filename") != expected_binary.get("filename")
@@ -1913,7 +2647,9 @@ def software_status_payload(target: Path) -> dict[str, Any]:
         if source != expected_source:
             drift.append("source")
         entrypoint_digest = file_sha256(software_entrypoint(target), label="Kimi Code entrypoint")
-        current_binary_digest = file_sha256(software_current_binary(target), label="current Kimi Code binary")
+        current_binary_digest = file_sha256(
+            software_current_binary(target), label="current Kimi Code binary"
+        )
         installed_tree_digest = tree_sha256(software_current(target))
         if stamp.get("version") != KIMI_PACKAGE_VERSION:
             drift.append("version")
@@ -2029,7 +2765,9 @@ def require_ubuntu_linux(
     ldd_runner: Any | None = None,
 ) -> LinuxDistribution:
     if linux_libc_is_musl(marker_paths=musl_marker_paths, ldd_runner=ldd_runner):
-        fail("unsupported host category: linux-musl; nddev-kimicode-app supports Ubuntu glibc hosts only")
+        fail(
+            "unsupported host category: linux-musl; nddev-kimicode-app supports Ubuntu glibc hosts only"
+        )
     distro = detect_linux_distribution(os_release_paths)
     if distro.distro_id != "ubuntu":
         fail(
@@ -2118,7 +2856,9 @@ def fetch_url_bytes(url: str, *, max_bytes: int, label: str) -> bytes:
 
 
 def install_official_binary(stage_current: Path, platform_key: str) -> dict[str, Any]:
-    manifest_bytes = fetch_url_bytes(KIMI_BINARY_MANIFEST_URL, max_bytes=METADATA_MAX_BYTES, label="Kimi Code binary manifest")
+    manifest_bytes = fetch_url_bytes(
+        KIMI_BINARY_MANIFEST_URL, max_bytes=METADATA_MAX_BYTES, label="Kimi Code binary manifest"
+    )
     manifest_digest = sha256_bytes(manifest_bytes)
     if manifest_digest != KIMI_BINARY_MANIFEST_SHA256:
         fail("Kimi Code binary manifest digest does not match the pinned baseline")
@@ -2131,7 +2871,10 @@ def install_official_binary(stage_current: Path, platform_key: str) -> dict[str,
     if manifest.get("version") != KIMI_PACKAGE_VERSION or manifest.get("tag") != KIMI_GIT_TAG:
         fail("Kimi Code binary manifest version does not match the pinned baseline")
     platforms = manifest.get("platforms")
-    if not isinstance(platforms, dict) or platforms.get(platform_key) != KIMI_BINARY_PLATFORMS[platform_key]:
+    if (
+        not isinstance(platforms, dict)
+        or platforms.get(platform_key) != KIMI_BINARY_PLATFORMS[platform_key]
+    ):
         fail("Kimi Code binary manifest platform entry does not match the pinned baseline")
     binary = KIMI_BINARY_PLATFORMS[platform_key]
     url = f"{KIMI_BINARY_BASE}/{KIMI_PACKAGE_VERSION}/{binary['filename']}"
@@ -2140,12 +2883,23 @@ def install_official_binary(stage_current: Path, platform_key: str) -> dict[str,
         fail("Kimi Code binary digest does not match the pinned baseline")
     bin_dir = stage_current / "bin"
     bin_dir.mkdir(mode=OWNER_DIRECTORY_MODE, parents=True)
+    bin_dir.chmod(OWNER_DIRECTORY_MODE)
+    fsync_directory(stage_current)
     destination = bin_dir / KIMI_COMMAND
     fd = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
     with os.fdopen(fd, "wb") as handle:
         handle.write(binary_bytes)
+        handle.flush()
+        os.fsync(handle.fileno())
     destination.chmod(0o700)
-    return {"platform": platform_key, "filename": binary["filename"], "url": url, "sha256": binary["checksum"], "manifest_sha256": manifest_digest}
+    fsync_directory(bin_dir)
+    return {
+        "platform": platform_key,
+        "filename": binary["filename"],
+        "url": url,
+        "sha256": binary["checksum"],
+        "manifest_sha256": manifest_digest,
+    }
 
 
 def read_process_output(handle: Any, label: str) -> str:
@@ -2196,7 +2950,9 @@ def run_stage_version_probe(stage_current: Path, stage_workspace: Path) -> str:
         stderr_text = read_process_output(stderr, "stderr")
         if completed.returncode != 0:
             detail = (stderr_text or stdout_text).strip()
-            fail(f"staged kimi version probe failed with exit code {completed.returncode}: {detail}")
+            fail(
+                f"staged kimi version probe failed with exit code {completed.returncode}: {detail}"
+            )
         output = (stdout_text + stderr_text).strip()
         if KIMI_PACKAGE_VERSION not in output:
             fail("staged kimi version probe did not report the pinned release")
@@ -2264,89 +3020,238 @@ def software_stamp(
     }
 
 
-def snapshot_software_entrypoint(target: Path) -> tuple[bytes | None, int | None]:
-    path = software_entrypoint(target)
-    info = require_existing_managed_file(path, "Kimi Code entrypoint", max_bytes=SOFTWARE_MAX_BYTES)
-    if info is None:
-        return None, None
-    fd, opened = open_regular_readonly(path, "Kimi Code entrypoint", max_bytes=SOFTWARE_MAX_BYTES)
-    with os.fdopen(fd, "rb") as handle:
-        data = handle.read(SOFTWARE_MAX_BYTES + 1)
-    if len(data) > SOFTWARE_MAX_BYTES:
-        fail("Kimi Code entrypoint is too large")
-    return data, stat.S_IMODE(opened.st_mode)
+def snapshot_software_entrypoint(target: Path) -> FileSnapshot:
+    return snapshot_replace_destination(
+        software_entrypoint(target),
+        "Kimi Code entrypoint",
+        max_bytes=SOFTWARE_MAX_BYTES,
+    )
 
 
-def restore_software_entrypoint(target: Path, data: bytes | None, mode: int | None, *, remove_empty_parent: bool) -> None:
-    path = software_entrypoint(target)
-    if data is None:
-        with contextlib.suppress(FileNotFoundError):
-            path.unlink()
-        if remove_empty_parent:
-            with contextlib.suppress(OSError):
-                path.parent.rmdir()
-        return
-    atomic_write(path, data, target, mode=mode or 0o700)
+def snapshot_software_stamp(target: Path) -> FileSnapshot:
+    return snapshot_replace_destination(
+        software_stamp_path(target),
+        SOFTWARE_STAMP_NAME,
+        max_bytes=METADATA_MAX_BYTES,
+    )
 
 
-def snapshot_software_stamp(target: Path) -> tuple[bytes | None, int | None]:
-    path = software_stamp_path(target)
-    info = require_existing_managed_file(path, SOFTWARE_STAMP_NAME, max_bytes=METADATA_MAX_BYTES)
-    if info is None:
-        return None, None
-    fd, opened = open_regular_readonly(path, SOFTWARE_STAMP_NAME, max_bytes=METADATA_MAX_BYTES)
-    with os.fdopen(fd, "rb") as handle:
-        data = handle.read(METADATA_MAX_BYTES + 1)
-    if len(data) > METADATA_MAX_BYTES:
-        fail(f"{SOFTWARE_STAMP_NAME} is too large")
-    return data, stat.S_IMODE(opened.st_mode)
+def snapshot_software_state(target: Path) -> SoftwareStateSnapshot:
+    entrypoint_parent = software_entrypoint(target).parent
+    parent_info = stat_existing(entrypoint_parent, "bin")
+    if parent_info is not None and not stat.S_ISDIR(parent_info.st_mode):
+        fail("bin must be a directory")
+    return SoftwareStateSnapshot(
+        software_tree=snapshot_tree(
+            software_root(target),
+            "software root",
+            max_file_bytes=SOFTWARE_MAX_BYTES,
+            max_paths=SOFTWARE_MAX_PATHS,
+        ),
+        entrypoint=snapshot_software_entrypoint(target),
+        stamp=snapshot_software_stamp(target),
+        entrypoint_parent_present=parent_info is not None,
+        entrypoint_parent_mode=stat.S_IMODE(parent_info.st_mode)
+        if parent_info is not None
+        else None,
+    )
 
 
-def restore_software_stamp(target: Path, data: bytes | None, mode: int | None) -> None:
-    path = software_stamp_path(target)
-    if data is None:
-        with contextlib.suppress(FileNotFoundError):
-            path.unlink()
-        return
-    atomic_write(path, data, target, mode=mode or OWNER_FILE_MODE)
+def verify_software_state(target: Path, snapshot: SoftwareStateSnapshot) -> None:
+    verify_tree_snapshot(
+        software_root(target),
+        snapshot.software_tree,
+        "software root",
+        max_file_bytes=SOFTWARE_MAX_BYTES,
+        max_paths=SOFTWARE_MAX_PATHS,
+    )
+    verify_file_snapshot(
+        software_entrypoint(target),
+        snapshot.entrypoint,
+        "Kimi Code entrypoint",
+        max_bytes=SOFTWARE_MAX_BYTES,
+    )
+    verify_file_snapshot(
+        software_stamp_path(target),
+        snapshot.stamp,
+        SOFTWARE_STAMP_NAME,
+        max_bytes=METADATA_MAX_BYTES,
+    )
+    parent = software_entrypoint(target).parent
+    parent_info = stat_existing(parent, "bin")
+    if snapshot.entrypoint_parent_present:
+        if parent_info is None:
+            fail("software rollback postcondition failed: bin parent is missing")
+        assert parent_info is not None
+        if stat.S_IMODE(parent_info.st_mode) != snapshot.entrypoint_parent_mode:
+            fail("software rollback postcondition failed: bin parent mode mismatch")
+    elif parent_info is not None:
+        fail("software rollback postcondition failed: bin parent should be absent")
+
+
+def restore_software_state_once(target: Path, snapshot: SoftwareStateSnapshot) -> None:
+    restore_tree_snapshot(
+        software_root(target),
+        snapshot.software_tree,
+        "software root",
+        max_file_bytes=SOFTWARE_MAX_BYTES,
+        max_paths=SOFTWARE_MAX_PATHS,
+    )
+    restore_file_snapshot(
+        software_entrypoint(target),
+        snapshot.entrypoint,
+        target,
+        "Kimi Code entrypoint",
+        max_bytes=SOFTWARE_MAX_BYTES,
+        default_mode=0o700,
+    )
+    restore_file_snapshot(
+        software_stamp_path(target),
+        snapshot.stamp,
+        target,
+        SOFTWARE_STAMP_NAME,
+        max_bytes=METADATA_MAX_BYTES,
+        default_mode=OWNER_FILE_MODE,
+    )
+    parent = software_entrypoint(target).parent
+    if snapshot.entrypoint_parent_present:
+        if snapshot.entrypoint_parent_mode is None:
+            fail("software rollback snapshot is missing bin parent mode")
+        info = stat_existing(parent, "bin")
+        if info is None:
+            parent.mkdir(mode=snapshot.entrypoint_parent_mode)
+            parent.chmod(snapshot.entrypoint_parent_mode)
+            fsync_directory(parent.parent)
+        elif stat.S_IMODE(info.st_mode) != snapshot.entrypoint_parent_mode:
+            parent.chmod(snapshot.entrypoint_parent_mode)
+            fsync_directory(parent.parent)
+    else:
+        remove_empty_directory_if_empty(parent)
+    verify_software_state(target, snapshot)
+
+
+def restore_software_state(target: Path, snapshot: SoftwareStateSnapshot) -> None:
+    restore_with_retries(
+        lambda: restore_software_state_once(target, snapshot),
+        lambda: verify_software_state(target, snapshot),
+        "software state",
+    )
 
 
 def copy_staged_binary(source: Path, destination: Path, target: Path) -> str:
     info = validate_software_file(source, "staged Kimi Code binary")
     ensure_real_parent(destination, target)
-    original_data, original_mode = snapshot_replace_destination(
+    expected_digest = file_sha256(source, label="staged Kimi Code binary")
+    original = snapshot_replace_destination(
         destination,
         "Kimi Code entrypoint",
         max_bytes=SOFTWARE_MAX_BYTES,
     )
-    temporary = destination.with_name(f".{destination.name}.nddev.tmp.{os.getpid()}.{time.time_ns()}")
+    temporary = destination.with_name(
+        f".{destination.name}.nddev.tmp.{os.getpid()}.{time.time_ns()}"
+    )
     fd, _ = open_regular_readonly(source, "staged Kimi Code binary", max_bytes=SOFTWARE_MAX_BYTES)
     replaced = False
     try:
         with os.fdopen(fd, "rb") as source_handle:
             with temporary.open("xb") as target_handle:
                 shutil.copyfileobj(source_handle, target_handle, length=1024 * 1024)
+                temporary.chmod(0o700 if stat.S_IMODE(info.st_mode) & 0o100 else OWNER_FILE_MODE)
                 target_handle.flush()
                 os.fsync(target_handle.fileno())
-        temporary.chmod(0o700 if stat.S_IMODE(info.st_mode) & 0o100 else OWNER_FILE_MODE)
         os.replace(temporary, destination)
         replaced = True
-        destination.chmod(0o700)
         fsync_directory(destination.parent)
     except BaseException:
         if replaced:
-            rollback_replaced_destination(destination, original_data, original_mode)
+            rollback_replaced_destination(
+                destination,
+                original,
+                target,
+                "Kimi Code entrypoint",
+                max_bytes=SOFTWARE_MAX_BYTES,
+            )
         else:
-            with contextlib.suppress(FileNotFoundError):
-                temporary.unlink()
+            restore_with_retries(
+                lambda: durable_unlink(temporary),
+                lambda: verify_file_snapshot(
+                    temporary,
+                    FileSnapshot(data=None, mode=None),
+                    str(temporary),
+                    max_bytes=SOFTWARE_MAX_BYTES,
+                ),
+                str(temporary),
+            )
         raise
-    return file_sha256(destination, label="Kimi Code entrypoint")
+    digest = file_sha256(destination, label="Kimi Code entrypoint")
+    if digest != expected_digest:
+        rollback_replaced_destination(
+            destination,
+            original,
+            target,
+            "Kimi Code entrypoint",
+            max_bytes=SOFTWARE_MAX_BYTES,
+        )
+        fail("copied Kimi Code entrypoint does not match staged binary")
+    return digest
+
+
+def create_transient_directory(parent: Path, name: str, label: str) -> Path:
+    require_owner_private_directory(parent, f"{label} parent")
+    path = parent / f"{name}{os.getpid()}.{time.time_ns()}"
+    created = False
+    try:
+        path.mkdir(mode=OWNER_DIRECTORY_MODE)
+        created = True
+        path.chmod(OWNER_DIRECTORY_MODE)
+        fsync_directory(parent)
+    except BaseException:
+        if created:
+            remove_tree_strict(
+                path,
+                label,
+                max_file_bytes=SOFTWARE_MAX_BYTES,
+                max_paths=SOFTWARE_MAX_PATHS + 16,
+            )
+        raise
+    return path
+
+
+def cleanup_transient_directory(path: Path, label: str) -> None:
+    restore_tree_snapshot(
+        path,
+        TreeSnapshot(entries=None),
+        label,
+        max_file_bytes=SOFTWARE_MAX_BYTES,
+        max_paths=SOFTWARE_MAX_PATHS + 16,
+    )
+
+
+def verify_installed_software_postcondition(
+    target: Path,
+    *,
+    stamp: dict[str, Any],
+    binary: dict[str, Any],
+) -> None:
+    verified = software_status_payload(target)
+    if not verified["current"]:
+        fail(f"installed software failed status verification: {', '.join(verified['drift'])}")
+    if read_software_stamp(target) != stamp:
+        fail("installed software failed stamp postcondition")
+    if file_sha256(software_entrypoint(target), label="Kimi Code entrypoint") != binary["sha256"]:
+        fail("installed software failed entrypoint postcondition")
+    if (
+        file_sha256(software_current_binary(target), label="current Kimi Code binary")
+        != binary["sha256"]
+    ):
+        fail("installed software failed current binary postcondition")
 
 
 def install_or_update_software(target: Path, *, mode: str) -> dict[str, Any]:
     if mode not in {"install", "update", "migrate"}:
         fail("invalid software operation")
     platform_key = detect_official_platform()
+    target_existed = path_exists_no_follow(target)
     preflight = software_status_payload(target)
     if preflight["current"]:
         return {
@@ -2358,7 +3263,9 @@ def install_or_update_software(target: Path, *, mode: str) -> dict[str, Any]:
             "target": canonical_target_readonly(target),
         }
     if mode == "install" and preflight["present"]:
-        fail("install-cli found target-owned Kimi Code software presence; use update-cli or migrate-cli")
+        fail(
+            "install-cli found target-owned Kimi Code software presence; use update-cli or migrate-cli"
+        )
     if mode == "update":
         if not preflight["present"]:
             fail("update-cli requires existing target-owned Kimi Code software presence")
@@ -2367,57 +3274,62 @@ def install_or_update_software(target: Path, *, mode: str) -> dict[str, Any]:
     if mode == "migrate" and not preflight["legacy"]:
         fail("migrate-cli requires legacy target-owned Bun software state")
 
-    with target_lock(target, create_parent=mode == "install") as transaction:
-        validate_target(target, create=mode == "install", transaction=transaction)
-        validate_safe_partial_software_presence(target)
-        status = software_status_payload(target)
-        if status["current"]:
-            return {
-                "changed": False,
-                "version": KIMI_PACKAGE_VERSION,
-                "command": KIMI_COMMAND,
-                "executable": str(software_entrypoint(target)),
-                "installed_tree": str(software_current(target)),
-                "target": str(validate_target(target, create=False)),
-            }
-        if mode == "install" and status["present"]:
-            fail("install-cli found target-owned Kimi Code software presence; use update-cli or migrate-cli")
-        if mode == "update" and (not status["present"] or status["legacy"]):
-            fail("update-cli requires non-legacy target-owned Kimi Code software presence")
-        if mode == "migrate" and not status["legacy"]:
-            fail("migrate-cli requires legacy target-owned Bun software state")
+    try:
+        with target_lock(target, create_parent=mode == "install") as transaction:
+            validate_target(target, create=mode == "install", transaction=transaction)
+            validate_safe_partial_software_presence(target)
+            status = software_status_payload(target)
+            if status["current"]:
+                return {
+                    "changed": False,
+                    "version": KIMI_PACKAGE_VERSION,
+                    "command": KIMI_COMMAND,
+                    "executable": str(software_entrypoint(target)),
+                    "installed_tree": str(software_current(target)),
+                    "target": str(validate_target(target, create=False)),
+                }
+            if mode == "install" and status["present"]:
+                fail(
+                    "install-cli found target-owned Kimi Code software presence; use update-cli or migrate-cli"
+                )
+            if mode == "update" and (not status["present"] or status["legacy"]):
+                fail("update-cli requires non-legacy target-owned Kimi Code software presence")
+            if mode == "migrate" and not status["legacy"]:
+                fail("migrate-cli requires legacy target-owned Bun software state")
 
-        parent = target.parent
-        with tempfile.TemporaryDirectory(prefix=f".{target.name}{SOFTWARE_STAGE_FRAGMENT}.", dir=str(parent)) as stage_raw, tempfile.TemporaryDirectory(
-            prefix=f".{target.name}.nddev-kimicode-software-rollback.", dir=str(parent)
-        ) as rollback_raw:
-            stage_root = Path(stage_raw)
-            rollback_root = Path(rollback_raw)
+            parent = target.parent
+            stage_root = create_transient_directory(
+                parent,
+                f".{target.name}{SOFTWARE_STAGE_FRAGMENT}.",
+                "software stage",
+            )
+            snapshot = snapshot_software_state(target)
             stage_current = stage_root / SOFTWARE_CURRENT_NAME
-            stage_current.mkdir(mode=OWNER_DIRECTORY_MODE)
-            binary = install_official_binary(stage_current, platform_key)
-            version_probe_digest = run_stage_version_probe(stage_current, stage_root)
-            installed_tree_digest = tree_sha256(stage_current)
-
-            software_root_was_present = existing_path_label(software_root(target), SOFTWARE_DIR_NAME) is not None
-            entrypoint_parent_was_present = existing_path_label(software_entrypoint(target).parent, "bin") is not None
-            ensure_private_directory(software_root(target), "software root")
-            current = software_current(target)
-            rollback_current = rollback_root / SOFTWARE_CURRENT_NAME
-            previous_entrypoint, previous_entrypoint_mode = snapshot_software_entrypoint(target)
-            previous_stamp, previous_stamp_mode = snapshot_software_stamp(target)
-            current_moved = False
-            new_current_installed = False
             try:
+                stage_current.mkdir(mode=OWNER_DIRECTORY_MODE)
+                stage_current.chmod(OWNER_DIRECTORY_MODE)
+                fsync_directory(stage_root)
+                binary = install_official_binary(stage_current, platform_key)
+                version_probe_digest = run_stage_version_probe(stage_current, stage_root)
+                installed_tree_digest = tree_sha256(stage_current)
+
+                ensure_private_directory(software_root(target), "software root")
+                current = software_current(target)
                 current_info = stat_existing(current, "current software tree")
                 if current_info is not None:
                     if not stat.S_ISDIR(current_info.st_mode):
                         fail("current software tree must be a directory")
-                    current.rename(rollback_current)
-                    current_moved = True
+                    remove_tree_strict(
+                        current,
+                        "current software tree",
+                        max_file_bytes=SOFTWARE_MAX_BYTES,
+                        max_paths=SOFTWARE_MAX_PATHS,
+                    )
                 stage_current.rename(current)
-                new_current_installed = True
-                entrypoint_digest = copy_staged_binary(current / "bin" / KIMI_COMMAND, software_entrypoint(target), target)
+                fsync_directory(software_root(target))
+                entrypoint_digest = copy_staged_binary(
+                    current / "bin" / KIMI_COMMAND, software_entrypoint(target), target
+                )
                 stamp = software_stamp(
                     target,
                     platform_key=platform_key,
@@ -2427,19 +3339,11 @@ def install_or_update_software(target: Path, *, mode: str) -> dict[str, Any]:
                     version_probe_digest=version_probe_digest,
                 )
                 atomic_write(software_stamp_path(target), canonical_json(stamp), target)
-                verified = software_status_payload(target)
-                if not verified["current"]:
-                    fail(f"installed software failed status verification: {', '.join(verified['drift'])}")
+                verify_installed_software_postcondition(target, stamp=stamp, binary=binary)
+                cleanup_transient_directory(stage_root, "software stage")
             except BaseException:
-                if new_current_installed:
-                    shutil.rmtree(current, ignore_errors=True)
-                if current_moved:
-                    rollback_current.rename(current)
-                restore_software_entrypoint(target, previous_entrypoint, previous_entrypoint_mode, remove_empty_parent=not entrypoint_parent_was_present)
-                restore_software_stamp(target, previous_stamp, previous_stamp_mode)
-                if not software_root_was_present:
-                    with contextlib.suppress(OSError):
-                        software_root(target).rmdir()
+                restore_software_state(target, snapshot)
+                cleanup_transient_directory(stage_root, "software stage")
                 raise
             return {
                 "changed": True,
@@ -2450,6 +3354,78 @@ def install_or_update_software(target: Path, *, mode: str) -> dict[str, Any]:
                 "target": str(validate_target(target, create=False)),
                 "migrated_legacy": mode == "migrate",
             }
+    except BaseException:
+        if not target_existed:
+            restore_tree_snapshot(
+                target,
+                TreeSnapshot(entries=None),
+                "target",
+                max_file_bytes=max(MANAGED_MAX_BYTES, SOFTWARE_MAX_BYTES),
+                max_paths=SOFTWARE_MAX_PATHS + 64,
+            )
+        raise
+
+
+def verify_removed_software_postcondition(target: Path) -> None:
+    for path, label in (
+        (software_root(target), SOFTWARE_DIR_NAME),
+        (software_stamp_path(target), SOFTWARE_STAMP_NAME),
+        (software_entrypoint(target), "bin/kimi"),
+    ):
+        if path_exists_no_follow(path):
+            fail(f"remove-cli postcondition failed: {label} remains")
+    bin_parent = software_entrypoint(target).parent
+    if path_exists_no_follow(bin_parent) and bin_parent.is_dir() and not any(bin_parent.iterdir()):
+        fail("remove-cli postcondition failed: empty bin parent remains")
+
+
+def remove_software(target: Path) -> dict[str, Any]:
+    preflight = software_status_payload(target)
+    if not preflight["present"]:
+        return {
+            "changed": False,
+            "version": None,
+            "command": KIMI_COMMAND,
+            "executable": str(software_entrypoint(target)),
+            "installed_tree": str(software_current(target)),
+            "target": canonical_target_readonly(target),
+        }
+    with target_lock(target):
+        validate_target(target, create=False)
+        validate_safe_partial_software_presence(target)
+        status = software_status_payload(target)
+        if not status["present"]:
+            return {
+                "changed": False,
+                "version": None,
+                "command": KIMI_COMMAND,
+                "executable": str(software_entrypoint(target)),
+                "installed_tree": str(software_current(target)),
+                "target": str(validate_target(target, create=False)),
+            }
+        snapshot = snapshot_software_state(target)
+        try:
+            remove_tree_strict(
+                software_root(target),
+                "software root",
+                max_file_bytes=SOFTWARE_MAX_BYTES,
+                max_paths=SOFTWARE_MAX_PATHS,
+            )
+            durable_unlink(software_entrypoint(target))
+            durable_unlink(software_stamp_path(target))
+            remove_empty_directory_if_empty(software_entrypoint(target).parent)
+            verify_removed_software_postcondition(target)
+        except BaseException:
+            restore_software_state(target, snapshot)
+            raise
+        return {
+            "changed": True,
+            "version": status.get("version"),
+            "command": KIMI_COMMAND,
+            "executable": str(software_entrypoint(target)),
+            "installed_tree": str(software_current(target)),
+            "target": str(validate_target(target, create=False)),
+        }
 
 
 def reject_managed_launch_overrides(child_args: list[str]) -> None:
@@ -2581,13 +3557,19 @@ def revalidate_launch_executable(
             fail(f"{label} mode must be 0700")
         digest = file_sha256_from_fd(fd, label)
         after = os.fstat(fd)
-        if after.st_dev != opened.st_dev or after.st_ino != opened.st_ino or after.st_size != opened.st_size:
+        if (
+            after.st_dev != opened.st_dev
+            or after.st_ino != opened.st_ino
+            or after.st_size != opened.st_size
+        ):
             fail(f"{label} changed while hashing")
 
         if expected_digest is None or expected_stamp_digest is None:
             stamp = read_software_stamp(target)
             if stamp is None:
-                fail("launch requires current target-owned Kimi Code binary: software stamp is missing")
+                fail(
+                    "launch requires current target-owned Kimi Code binary: software stamp is missing"
+                )
             if software_is_legacy(stamp):
                 fail("launch refuses legacy Bun software state; run migrate-cli first")
             platform_key = stamp.get("platform")
@@ -2612,8 +3594,9 @@ def revalidate_launch_executable(
         raise
 
 
-def prepare_launch_invocation_locked(target: Path, child_args: list[str]) -> LaunchInvocation:
-    host_platform_key = detect_official_platform()
+def prepare_launch_invocation_locked(
+    target: Path, child_args: list[str], *, host_platform_key: str
+) -> LaunchInvocation:
     status = status_payload(target)
     if not status["managed"]:
         fail("launch requires a managed target")
@@ -2661,17 +3644,25 @@ def prepare_launch_invocation_locked(target: Path, child_args: list[str]) -> Lau
     )
 
 
-def prepare_launch_invocation(target: Path, child_args: list[str]) -> tuple[list[str], dict[str, str]]:
+def prepare_launch_invocation(
+    target: Path, child_args: list[str]
+) -> tuple[list[str], dict[str, str]]:
     reject_managed_launch_overrides(child_args)
+    host_platform_key = detect_official_platform()
     with target_lock(target):
-        invocation = prepare_launch_invocation_locked(target, child_args)
+        invocation = prepare_launch_invocation_locked(
+            target, child_args, host_platform_key=host_platform_key
+        )
         return invocation.command, invocation.child_env
 
 
 def launch(target: Path, child_args: list[str]) -> int:
     reject_managed_launch_overrides(child_args)
+    host_platform_key = detect_official_platform()
     with target_lock(target):
-        invocation = prepare_launch_invocation_locked(target, child_args)
+        invocation = prepare_launch_invocation_locked(
+            target, child_args, host_platform_key=host_platform_key
+        )
         with protected_launch_path(invocation.target):
             executable = revalidate_launch_executable(
                 invocation.target,
@@ -2680,7 +3671,9 @@ def launch(target: Path, child_args: list[str]) -> int:
             )
             try:
                 try:
-                    completed = subprocess.run(invocation.command, env=invocation.child_env, check=False)
+                    completed = subprocess.run(
+                        invocation.command, env=invocation.child_env, check=False
+                    )
                 except FileNotFoundError:
                     fail("target-owned kimi executable is missing")
                 return int(completed.returncode)
@@ -2689,8 +3682,18 @@ def launch(target: Path, child_args: list[str]) -> int:
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    subparsers = parser.add_subparsers(dest="command", required=True)
+    raw_argv = sys.argv[1:] if argv is None else argv
+    json_errors = "--json" in raw_argv
+    parser = KimicodeArgumentParser(description=__doc__, json_errors=json_errors)
+    subparsers = parser.add_subparsers(
+        dest="command",
+        required=True,
+        parser_class=lambda *args, **kwargs: KimicodeArgumentParser(
+            *args,
+            json_errors=json_errors,
+            **kwargs,
+        ),
+    )
 
     list_parser = subparsers.add_parser("list")
     list_parser.add_argument("--json", action="store_true")
@@ -2704,7 +3707,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     software_status.add_argument("--target", required=True)
     software_status.add_argument("--json", action="store_true")
 
-    for name in ("install-cli", "update-cli", "migrate-cli"):
+    for name in ("install-cli", "update-cli", "migrate-cli", "remove-cli"):
         command = subparsers.add_parser(name)
         command.add_argument("--target", required=True)
         command.add_argument("--json", action="store_true")
@@ -2759,13 +3762,25 @@ def dispatch(args: argparse.Namespace) -> int:
         emit(software_status_payload(require_absolute_target(args.target)), as_json=args.json)
         return 0
     if args.command == "install-cli":
-        emit(install_or_update_software(require_absolute_target(args.target), mode="install"), as_json=args.json)
+        emit(
+            install_or_update_software(require_absolute_target(args.target), mode="install"),
+            as_json=args.json,
+        )
         return 0
     if args.command == "update-cli":
-        emit(install_or_update_software(require_absolute_target(args.target), mode="update"), as_json=args.json)
+        emit(
+            install_or_update_software(require_absolute_target(args.target), mode="update"),
+            as_json=args.json,
+        )
         return 0
     if args.command == "migrate-cli":
-        emit(install_or_update_software(require_absolute_target(args.target), mode="migrate"), as_json=args.json)
+        emit(
+            install_or_update_software(require_absolute_target(args.target), mode="migrate"),
+            as_json=args.json,
+        )
+        return 0
+    if args.command == "remove-cli":
+        emit(remove_software(require_absolute_target(args.target)), as_json=args.json)
         return 0
     if args.command == "plan":
         target = require_absolute_target(args.target)
@@ -2781,15 +3796,30 @@ def dispatch(args: argparse.Namespace) -> int:
         return 0
     if args.command == "install":
         target = require_absolute_target(args.target)
-        emit(write_setup(target, load_content_setup(args.setup), load_profile(args.profile)), as_json=args.json)
+        emit(
+            write_setup(target, load_content_setup(args.setup), load_profile(args.profile)),
+            as_json=args.json,
+        )
         return 0
     if args.command == "switch-profile":
         target = require_absolute_target(args.target)
         current = read_stamp(target)
         if current is not None and not stamp_is_current(current):
             fail("managed target uses a legacy setup schema; use migrate")
-        setup_id = DEFAULT_CONTENT_SETUP if current is None else str(current.get("content_setup_id", DEFAULT_CONTENT_SETUP))
-        emit(write_setup(target, load_content_setup(setup_id), load_profile(args.profile), require_existing=True), as_json=args.json)
+        setup_id = (
+            DEFAULT_CONTENT_SETUP
+            if current is None
+            else str(current.get("content_setup_id", DEFAULT_CONTENT_SETUP))
+        )
+        emit(
+            write_setup(
+                target,
+                load_content_setup(setup_id),
+                load_profile(args.profile),
+                require_existing=True,
+            ),
+            as_json=args.json,
+        )
         return 0
     if args.command == "migrate":
         target = require_absolute_target(args.target)
@@ -2821,8 +3851,8 @@ def dispatch(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_args(argv)
     try:
+        args = parse_args(argv)
         return dispatch(args)
     except KimicodeSetupError as exc:
         print(json.dumps({"error": str(exc)}, sort_keys=True))
