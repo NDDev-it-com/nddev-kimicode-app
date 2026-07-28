@@ -12,6 +12,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -94,10 +95,40 @@ FORBIDDEN_PUBLIC_VALIDATION_COMMAND_TERMS = ("py_compile", "compileall")
 KIMI_VERSION = "0.29.2"
 KIMI_PACKAGE = "@moonshot-ai/kimi-code"
 KIMI_COMMAND = "kimi"
+PYTHON_REQUIRES = ">=3.9"
 CONTENT_SETUPS = ["nddev-builder"]
 PROFILES = ["safe", "full-auto"]
 DEFAULT_PROFILE = "full-auto"
 MANIFEST_SHA256 = "6057703f6430964741198c81617737bcec917082d1ce4aadd7a1b8c29787ae9b"
+CODE_KIMI_MANIFEST_SIZE_BYTES = 929
+GITHUB_RELEASE_API_URL = (
+    "https://api.github.com/repos/MoonshotAI/kimi-code/releases/tags/"
+    "%40moonshot-ai%2Fkimi-code%400.29.2"
+)
+GITHUB_RELEASE_ASSET_NAMES = [
+    "kimi-code-darwin-arm64.zip",
+    "kimi-code-darwin-arm64.zip.sha256",
+    "kimi-code-darwin-x64.zip",
+    "kimi-code-darwin-x64.zip.sha256",
+    "kimi-code-linux-arm64.zip",
+    "kimi-code-linux-arm64.zip.sha256",
+    "kimi-code-linux-x64.zip",
+    "kimi-code-linux-x64.zip.sha256",
+    "kimi-code-win32-arm64.zip",
+    "kimi-code-win32-arm64.zip.sha256",
+    "kimi-code-win32-x64.zip",
+    "kimi-code-win32-x64.zip.sha256",
+    "manifest.json",
+]
+GITHUB_RELEASE_PLATFORM_ZIPS = [
+    name for name in GITHUB_RELEASE_ASSET_NAMES if name.endswith(".zip")
+]
+GITHUB_RELEASE_SHA256_SIDECARS = [
+    name for name in GITHUB_RELEASE_ASSET_NAMES if name.endswith(".zip.sha256")
+]
+GITHUB_RELEASE_MANIFEST_ASSET_SHA256 = (
+    "650a07b7b10f74eec20fb12b452f80b5319e6250563abf60acee97fc3aac9e12"
+)
 INSTALL_SCRIPT_SHA256 = "638927825e96825edbb563de5e0cb06f8a0551c53e026ade8b717b0f25cb83d2"
 INSTALL_POWERSHELL_SHA256 = "28a0473a7c56d41eae52cb4dbd3232f87a9133dd7af416a6a04dfbf7856fa9fc"
 INSTALL_POWERSHELL_SIZE_BYTES = 15891
@@ -206,6 +237,124 @@ def load_manager() -> Any:
     except Exception as exc:  # pragma: no cover - surfaced as validator failure.
         raise ValueError(f"could not import nddev_kimicode.py: {exc}") from exc
     return module
+
+
+def require_mapping(value: Any, expected_keys: set[str], label: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be an object")
+    if set(value) != expected_keys:
+        raise ValueError(f"{label} keys are not exact")
+    return value
+
+
+def validate_vendor_distribution_observations(value: Any, label: str) -> None:
+    observations = require_mapping(
+        value,
+        {"github_release_assets", "code_kimi_binary_manifest", "product_selections"},
+        label,
+    )
+    github = require_mapping(
+        observations["github_release_assets"],
+        {
+            "source_family",
+            "release_url",
+            "api_url",
+            "release_id",
+            "tag",
+            "asset_count",
+            "platform_zip_count",
+            "sha256_sidecar_count",
+            "manifest_count",
+            "assets",
+        },
+        f"{label}.github_release_assets",
+    )
+    if github.get("source_family") != "github-release-assets":
+        raise ValueError(f"{label}: GitHub source family mismatch")
+    if github.get("api_url") != GITHUB_RELEASE_API_URL:
+        raise ValueError(f"{label}: GitHub release API URL mismatch")
+    if (
+        github.get("asset_count") != 13
+        or github.get("platform_zip_count") != 6
+        or github.get("sha256_sidecar_count") != 6
+        or github.get("manifest_count") != 1
+    ):
+        raise ValueError(f"{label}: GitHub release asset counts are incomplete")
+    assets = github.get("assets")
+    if not isinstance(assets, dict) or sorted(assets) != GITHUB_RELEASE_ASSET_NAMES:
+        raise ValueError(f"{label}: GitHub release asset name set is incomplete")
+    for name, asset in assets.items():
+        if set(asset) != {"kind", "url", "size_bytes", "sha256"}:
+            raise ValueError(f"{label}: GitHub release asset keys are not exact for {name}")
+        if name in GITHUB_RELEASE_PLATFORM_ZIPS:
+            expected_kind = "platform-zip"
+        elif name in GITHUB_RELEASE_SHA256_SIDECARS:
+            expected_kind = "sha256-sidecar"
+        else:
+            expected_kind = "manifest"
+        if asset.get("kind") != expected_kind:
+            raise ValueError(f"{label}: GitHub release asset kind mismatch for {name}")
+        if not isinstance(asset.get("size_bytes"), int) or asset["size_bytes"] <= 0:
+            raise ValueError(f"{label}: GitHub release asset size is invalid for {name}")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(asset.get("sha256"))):
+            raise ValueError(f"{label}: GitHub release asset sha256 is invalid for {name}")
+    if assets["manifest.json"]["sha256"] != GITHUB_RELEASE_MANIFEST_ASSET_SHA256:
+        raise ValueError(f"{label}: GitHub release manifest asset digest mismatch")
+
+    code_kimi = require_mapping(
+        observations["code_kimi_binary_manifest"],
+        {
+            "source_family",
+            "manifest_url",
+            "manifest_sha256",
+            "manifest_size_bytes",
+            "version",
+            "tag",
+            "platform_count",
+            "observed_vendor_platforms",
+            "platforms",
+        },
+        f"{label}.code_kimi_binary_manifest",
+    )
+    if code_kimi.get("source_family") != "code.kimi.com-binary-manifest":
+        raise ValueError(f"{label}: code.kimi.com source family mismatch")
+    if (
+        code_kimi.get("manifest_sha256") != MANIFEST_SHA256
+        or code_kimi.get("manifest_size_bytes") != CODE_KIMI_MANIFEST_SIZE_BYTES
+        or code_kimi.get("version") != KIMI_VERSION
+        or code_kimi.get("platform_count") != 6
+    ):
+        raise ValueError(f"{label}: code.kimi.com manifest observation mismatch")
+    if code_kimi.get("observed_vendor_platforms") != OBSERVED_VENDOR_PLATFORMS:
+        raise ValueError(f"{label}: code.kimi.com observed platform set mismatch")
+    if code_kimi.get("platforms") != OBSERVED_BINARY_ARTIFACTS:
+        raise ValueError(f"{label}: code.kimi.com platform observations mismatch")
+
+    product = require_mapping(
+        observations["product_selections"],
+        {
+            "supported_hosts",
+            "host_to_vendor_platform",
+            "unsupported_host_categories",
+            "ubuntu_glibc_version_floor",
+            "ubuntu_glibc_version_floor_source",
+        },
+        f"{label}.product_selections",
+    )
+    if (
+        product.get("supported_hosts") != SUPPORTED_HOSTS
+        or product.get("host_to_vendor_platform") != HOST_TO_VENDOR_PLATFORM
+        or product.get("unsupported_host_categories") != UNSUPPORTED_HOST_CATEGORIES
+    ):
+        raise ValueError(f"{label}: product selections do not match canonical host support")
+    if product.get("ubuntu_glibc_version_floor") is not None:
+        raise ValueError(f"{label}: product selections must not invent an Ubuntu/glibc floor")
+    if product.get("ubuntu_glibc_version_floor_source") != "no-official-floor":
+        raise ValueError(f"{label}: product selections must record no-official-floor")
+
+    manager = load_manager()
+    if observations != manager.KIMI_VENDOR_DISTRIBUTION_OBSERVATIONS:
+        raise ValueError(f"{label}: vendor distribution observations differ from manager")
 
 
 def yaml_indent(line: str) -> int:
@@ -698,9 +847,15 @@ def validate_baseline(baseline: dict[str, Any]) -> None:
     release = baseline["release"]
     if release.get("npm_package") != KIMI_PACKAGE or release.get("npm_version") != KIMI_VERSION:
         raise ValueError("baseline release identity mismatch")
+    if release.get("github_release_api_url") != GITHUB_RELEASE_API_URL:
+        raise ValueError("baseline GitHub release API observation mismatch")
     if release.get("integrity") != NPM_INTEGRITY or release.get("shasum") != NPM_SHASUM:
         raise ValueError("baseline npm provenance mismatch")
     install = baseline["official_binary_install"]
+    if install.get("source_family") != "code.kimi.com-binary-manifest":
+        raise ValueError("official binary install must declare the code.kimi.com source family")
+    if install.get("manifest_size_bytes") != CODE_KIMI_MANIFEST_SIZE_BYTES:
+        raise ValueError("official binary manifest size mismatch")
     if install.get("install_script_sha256") != INSTALL_SCRIPT_SHA256:
         raise ValueError("install script digest mismatch")
     if (
@@ -730,6 +885,10 @@ def validate_baseline(baseline: dict[str, Any]) -> None:
         expected["checksum"] = artifact["sha256"]
         if entry != expected:
             raise ValueError(f"official binary observation mismatch for {key}")
+    validate_vendor_distribution_observations(
+        baseline.get("vendor_distribution_observations"),
+        "baseline vendor distribution observations",
+    )
     if baseline["permission_model"].get("full_auto") != "auto with plan mode disabled":
         raise ValueError("baseline must record full-auto native auto mapping")
     if baseline["native_surfaces"].get("direct_plugin_install_state_write") is not False:
@@ -866,7 +1025,20 @@ def extract_git_archive(destination: Path) -> None:
                 raise ValueError(f"git archive contains unsafe path {member.name}")
             if member.issym() or member.islnk():
                 raise ValueError(f"git archive contains link {member.name}")
-        archive.extractall(destination, members=members, filter="data")
+            output = destination / member_path
+            if member.isdir():
+                output.mkdir(mode=member.mode & 0o777, parents=True, exist_ok=True)
+                output.chmod(member.mode & 0o777)
+                continue
+            if not member.isfile():
+                raise ValueError(f"git archive contains unsupported entry {member.name}")
+            output.parent.mkdir(parents=True, exist_ok=True)
+            source = archive.extractfile(member)
+            if source is None:
+                raise ValueError(f"git archive could not read {member.name}")
+            with source, output.open("xb") as handle:
+                shutil.copyfileobj(source, handle)
+            output.chmod(member.mode & 0o777)
 
 
 def validate_archive_public_commands_cache_free() -> None:
@@ -879,6 +1051,8 @@ def validate_archive_public_commands_cache_free() -> None:
         validate_cache_residue_free(archive_root, label="clean git archive")
         env = os.environ.copy()
         env["PYTHONDONTWRITEBYTECODE"] = "1"
+        env["PYTHONPYCACHEPREFIX"] = str(Path(temp) / "pycache")
+        env["RUFF_CACHE_DIR"] = str(Path(temp) / "ruff-cache")
         env.pop("PYTHONPATH", None)
         for command in CACHE_FREE_PUBLIC_COMMANDS:
             completed = subprocess.run(
@@ -899,6 +1073,49 @@ def validate_archive_public_commands_cache_free() -> None:
                 archive_root,
                 label=f"archive public command {shlex.join(command)}",
             )
+
+
+def validate_system_python_compatibility() -> None:
+    system_python = Path("/usr/bin/python3")
+    if not system_python.is_file():
+        raise ValueError("required system Python is missing: /usr/bin/python3")
+    with tempfile.TemporaryDirectory(prefix=".tmp-kimicode-system-python-") as temp:
+        env = os.environ.copy()
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        env["PYTHONPYCACHEPREFIX"] = str(Path(temp) / "pycache")
+        env.pop("PYTHONPATH", None)
+        compile_script = """
+from pathlib import Path
+roots = [Path("cli-tools"), Path("builder")]
+for root in roots:
+    for path in sorted(root.rglob("*.py"), key=lambda item: item.as_posix()):
+        compile(path.read_text(encoding="utf-8"), path.as_posix(), "exec")
+"""
+        for command in (
+            [str(system_python), "-B", "-c", compile_script],
+            [
+                str(system_python),
+                "-B",
+                str(ROOT / "cli-tools" / "nddev_kimicode.py"),
+                "list",
+                "--json",
+            ],
+        ):
+            completed = subprocess.run(
+                command,
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=120,
+            )
+            if completed.returncode != 0:
+                details = (completed.stderr or completed.stdout).strip()
+                raise ValueError(
+                    f"system Python compatibility command failed ({shlex.join(command)}): {details}"
+                )
+        validate_cache_residue_free(ROOT, label="system Python compatibility")
 
 
 def validate_builder_toolkit() -> None:
@@ -966,6 +1183,8 @@ def validate_metadata() -> None:
     baseline = load_json(ROOT / "references" / "kimi-code-baseline.json")
     if build.get("build_version") != version or manifest.get("build_version") != version:
         raise ValueError("build version fields are not synchronized")
+    if build.get("python_requires") != PYTHON_REQUIRES:
+        raise ValueError("build/version.json must require Python >=3.9")
     if (
         build.get("kimi_code_cli_tested") != KIMI_VERSION
         or manifest.get("kimi_code_cli_tested") != KIMI_VERSION
@@ -1128,6 +1347,14 @@ def validate_metadata() -> None:
         raise ValueError("contract must preserve product-unsupported PowerShell surface")
     if manifest["software_install"].get("official_windows_install_surface") != expected_powershell:
         raise ValueError("manifest must preserve product-unsupported PowerShell surface")
+    validate_vendor_distribution_observations(
+        runtime_compatibility.get("vendor_distribution_observations"),
+        "contract vendor distribution observations",
+    )
+    validate_vendor_distribution_observations(
+        manifest["software_install"].get("vendor_distribution_observations"),
+        "manifest vendor distribution observations",
+    )
     if runtime_compatibility.get("observed_vendor_platforms") != OBSERVED_VENDOR_PLATFORMS:
         raise ValueError("contract must preserve observed vendor platform keys")
     if runtime_compatibility.get("observed_vendor_artifacts") != OBSERVED_BINARY_ARTIFACTS:
@@ -2079,6 +2306,7 @@ def validate_runtime_regressions() -> None:
     def run_isolated_runtime_regressions() -> None:
         validate_supported_host_detection_regression(manager)
         validate_json_argument_error_regression(manager)
+        validate_tree_snapshot_metadata_regression(manager)
         validate_setup_update_regression(manager)
         validate_status_launch_allowed_regression(manager)
         validate_corrupt_backup_regression(manager)
@@ -2118,6 +2346,79 @@ def validate_json_argument_error_regression(manager: Any) -> None:
             ) from exc
         if sorted(payload) != ["error"] or not isinstance(payload["error"], str):
             raise ValueError(f"JSON parser error shape is unstable for {argv}: {payload}")
+
+
+def expect_tree_snapshot_mismatch(manager: Any, root: Path, snapshot: Any, expected: str) -> None:
+    try:
+        manager.verify_tree_snapshot(
+            root,
+            snapshot,
+            "tree metadata regression",
+            max_file_bytes=manager.MANAGED_MAX_BYTES,
+            max_paths=16,
+        )
+    except manager.KimicodeSetupError as exc:
+        if expected not in str(exc):
+            raise ValueError(f"tree snapshot mismatch returned unstable error: {exc}") from exc
+        return
+    raise ValueError("tree snapshot accepted drifted metadata")
+
+
+def validate_tree_snapshot_metadata_regression(manager: Any) -> None:
+    with tempfile.TemporaryDirectory(prefix=".tmp-kimicode-tree-snapshot-") as temp:
+        root = Path(temp) / "tree"
+        nested = root / "nested"
+        nested.mkdir(parents=True, mode=0o700)
+        nested.chmod(0o700)
+        file_path = nested / "config.toml"
+        file_path.write_bytes(b"original\n")
+        file_path.chmod(0o600)
+        snapshot = manager.snapshot_tree(
+            root,
+            "tree metadata regression",
+            max_file_bytes=manager.MANAGED_MAX_BYTES,
+            max_paths=16,
+        )
+        file_entry = snapshot.entries["nested/config.toml"]
+        dir_entry = snapshot.entries["nested"]
+
+        info = file_path.lstat()
+        os.utime(file_path, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000))
+        expect_tree_snapshot_mismatch(manager, root, snapshot, "tree mismatch")
+        manager.restore_tree_snapshot(
+            root,
+            snapshot,
+            "tree metadata regression",
+            max_file_bytes=manager.MANAGED_MAX_BYTES,
+            max_paths=16,
+        )
+        restored_file_entry = manager.snapshot_tree(
+            root,
+            "tree metadata regression",
+            max_file_bytes=manager.MANAGED_MAX_BYTES,
+            max_paths=16,
+        ).entries["nested/config.toml"]
+        if restored_file_entry != file_entry:
+            raise ValueError("tree snapshot file metadata was not restored exactly")
+
+        info = nested.lstat()
+        os.utime(nested, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000))
+        expect_tree_snapshot_mismatch(manager, root, snapshot, "tree mismatch")
+        manager.restore_tree_snapshot(
+            root,
+            snapshot,
+            "tree metadata regression",
+            max_file_bytes=manager.MANAGED_MAX_BYTES,
+            max_paths=16,
+        )
+        restored_dir_entry = manager.snapshot_tree(
+            root,
+            "tree metadata regression",
+            max_file_bytes=manager.MANAGED_MAX_BYTES,
+            max_paths=16,
+        ).entries["nested"]
+        if restored_dir_entry != dir_entry:
+            raise ValueError("tree snapshot directory metadata was not restored exactly")
 
 
 def validate_strict_backup_restore_regression(manager: Any) -> None:
@@ -2917,6 +3218,7 @@ def main(argv: list[str] | None = None) -> int:
     validate_builder_toolkit()
     validate_public_validation_docs()
     validate_isolated_targets_outside_repo()
+    validate_system_python_compatibility()
     validate_archive_public_commands_cache_free()
     validate_runtime_regressions()
     validate_workflows()

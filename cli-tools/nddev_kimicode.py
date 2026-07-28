@@ -76,10 +76,94 @@ KIMI_COMMAND = "kimi"
 KIMI_GITHUB_RELEASE_URL = (
     "https://github.com/MoonshotAI/kimi-code/releases/tag/%40moonshot-ai/kimi-code%400.29.2"
 )
+KIMI_GITHUB_RELEASE_API_URL = (
+    "https://api.github.com/repos/MoonshotAI/kimi-code/releases/tags/"
+    "%40moonshot-ai%2Fkimi-code%400.29.2"
+)
 KIMI_GITHUB_RELEASE_ID = 360239506
 KIMI_GIT_TAG = "@moonshot-ai/kimi-code@0.29.2"
 KIMI_GIT_TAG_OBJECT = "57503c7c4d854f2c66ea32e10cba28b2c5715e9c"
 KIMI_GIT_COMMIT = "8a45f10eddbb35c317047e82e567cdb59a220b4f"
+KIMI_GITHUB_RELEASE_ASSETS = {
+    "kimi-code-darwin-arm64.zip": {
+        "kind": "platform-zip",
+        "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.29.2/kimi-code-darwin-arm64.zip",
+        "size_bytes": 50866147,
+        "sha256": "33fe10b7059ec39eecad8fc36b25059abc80c3d64d6d3975aa15c8fe183f5784",
+    },
+    "kimi-code-darwin-arm64.zip.sha256": {
+        "kind": "sha256-sidecar",
+        "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.29.2/kimi-code-darwin-arm64.zip.sha256",
+        "size_bytes": 93,
+        "sha256": "073f840e4bc81de3c12c638147cf0265f03e53bd11b63d4b9d708fe5a4b23192",
+    },
+    "kimi-code-darwin-x64.zip": {
+        "kind": "platform-zip",
+        "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.29.2/kimi-code-darwin-x64.zip",
+        "size_bytes": 51878729,
+        "sha256": "5e206bfe7251aa391b6700a53f6431dd2d9bf89e2693ab6eb440e20a332a72df",
+    },
+    "kimi-code-darwin-x64.zip.sha256": {
+        "kind": "sha256-sidecar",
+        "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.29.2/kimi-code-darwin-x64.zip.sha256",
+        "size_bytes": 91,
+        "sha256": "e8864e2529e91883de1ec3deb859e7b998634d7dcd0c54eb8d806372e8e7a6c1",
+    },
+    "kimi-code-linux-arm64.zip": {
+        "kind": "platform-zip",
+        "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.29.2/kimi-code-linux-arm64.zip",
+        "size_bytes": 54391806,
+        "sha256": "674622a6a274b7b84f2127a55c66b3744c0286fc37ae1ef20cf9c411042e63a8",
+    },
+    "kimi-code-linux-arm64.zip.sha256": {
+        "kind": "sha256-sidecar",
+        "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.29.2/kimi-code-linux-arm64.zip.sha256",
+        "size_bytes": 92,
+        "sha256": "6f05e3e7be7b5a16c7c739307afdb70dc23c00f72648f75e328217826591a16e",
+    },
+    "kimi-code-linux-x64.zip": {
+        "kind": "platform-zip",
+        "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.29.2/kimi-code-linux-x64.zip",
+        "size_bytes": 54418242,
+        "sha256": "20c184d8b0c0f8d7245a58eaf9c130be05878618e17e221eeefd352dcc011147",
+    },
+    "kimi-code-linux-x64.zip.sha256": {
+        "kind": "sha256-sidecar",
+        "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.29.2/kimi-code-linux-x64.zip.sha256",
+        "size_bytes": 90,
+        "sha256": "d77ca236c83e3d4d8af1d6fe5c11876a6c1c4a8257b50754a053d9d5f1e0e59e",
+    },
+    "kimi-code-win32-arm64.zip": {
+        "kind": "platform-zip",
+        "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.29.2/kimi-code-win32-arm64.zip",
+        "size_bytes": 42022575,
+        "sha256": "379be73d6b7fb9fbb582c3187e90251efddaf5a18caf16c77dfc5158c39b1a5c",
+    },
+    "kimi-code-win32-arm64.zip.sha256": {
+        "kind": "sha256-sidecar",
+        "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.29.2/kimi-code-win32-arm64.zip.sha256",
+        "size_bytes": 92,
+        "sha256": "2bd34e8feabf9c75cfb6abf75f52faca90a5fb34030ab77ce3de326528bd90cd",
+    },
+    "kimi-code-win32-x64.zip": {
+        "kind": "platform-zip",
+        "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.29.2/kimi-code-win32-x64.zip",
+        "size_bytes": 45840378,
+        "sha256": "0abd43b7428f493b2736ac3a4c8fc315e5fc4aa22dfb26dd764e1348e5b80718",
+    },
+    "kimi-code-win32-x64.zip.sha256": {
+        "kind": "sha256-sidecar",
+        "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.29.2/kimi-code-win32-x64.zip.sha256",
+        "size_bytes": 90,
+        "sha256": "1b9276869597b39f42184dac95999961c8d2a7fa08ecb59ebbe6b2d1b17775b0",
+    },
+    "manifest.json": {
+        "kind": "manifest",
+        "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.29.2/manifest.json",
+        "size_bytes": 1041,
+        "sha256": "650a07b7b10f74eec20fb12b452f80b5319e6250563abf60acee97fc3aac9e12",
+    },
+}
 KIMI_NPM_INTEGRITY = "sha512-NmID/2+rCbZXvnQIBZxZlLzeUjETjb1BPzfkUoVs6AhQv9xuGKLzQvcUJB+yksRZnWE+ikLMWyIn75rVfMMP4w=="
 KIMI_NPM_SHASUM = "9e8da7ca4e822048a28d1e12ff46c8ea5ecb23ac"
 KIMI_NPM_METADATA_SHA256 = "38afbc3a2ddc0c5d0e4b4a3067c3ad82f1a749ad917ec7adcaea1129cd0e036f"
@@ -180,6 +264,38 @@ KIMI_VENDOR_PLATFORM_TO_PRODUCT_HOST = {
     for product_host, vendor_platform in KIMI_PRODUCT_HOST_TO_VENDOR_PLATFORM.items()
 }
 KIMI_UBUNTU_GLIBC_VERSION_FLOOR: str | None = None
+KIMI_VENDOR_DISTRIBUTION_OBSERVATIONS = {
+    "github_release_assets": {
+        "source_family": "github-release-assets",
+        "release_url": KIMI_GITHUB_RELEASE_URL,
+        "api_url": KIMI_GITHUB_RELEASE_API_URL,
+        "release_id": KIMI_GITHUB_RELEASE_ID,
+        "tag": KIMI_GIT_TAG,
+        "asset_count": 13,
+        "platform_zip_count": 6,
+        "sha256_sidecar_count": 6,
+        "manifest_count": 1,
+        "assets": KIMI_GITHUB_RELEASE_ASSETS,
+    },
+    "code_kimi_binary_manifest": {
+        "source_family": "code.kimi.com-binary-manifest",
+        "manifest_url": KIMI_BINARY_MANIFEST_URL,
+        "manifest_sha256": KIMI_BINARY_MANIFEST_SHA256,
+        "manifest_size_bytes": 929,
+        "version": KIMI_PACKAGE_VERSION,
+        "tag": KIMI_GIT_TAG,
+        "platform_count": 6,
+        "observed_vendor_platforms": list(KIMI_OBSERVED_VENDOR_PLATFORMS),
+        "platforms": KIMI_OBSERVED_BINARY_PLATFORMS,
+    },
+    "product_selections": {
+        "supported_hosts": list(KIMI_SUPPORTED_PRODUCT_HOSTS),
+        "host_to_vendor_platform": KIMI_PRODUCT_HOST_TO_VENDOR_PLATFORM,
+        "unsupported_host_categories": list(KIMI_UNSUPPORTED_HOST_CATEGORIES),
+        "ubuntu_glibc_version_floor": KIMI_UBUNTU_GLIBC_VERSION_FLOOR,
+        "ubuntu_glibc_version_floor_source": "no-official-floor",
+    },
+}
 LINUX_OS_RELEASE_PATHS = (Path("/etc/os-release"), Path("/usr/lib/os-release"))
 LINUX_MUSL_MARKER_PATHS = (
     Path("/lib/libc.musl-x86_64.so.1"),
@@ -312,8 +428,13 @@ class DirectoryObjectSignature:
 
 @dataclass(frozen=True)
 class TreeEntry:
+    path: str
     kind: str
+    size: int
     mode: int
+    st_dev: int
+    st_ino: int
+    mtime_ns: int
     data: bytes | None = None
 
 
@@ -1800,6 +1921,21 @@ def tree_relative(path: Path, root: Path) -> str:
     return path.relative_to(root).as_posix()
 
 
+def tree_entry_from_stat(
+    relative: str, kind: str, info: os.stat_result, data: bytes | None = None
+) -> TreeEntry:
+    return TreeEntry(
+        path=relative,
+        kind=kind,
+        size=info.st_size,
+        mode=stat.S_IMODE(info.st_mode),
+        st_dev=info.st_dev,
+        st_ino=info.st_ino,
+        mtime_ns=info.st_mtime_ns,
+        data=data,
+    )
+
+
 def snapshot_tree(root: Path, label: str, *, max_file_bytes: int, max_paths: int) -> TreeSnapshot:
     root_info = stat_existing(root, label)
     if root_info is None:
@@ -1807,7 +1943,7 @@ def snapshot_tree(root: Path, label: str, *, max_file_bytes: int, max_paths: int
     if not stat.S_ISDIR(root_info.st_mode):
         fail(f"{label} must be a directory")
     entries: dict[str, TreeEntry] = {
-        ".": TreeEntry(kind="dir", mode=stat.S_IMODE(root_info.st_mode)),
+        ".": tree_entry_from_stat(".", "dir", root_info),
     }
     count = 1
     for path in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
@@ -1819,7 +1955,7 @@ def snapshot_tree(root: Path, label: str, *, max_file_bytes: int, max_paths: int
         if info is None:
             fail(f"{label} entry disappeared while snapshotting: {relative}")
         if stat.S_ISDIR(info.st_mode):
-            entries[relative] = TreeEntry(kind="dir", mode=stat.S_IMODE(info.st_mode))
+            entries[relative] = tree_entry_from_stat(relative, "dir", info)
             continue
         if not stat.S_ISREG(info.st_mode):
             fail(f"{label} entry must be a regular file or directory: {relative}")
@@ -1836,7 +1972,7 @@ def snapshot_tree(root: Path, label: str, *, max_file_bytes: int, max_paths: int
             fail(f"{label} entry changed while snapshotting: {relative}")
         if len(data) > max_file_bytes:
             fail(f"{label} entry is too large: {relative}")
-        entries[relative] = TreeEntry(kind="file", mode=stat.S_IMODE(info.st_mode), data=data)
+        entries[relative] = tree_entry_from_stat(relative, "file", opened, data)
     return TreeSnapshot(entries=entries)
 
 
@@ -1879,6 +2015,75 @@ def remove_tree_strict(root: Path, label: str, *, max_file_bytes: int, max_paths
     )
 
 
+def require_tree_entry_identity(path: Path, entry: TreeEntry, label: str) -> os.stat_result:
+    info = stat_existing(path, label)
+    if info is None:
+        fail(f"{label} rollback postcondition failed: missing original object")
+    assert info is not None
+    if entry.kind == "dir":
+        if not stat.S_ISDIR(info.st_mode):
+            fail(f"{label} rollback postcondition failed: not a directory")
+    elif entry.kind == "file":
+        if not stat.S_ISREG(info.st_mode):
+            fail(f"{label} rollback postcondition failed: not a regular file")
+        if info.st_nlink != 1:
+            fail(f"{label} rollback postcondition failed: hardlink count changed")
+    else:
+        fail(f"{label} rollback postcondition failed: unknown tree entry kind")
+    if info.st_dev != entry.st_dev or info.st_ino != entry.st_ino:
+        fail(f"{label} rollback postcondition failed: object identity mismatch")
+    return info
+
+
+def write_all(fd: int, data: bytes) -> None:
+    remaining = memoryview(data)
+    while remaining:
+        written = os.write(fd, remaining)
+        if written <= 0:
+            fail("short write while restoring tree object")
+        remaining = remaining[written:]
+
+
+def restore_file_tree_entry(path: Path, entry: TreeEntry, label: str) -> None:
+    if entry.data is None:
+        fail(f"{label} rollback snapshot is missing file data")
+    info = require_tree_entry_identity(path, entry, label)
+    if not (stat.S_IMODE(info.st_mode) & 0o200):
+        path.chmod(stat.S_IMODE(info.st_mode) | 0o200)
+    flags = os.O_WRONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        fail(f"{label} rollback file restore could not open original object: {exc}")
+    try:
+        opened = os.fstat(fd)
+        if opened.st_dev != entry.st_dev or opened.st_ino != entry.st_ino:
+            fail(f"{label} rollback postcondition failed: object identity mismatch")
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        write_all(fd, entry.data)
+        os.fchmod(fd, entry.mode)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    current = require_tree_entry_identity(path, entry, label)
+    os.utime(path, ns=(current.st_atime_ns, entry.mtime_ns))
+    fsync_directory(path.parent)
+
+
+def restore_directory_tree_entry(path: Path, entry: TreeEntry, label: str) -> None:
+    info = require_tree_entry_identity(path, entry, label)
+    if stat.S_IMODE(info.st_mode) != entry.mode:
+        path.chmod(entry.mode)
+    current = require_tree_entry_identity(path, entry, label)
+    os.utime(path, ns=(current.st_atime_ns, entry.mtime_ns))
+    fsync_directory(path)
+    if path.parent.exists():
+        fsync_directory(path.parent)
+
+
 def restore_tree_snapshot_once(
     root: Path, snapshot: TreeSnapshot, label: str, *, max_file_bytes: int, max_paths: int
 ) -> None:
@@ -1907,32 +2112,23 @@ def restore_tree_snapshot_once(
         key=lambda item: item[0].count("/"),
     ):
         path = root if relative == "." else root / relative
-        info = stat_existing(path, f"{label} directory {relative}")
-        if info is None:
-            path.mkdir(mode=entry.mode)
-            path.chmod(entry.mode)
-            if path.parent.exists():
-                fsync_directory(path.parent)
-            continue
-        if not stat.S_ISDIR(info.st_mode):
-            fail(f"{label} directory restore collided with non-directory: {relative}")
-        if stat.S_IMODE(info.st_mode) != entry.mode:
-            path.chmod(entry.mode)
-            fsync_directory(path.parent)
+        require_tree_entry_identity(path, entry, f"{label} directory {relative}")
     for relative, entry in sorted(
         ((relative, entry) for relative, entry in expected_entries.items() if entry.kind == "file"),
         key=lambda item: item[0].count("/"),
     ):
-        if entry.data is None:
-            fail(f"{label} file snapshot is missing data: {relative}")
-        restore_file_snapshot(
+        restore_file_tree_entry(
             root / relative,
-            FileSnapshot(data=entry.data, mode=entry.mode),
-            root,
+            entry,
             f"{label} file {relative}",
-            max_bytes=max_file_bytes,
-            default_mode=entry.mode,
         )
+    for relative, entry in sorted(
+        ((relative, entry) for relative, entry in expected_entries.items() if entry.kind == "dir"),
+        key=lambda item: item[0].count("/"),
+        reverse=True,
+    ):
+        path = root if relative == "." else root / relative
+        restore_directory_tree_entry(path, entry, f"{label} directory {relative}")
 
 
 def restore_tree_snapshot(
@@ -2796,6 +2992,12 @@ def validate_backup_slot_directory(path: Path, label: str) -> None:
 
 def commit_backup(target: Path, pending: PendingBackup) -> int:
     pool = backup_pool(target)
+    pool_snapshot = snapshot_tree(
+        pool,
+        "backup pool",
+        max_file_bytes=METADATA_MAX_BYTES,
+        max_paths=128,
+    )
     ensure_private_directory(pool, "backup pool")
     slot_dir = pool / str(pending.slot)
     stage_dir = pool / f".{pending.slot}.nddev-backup-stage.{os.getpid()}.{time.time_ns()}"
@@ -2846,8 +3048,22 @@ def commit_backup(target: Path, pending: PendingBackup) -> int:
             max_file_bytes=METADATA_MAX_BYTES,
             max_paths=64,
         )
+        restore_tree_snapshot(
+            pool,
+            pool_snapshot,
+            "backup pool",
+            max_file_bytes=METADATA_MAX_BYTES,
+            max_paths=128,
+        )
 
     def verify_backup_rolled_back() -> None:
+        verify_tree_snapshot(
+            pool,
+            pool_snapshot,
+            "backup pool",
+            max_file_bytes=METADATA_MAX_BYTES,
+            max_paths=128,
+        )
         verify_tree_snapshot(
             slot_dir,
             old_snapshot,
@@ -3522,27 +3738,7 @@ def _software_status_payload_locked(target: Path) -> dict[str, Any]:
             or binary.get("sha256") != expected_binary.get("checksum")
         ):
             drift.append("binary")
-        expected_source = {
-            "channel": "official-binary",
-            "install_script_url": KIMI_INSTALL_SCRIPT_URL,
-            "install_script_sha256": KIMI_INSTALL_SCRIPT_SHA256,
-            "install_powershell_url": KIMI_INSTALL_POWERSHELL_URL,
-            "install_powershell_sha256": KIMI_INSTALL_POWERSHELL_SHA256,
-            "install_powershell_size_bytes": KIMI_INSTALL_POWERSHELL_SIZE_BYTES,
-            "install_powershell_product_supported": False,
-            "latest_url": KIMI_LATEST_URL,
-            "manifest_url": KIMI_BINARY_MANIFEST_URL,
-            "manifest_sha256": KIMI_BINARY_MANIFEST_SHA256,
-            "github_release_url": KIMI_GITHUB_RELEASE_URL,
-            "github_release_id": KIMI_GITHUB_RELEASE_ID,
-            "git_tag": KIMI_GIT_TAG,
-            "git_tag_object": KIMI_GIT_TAG_OBJECT,
-            "git_commit": KIMI_GIT_COMMIT,
-            "npm_package": KIMI_PACKAGE_NAME,
-            "npm_integrity": KIMI_NPM_INTEGRITY,
-            "npm_shasum": KIMI_NPM_SHASUM,
-        }
-        if source != expected_source:
+        if source != software_source_contract():
             drift.append("source")
         entrypoint_digest = file_sha256(software_entrypoint(target), label="Kimi Code entrypoint")
         current_binary_digest = file_sha256(
@@ -3880,6 +4076,7 @@ def software_source_contract() -> dict[str, Any]:
         "manifest_url": KIMI_BINARY_MANIFEST_URL,
         "manifest_sha256": KIMI_BINARY_MANIFEST_SHA256,
         "github_release_url": KIMI_GITHUB_RELEASE_URL,
+        "github_release_api_url": KIMI_GITHUB_RELEASE_API_URL,
         "github_release_id": KIMI_GITHUB_RELEASE_ID,
         "git_tag": KIMI_GIT_TAG,
         "git_tag_object": KIMI_GIT_TAG_OBJECT,
@@ -3887,6 +4084,7 @@ def software_source_contract() -> dict[str, Any]:
         "npm_package": KIMI_PACKAGE_NAME,
         "npm_integrity": KIMI_NPM_INTEGRITY,
         "npm_shasum": KIMI_NPM_SHASUM,
+        "vendor_distribution_observations": KIMI_VENDOR_DISTRIBUTION_OBSERVATIONS,
     }
 
 
