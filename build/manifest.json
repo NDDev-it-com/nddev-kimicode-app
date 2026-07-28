@@ -321,6 +321,7 @@
     "external_target_bound_lifecycle_lock": true,
     "external_lock_persistent_inode": true,
     "external_lock_fixed_system_bootstrap_root": true,
+    "read_only_external_lock_residue_free": true,
     "internal_lock_persistent_inode": true,
     "internal_lock_directory_protected_while_held": true,
     "holds_lifecycle_lock_through_child": true,

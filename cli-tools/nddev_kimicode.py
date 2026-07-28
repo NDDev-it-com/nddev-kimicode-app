@@ -48,7 +48,6 @@ EXTERNAL_LOCK_ROOT_NAME = (
     f"{PRODUCT_NAME}.{os.getuid() if hasattr(os, 'getuid') else 'nouid'}.locks"
 )
 EXTERNAL_LOCK_NAMESPACE = f"{PRODUCT_NAME}:external-bootstrap:v1"
-EXTERNAL_PRODUCT_LOCK_CANONICAL_TARGET = f"{PRODUCT_NAME}:product-coordination:v1"
 EXTERNAL_LOCK_SUFFIX = "external.lock"
 CURRENT_SETUP_SCHEMA = 2
 LEGACY_SETUP_SCHEMA = 1
@@ -449,6 +448,7 @@ class FileObjectSignature:
 class DirectoryObjectSignature:
     st_dev: int
     st_ino: int
+    st_size: int
     mode: int
     atime_ns: int
     mtime_ns: int
@@ -808,17 +808,19 @@ def ensure_external_lock_root() -> Path:
     return root
 
 
+def external_lock_root_path(system_root: Path | None = None) -> Path:
+    root = fixed_system_temp_root() if system_root is None else system_root
+    return root / EXTERNAL_LOCK_ROOT_NAME
+
+
+def external_bootstrap_lock_path(external_lock_root: Path, canonical_target: str) -> Path:
+    digest = sha256_bytes(f"{EXTERNAL_LOCK_NAMESPACE}\0{canonical_target}".encode("utf-8"))
+    return external_lock_root / f"{digest}.{EXTERNAL_LOCK_SUFFIX}"
+
+
 def bootstrap_lock_path(target: Path, canonical_target: str | None = None) -> Path:
     canonical = canonical_target if canonical_target is not None else lock_canonical_target(target)
-    digest = sha256_bytes(f"{EXTERNAL_LOCK_NAMESPACE}\0{canonical}".encode("utf-8"))
-    return ensure_external_lock_root() / f"{digest}.{EXTERNAL_LOCK_SUFFIX}"
-
-
-def product_coordination_lock_path() -> Path:
-    digest = sha256_bytes(
-        f"{EXTERNAL_LOCK_NAMESPACE}\0{EXTERNAL_PRODUCT_LOCK_CANONICAL_TARGET}".encode("utf-8")
-    )
-    return ensure_external_lock_root() / f"{digest}.{EXTERNAL_LOCK_SUFFIX}"
+    return external_bootstrap_lock_path(ensure_external_lock_root(), canonical)
 
 
 def ensure_lock_parent(target: Path) -> Path:
@@ -849,7 +851,7 @@ def validate_lock_info(info: os.stat_result, label: str) -> None:
         fail(f"{label} mode must be 0600")
 
 
-def open_lock_file(path: Path, label: str) -> int:
+def open_lock_file(path: Path, label: str, *, create: bool = True) -> int | None:
     flags = os.O_RDWR
     if not hasattr(os, "O_NOFOLLOW"):
         fail("lifecycle lock requires O_NOFOLLOW support")
@@ -860,6 +862,8 @@ def open_lock_file(path: Path, label: str) -> int:
     try:
         fd = os.open(path, flags, OWNER_FILE_MODE)
     except FileNotFoundError:
+        if not create:
+            return None
         try:
             fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
         except FileExistsError:
@@ -912,10 +916,7 @@ def lock_payload(kind: str, canonical_target: str, path: Path) -> dict[str, Any]
 
 
 def read_lock_payload(fd: int, label: str) -> dict[str, Any] | None:
-    os.lseek(fd, 0, os.SEEK_SET)
-    data = os.read(fd, METADATA_MAX_BYTES + 1)
-    if len(data) > METADATA_MAX_BYTES:
-        fail(f"{label} metadata is too large")
+    data = read_lock_bytes(fd, label)
     if not data.strip():
         return None
     try:
@@ -925,6 +926,14 @@ def read_lock_payload(fd: int, label: str) -> dict[str, Any] | None:
     if not isinstance(value, dict):
         fail(f"{label} binding is malformed")
     return value
+
+
+def read_lock_bytes(fd: int, label: str) -> bytes:
+    os.lseek(fd, 0, os.SEEK_SET)
+    data = os.read(fd, METADATA_MAX_BYTES + 1)
+    if len(data) > METADATA_MAX_BYTES:
+        fail(f"{label} metadata is too large")
+    return data
 
 
 def validate_lock_binding(
@@ -945,8 +954,51 @@ def validate_lock_binding(
         fail(f"{label} is bound to a different lock path")
 
 
+def publish_lock_payload(fd: int, payload: bytes, label: str) -> None:
+    original = read_lock_bytes(fd, label)
+    original_info = os.fstat(fd)
+
+    def write_payload_once(data: bytes) -> None:
+        os.ftruncate(fd, 0)
+        os.lseek(fd, 0, os.SEEK_SET)
+        write_all(fd, data)
+        os.ftruncate(fd, len(data))
+        os.fsync(fd)
+
+    def restore_original_once() -> None:
+        write_payload_once(original)
+        os.fchmod(fd, stat.S_IMODE(original_info.st_mode))
+        os.utime(fd, ns=(original_info.st_atime_ns, original_info.st_mtime_ns))
+        os.fsync(fd)
+
+    def verify_original() -> None:
+        if read_lock_bytes(fd, label) != original:
+            fail(f"{label} binding rollback postcondition failed")
+        current = os.fstat(fd)
+        if (
+            current.st_dev != original_info.st_dev
+            or current.st_ino != original_info.st_ino
+            or stat.S_IMODE(current.st_mode) != stat.S_IMODE(original_info.st_mode)
+            or current.st_size != original_info.st_size
+            or current.st_mtime_ns != original_info.st_mtime_ns
+        ):
+            fail(f"{label} binding rollback metadata postcondition failed")
+
+    try:
+        write_payload_once(payload)
+    except BaseException:
+        restore_with_retries(
+            restore_original_once,
+            verify_original,
+            f"{label} binding publication",
+        )
+        raise
+
+
 def acquire_lock_file(path: Path, label: str, *, canonical_target: str, kind: str) -> int:
     fd = open_lock_file(path, label)
+    if fd is None:
+        fail(f"{label} is missing")
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as exc:
@@ -966,11 +1018,38 @@ def acquire_lock_file(path: Path, label: str, *, canonical_target: str, kind: st
         )
         desired_payload = lock_payload(kind, canonical_target, path)
         if current_payload != desired_payload:
-            payload = canonical_json(desired_payload)
-            os.ftruncate(fd, 0)
-            os.lseek(fd, 0, os.SEEK_SET)
-            os.write(fd, payload)
-            os.fsync(fd)
+            publish_lock_payload(fd, canonical_json(desired_payload), label)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        os.close(fd)
+        raise
+    return fd
+
+
+def acquire_existing_lock_file(
+    path: Path, label: str, *, canonical_target: str, kind: str
+) -> int | None:
+    fd = open_lock_file(path, label, create=False)
+    if fd is None:
+        return None
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        os.close(fd)
+        if exc.errno in {errno.EACCES, errno.EAGAIN}:
+            fail(f"target is locked: {path}")
+        fail(f"{label} could not be locked: {exc}")
+    try:
+        verify_lock_fd_path(fd, path, label)
+        current_payload = read_lock_payload(fd, label)
+        validate_lock_binding(
+            current_payload,
+            kind=kind,
+            canonical_target=canonical_target,
+            path=path,
+            label=label,
+        )
     except BaseException:
         with contextlib.suppress(OSError):
             fcntl.flock(fd, fcntl.LOCK_UN)
@@ -1012,29 +1091,110 @@ def restore_lock_snapshot(path: Path, snapshot: TreeSnapshot, label: str) -> Non
     )
 
 
-@contextlib.contextmanager
-def external_lifecycle_lock(target: Path):
-    lexical_target_identity(target)
-    external_lock_root = fixed_system_temp_root() / EXTERNAL_LOCK_ROOT_NAME
-    external_lock_snapshot = snapshot_tree(
-        external_lock_root,
-        "external lifecycle lock root",
+def verify_lock_snapshot(path: Path, snapshot: TreeSnapshot, label: str) -> None:
+    verify_tree_snapshot(
+        path,
+        snapshot,
+        label,
         max_file_bytes=METADATA_MAX_BYTES,
         max_paths=128,
     )
-    product_path = product_coordination_lock_path()
-    bootstrap_path: Path | None = None
+
+
+def restore_external_lock_namespace(
+    system_root: Path,
+    system_root_signature: DirectoryObjectSignature | None,
+    external_lock_root: Path,
+    external_lock_snapshot: TreeSnapshot,
+) -> None:
+    def restore_once() -> None:
+        restore_lock_snapshot(
+            external_lock_root,
+            external_lock_snapshot,
+            "external lifecycle lock root",
+        )
+        restore_directory_object_signature(
+            system_root,
+            system_root_signature,
+            "system bootstrap root",
+        )
+
+    def verify_restored() -> None:
+        verify_lock_snapshot(
+            external_lock_root,
+            external_lock_snapshot,
+            "external lifecycle lock root",
+        )
+        verify_directory_object_signature(
+            system_root,
+            system_root_signature,
+            "system bootstrap root",
+        )
+
+    restore_with_retries(
+        restore_once,
+        verify_restored,
+        "external lifecycle lock namespace",
+    )
+
+
+def acquire_product_coordination_lock(system_root: Path) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        fd = os.open(system_root, flags)
+    except OSError as exc:
+        fail(f"external product coordination lock could not be opened safely: {exc}")
+    try:
+        expected = stat_existing(system_root, "system bootstrap root")
+        if expected is None:
+            fail("system bootstrap root is missing")
+        opened = os.fstat(fd)
+        if not stat.S_ISDIR(opened.st_mode):
+            fail("external product coordination lock must be a directory")
+        if opened.st_dev != expected.st_dev or opened.st_ino != expected.st_ino:
+            fail("external product coordination lock changed while opening")
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError as exc:
+        os.close(fd)
+        if exc.errno in {errno.EACCES, errno.EAGAIN}:
+            fail(f"target is locked: {system_root}")
+        fail(f"external product coordination lock could not be locked: {exc}")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
+def release_product_coordination_lock(fd: int) -> None:
+    try:
+        with contextlib.suppress(OSError):
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    finally:
+        os.close(fd)
+
+
+@contextlib.contextmanager
+def external_lifecycle_lock(target: Path):
+    lexical_target_identity(target)
+    system_root = fixed_system_temp_root()
+    system_root_signature = directory_object_signature(system_root, "system bootstrap root")
     product_fd: int | None = None
+    external_lock_root = external_lock_root_path(system_root)
+    external_lock_snapshot = TreeSnapshot(entries=None)
+    snapshot_taken = False
+    bootstrap_path: Path | None = None
     bootstrap_fd: int | None = None
     restored = False
     failed = False
     try:
-        product_fd = acquire_lock_file(
-            product_path,
-            "external product coordination lock",
-            canonical_target=EXTERNAL_PRODUCT_LOCK_CANONICAL_TARGET,
-            kind="external-product",
+        product_fd = acquire_product_coordination_lock(system_root)
+        external_lock_snapshot = snapshot_tree(
+            external_lock_root,
+            "external lifecycle lock root",
+            max_file_bytes=METADATA_MAX_BYTES,
+            max_paths=128,
         )
+        snapshot_taken = True
         canonical_target_path = canonicalize_target_under_product_lock(target)
         canonical_target = str(canonical_target_path)
         bootstrap_path = bootstrap_lock_path(canonical_target_path, canonical_target)
@@ -1057,12 +1217,13 @@ def external_lifecycle_lock(target: Path):
             if product_fd is not None:
                 releasing_product_fd = product_fd
                 product_fd = None
-                release_lock_file(releasing_product_fd, product_path, remove_file=False)
-            if failed:
-                restore_lock_snapshot(
+                release_product_coordination_lock(releasing_product_fd)
+            if failed and snapshot_taken:
+                restore_external_lock_namespace(
+                    system_root,
+                    system_root_signature,
                     external_lock_root,
                     external_lock_snapshot,
-                    "external lifecycle lock root",
                 )
                 restored = True
     except BaseException:
@@ -1073,14 +1234,81 @@ def external_lifecycle_lock(target: Path):
         if product_fd is not None:
             releasing_product_fd = product_fd
             product_fd = None
-            release_lock_file(releasing_product_fd, product_path, remove_file=False)
-        if not restored:
-            restore_lock_snapshot(
+            release_product_coordination_lock(releasing_product_fd)
+        if not restored and snapshot_taken:
+            restore_external_lock_namespace(
+                system_root,
+                system_root_signature,
                 external_lock_root,
                 external_lock_snapshot,
-                "external lifecycle lock root",
             )
         raise
+
+
+@contextlib.contextmanager
+def readonly_external_lifecycle_lock(target: Path):
+    lexical_target_identity(target)
+    system_root = fixed_system_temp_root()
+    system_root_signature = directory_object_signature(system_root, "system bootstrap root")
+    external_lock_root = external_lock_root_path(system_root)
+    external_lock_snapshot = TreeSnapshot(entries=None)
+    snapshot_taken = False
+    product_fd: int | None = None
+    bootstrap_path: Path | None = None
+    bootstrap_fd: int | None = None
+    try:
+        product_fd = acquire_product_coordination_lock(system_root)
+        external_lock_snapshot = snapshot_tree(
+            external_lock_root,
+            "external lifecycle lock root",
+            max_file_bytes=METADATA_MAX_BYTES,
+            max_paths=128,
+        )
+        snapshot_taken = True
+        canonical_target_path = canonicalize_target_under_product_lock(target)
+        canonical_target = str(canonical_target_path)
+        bootstrap_path = external_bootstrap_lock_path(external_lock_root, canonical_target)
+        bootstrap_fd = acquire_existing_lock_file(
+            bootstrap_path,
+            "external bootstrap lifecycle lock",
+            canonical_target=canonical_target,
+            kind="external-bootstrap",
+        )
+        try:
+            yield canonical_target
+        finally:
+            if bootstrap_fd is not None:
+                releasing_bootstrap_fd = bootstrap_fd
+                bootstrap_fd = None
+                release_lock_file(releasing_bootstrap_fd, bootstrap_path, remove_file=False)
+            if product_fd is not None:
+                releasing_product_fd = product_fd
+                product_fd = None
+                release_product_coordination_lock(releasing_product_fd)
+    except BaseException:
+        if bootstrap_fd is not None and bootstrap_path is not None:
+            releasing_bootstrap_fd = bootstrap_fd
+            bootstrap_fd = None
+            release_lock_file(releasing_bootstrap_fd, bootstrap_path, remove_file=False)
+        if product_fd is not None:
+            releasing_product_fd = product_fd
+            product_fd = None
+            release_product_coordination_lock(releasing_product_fd)
+        if snapshot_taken:
+            restore_external_lock_namespace(
+                system_root,
+                system_root_signature,
+                external_lock_root,
+                external_lock_snapshot,
+            )
+        raise
+    if snapshot_taken:
+        restore_external_lock_namespace(
+            system_root,
+            system_root_signature,
+            external_lock_root,
+            external_lock_snapshot,
+        )
 
 
 @contextlib.contextmanager
@@ -1525,6 +1753,7 @@ def directory_object_signature(path: Path, label: str) -> DirectoryObjectSignatu
     return DirectoryObjectSignature(
         st_dev=info.st_dev,
         st_ino=info.st_ino,
+        st_size=info.st_size,
         mode=stat.S_IMODE(info.st_mode),
         atime_ns=info.st_atime_ns,
         mtime_ns=info.st_mtime_ns,
@@ -1567,6 +1796,7 @@ def verify_directory_object_signature(
     if (
         current.st_dev != signature.st_dev
         or current.st_ino != signature.st_ino
+        or current.st_size != signature.st_size
         or current.mode != signature.mode
         or current.mtime_ns != signature.mtime_ns
     ):
@@ -2724,7 +2954,7 @@ def _status_payload_locked(target: Path) -> dict[str, Any]:
 
 def status_payload(target: Path) -> dict[str, Any]:
     require_supported_product_host()
-    with external_lifecycle_lock(target) as canonical_target:
+    with readonly_external_lifecycle_lock(target) as canonical_target:
         return _status_payload_locked(Path(canonical_target))
 
 
@@ -3614,7 +3844,7 @@ def plan_payload(
     migrate_legacy: bool = False,
 ) -> dict[str, Any]:
     require_supported_product_host()
-    with external_lifecycle_lock(target) as canonical_target:
+    with readonly_external_lifecycle_lock(target) as canonical_target:
         return _plan_payload_locked(
             Path(canonical_target),
             setup,
@@ -3846,7 +4076,7 @@ def _software_status_payload_locked(target: Path) -> dict[str, Any]:
 
 def software_status_payload(target: Path) -> dict[str, Any]:
     require_supported_product_host()
-    with external_lifecycle_lock(target) as canonical_target:
+    with readonly_external_lifecycle_lock(target) as canonical_target:
         return _software_status_payload_locked(Path(canonical_target))
 
 
@@ -4621,6 +4851,95 @@ def verify_removed_software_postcondition(target: Path) -> None:
         fail("remove-cli postcondition failed: empty bin parent remains")
 
 
+def cleanup_file_object_sidecars(
+    transaction: FileObjectTransaction,
+    *,
+    staged: bool,
+    rollback: bool,
+) -> None:
+    for change in transaction.changes:
+        if staged and change.staged_path is not None:
+            durable_unlink(change.staged_path)
+        if rollback and change.rollback_path is not None:
+            durable_unlink(change.rollback_path)
+
+
+def cleanup_tree_object_sidecars(
+    transaction: TreeObjectTransaction,
+    *,
+    staged: bool,
+    rollback: bool,
+) -> None:
+    for change in transaction.changes:
+        if staged and change.staged_path is not None:
+            remove_path_strict(
+                change.staged_path,
+                change.label,
+                max_file_bytes=change.max_file_bytes,
+                max_paths=change.max_paths,
+            )
+        if rollback and change.rollback_path is not None:
+            remove_path_strict(
+                change.rollback_path,
+                change.label,
+                max_file_bytes=change.max_file_bytes,
+                max_paths=change.max_paths,
+            )
+
+
+def commit_remove_software_transactions(
+    target: Path,
+    file_transaction: FileObjectTransaction,
+    tree_transaction: TreeObjectTransaction,
+) -> None:
+    def cleanup_once() -> None:
+        cleanup_file_object_sidecars(file_transaction, staged=True, rollback=False)
+        cleanup_tree_object_sidecars(tree_transaction, staged=True, rollback=False)
+        verify_removed_software_postcondition(target)
+        cleanup_tree_object_sidecars(tree_transaction, staged=False, rollback=True)
+        cleanup_file_object_sidecars(file_transaction, staged=False, rollback=True)
+
+    def verify_clean() -> None:
+        verify_removed_software_postcondition(target)
+        tree_transaction.verify_clean()
+        file_transaction.verify_no_residue()
+
+    restore_with_retries(
+        cleanup_once,
+        verify_clean,
+        "remove-cli software object cleanup",
+    )
+
+
+def rollback_software_transactions(
+    target: Path,
+    snapshot: SoftwareStateSnapshot,
+    file_transaction: FileObjectTransaction,
+    tree_transaction: TreeObjectTransaction,
+    original_error: BaseException,
+) -> None:
+    errors: list[str] = []
+    for label, operation in (
+        ("managed file objects", file_transaction.rollback),
+        ("software tree objects", tree_transaction.rollback),
+        ("software state", lambda: restore_software_state(target, snapshot)),
+    ):
+        try:
+            operation()
+        except BaseException as exc:
+            errors.append(f"{label}: {type(exc).__name__}: {exc}")
+    try:
+        verify_software_state(target, snapshot)
+    except BaseException as exc:
+        errors.append(f"software state postcondition: {type(exc).__name__}: {exc}")
+    if errors:
+        fail(
+            "remove-cli rollback failed after best-effort restoration: "
+            f"original={type(original_error).__name__}: {original_error}; "
+            + "; ".join(errors)
+        )
+
+
 def remove_software(target: Path) -> dict[str, Any]:
     require_supported_product_host()
     with target_lock(target):
@@ -4675,12 +4994,15 @@ def remove_software(target: Path) -> dict[str, Any]:
             tree_transaction.apply_once()
             file_transaction.apply_once()
             verify_removed_software_postcondition(target)
-            file_transaction.commit()
-            tree_transaction.commit()
-        except BaseException:
-            file_transaction.rollback()
-            tree_transaction.rollback()
-            restore_software_state(target, snapshot)
+            commit_remove_software_transactions(target, file_transaction, tree_transaction)
+        except BaseException as exc:
+            rollback_software_transactions(
+                target,
+                snapshot,
+                file_transaction,
+                tree_transaction,
+                exc,
+            )
             raise
         return {
             "changed": True,

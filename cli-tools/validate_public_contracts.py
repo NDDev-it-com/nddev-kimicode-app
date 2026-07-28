@@ -1243,6 +1243,8 @@ def validate_metadata() -> None:
         raise ValueError("contract must state launch uses an external target-bound lifecycle lock")
     if contract["safety"].get("launch_keeps_external_lock_file_persistent") is not True:
         raise ValueError("contract must state external lifecycle lock files are persistent")
+    if contract["safety"].get("read_only_commands_leave_no_external_lock_residue") is not True:
+        raise ValueError("contract must state read-only commands leave no external lock residue")
     if contract["safety"].get("launch_keeps_internal_lock_file_persistent") is not True:
         raise ValueError("contract must state internal lifecycle lock files are persistent")
     if contract["safety"].get("launch_protects_internal_lock_directory_while_held") is not True:
@@ -1291,10 +1293,18 @@ def validate_metadata() -> None:
         raise ValueError("contract must document the stable flock mechanism")
     if "fixed validated system temp root" not in runtime_launch.get("lifecycle_lock_mechanism", ""):
         raise ValueError("contract must document fixed bootstrap root")
-    if "all persistent lock files are never unlinked" not in runtime_launch.get(
+    if "target-bound persistent lock files are never unlinked" not in runtime_launch.get(
         "lifecycle_lock_mechanism", ""
     ):
         raise ValueError("contract must document persistent lifecycle lock files")
+    if "marker-free external product coordination" not in runtime_launch.get(
+        "lifecycle_lock_mechanism", ""
+    ):
+        raise ValueError("contract must document marker-free product coordination")
+    if "successful read-only status, plan, and software-status restore" not in runtime_launch.get(
+        "lifecycle_lock_mechanism", ""
+    ):
+        raise ValueError("contract must document read-only namespace restoration")
     if "restored to 0700" not in runtime_launch.get("lifecycle_lock_mechanism", ""):
         raise ValueError("contract must document internal lock directory restoration")
     if "dedicated target-local lock directory" not in runtime_launch.get(
@@ -1308,6 +1318,7 @@ def validate_metadata() -> None:
         "external_target_bound_lifecycle_lock": True,
         "external_lock_persistent_inode": True,
         "external_lock_fixed_system_bootstrap_root": True,
+        "read_only_external_lock_residue_free": True,
         "internal_lock_persistent_inode": True,
         "internal_lock_directory_protected_while_held": True,
         "holds_lifecycle_lock_through_child": True,
@@ -1511,6 +1522,8 @@ def bootstrap_tree_snapshot(
             stat.S_IMODE(info.st_mode),
             info.st_uid,
             info.st_nlink,
+            info.st_size,
+            info.st_mtime_ns,
         )
     ]
     try:
@@ -1543,6 +1556,8 @@ def bootstrap_tree_snapshot(
                 stat.S_IMODE(child_info.st_mode),
                 child_info.st_uid,
                 child_info.st_nlink,
+                child_info.st_size,
+                child_info.st_mtime_ns,
             )
         else:
             child_entry = (
@@ -1553,8 +1568,78 @@ def bootstrap_tree_snapshot(
                 stat.S_IMODE(child_info.st_mode),
                 child_info.st_uid,
                 child_info.st_nlink,
+                child_info.st_size,
+                child_info.st_mtime_ns,
             )
         entries.append(child_entry)
+    return tuple(entries)
+
+
+def fixed_namespace_snapshot(manager: Any) -> tuple[Any, ...]:
+    system_root = manager.fixed_system_temp_root()
+    info = system_root.lstat()
+    return (
+        (
+            "system-root",
+            info.st_dev,
+            info.st_ino,
+            stat.S_IMODE(info.st_mode),
+            info.st_size,
+            info.st_mtime_ns,
+        ),
+        bootstrap_tree_snapshot(manager, system_root=system_root),
+    )
+
+
+def path_graph_snapshot(root: Path, *, max_file_bytes: int) -> tuple[Any, ...]:
+    try:
+        root_info = root.lstat()
+    except FileNotFoundError:
+        return (("<absent>",),)
+    paths = [root]
+    if stat.S_ISDIR(root_info.st_mode):
+        paths.extend(sorted(root.rglob("*"), key=lambda item: item.as_posix()))
+    entries: list[tuple[Any, ...]] = []
+    for path in paths:
+        info = path.lstat()
+        relative = "." if path == root else path.relative_to(root).as_posix()
+        if stat.S_ISDIR(info.st_mode):
+            entries.append(
+                (
+                    relative,
+                    "dir",
+                    info.st_dev,
+                    info.st_ino,
+                    stat.S_IMODE(info.st_mode),
+                    info.st_size,
+                    info.st_mtime_ns,
+                )
+            )
+        elif stat.S_ISREG(info.st_mode):
+            entries.append(
+                (
+                    relative,
+                    "file",
+                    info.st_dev,
+                    info.st_ino,
+                    stat.S_IMODE(info.st_mode),
+                    info.st_size,
+                    info.st_mtime_ns,
+                    file_sha256_no_follow(path, max_file_bytes),
+                )
+            )
+        else:
+            entries.append(
+                (
+                    relative,
+                    "other",
+                    info.st_dev,
+                    info.st_ino,
+                    stat.S_IMODE(info.st_mode),
+                    info.st_size,
+                    info.st_mtime_ns,
+                )
+            )
     return tuple(entries)
 
 
@@ -1782,6 +1867,134 @@ def validate_external_lock_binding_regression(manager: Any) -> None:
         second_info = lock_path.lstat()
         if (first_info.st_dev, first_info.st_ino) != (second_info.st_dev, second_info.st_ino):
             raise ValueError("external bootstrap lock inode changed across normal release")
+    finally:
+        temp.cleanup()
+
+
+def validate_lock_binding_publication_rollback_regression(manager: Any) -> None:
+    temp, target = make_isolated_target("external-lock-partial-")
+    try:
+        canonical_target = manager.lock_canonical_target(target)
+        lock_path = manager.bootstrap_lock_path(target, canonical_target)
+        previous_payload = manager.lock_payload("external-bootstrap", canonical_target, lock_path)
+        previous_payload["pid"] = -1
+        previous_bytes = manager.canonical_json(previous_payload)
+        lock_path.write_bytes(previous_bytes)
+        lock_path.chmod(0o600)
+        before = fixed_namespace_snapshot(manager)
+        original_write = manager.os.write
+        faulted = False
+
+        def partial_write(fd: int, data: Any) -> int:
+            nonlocal faulted
+            chunk = bytes(data)
+            if not faulted and chunk.startswith(b"{"):
+                faulted = True
+                original_write(fd, chunk[:7])
+                raise OSError("injected partial external lock marker write")
+            return original_write(fd, data)
+
+        manager.os.write = partial_write
+        try:
+            try:
+                manager.acquire_lock_file(
+                    lock_path,
+                    "external bootstrap lifecycle lock",
+                    canonical_target=canonical_target,
+                    kind="external-bootstrap",
+                )
+            except OSError as exc:
+                if "injected partial external lock marker write" not in str(exc):
+                    raise ValueError(f"external lock partial write returned {exc}") from exc
+            else:
+                raise ValueError("external lock partial write unexpectedly succeeded")
+        finally:
+            manager.os.write = original_write
+        if not faulted:
+            raise ValueError("external lock marker write fault was not injected")
+        if lock_path.read_bytes() != previous_bytes:
+            raise ValueError("external lock marker partial write did not restore previous bytes")
+        if fixed_namespace_snapshot(manager) != before:
+            raise ValueError("external lock marker partial write did not restore exact namespace")
+    finally:
+        temp.cleanup()
+
+
+def validate_readonly_external_lock_no_residue_regression(manager: Any) -> None:
+    temp, target = make_isolated_target("readonly-lock-")
+    try:
+        setup = manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP)
+        profile = manager.load_profile(manager.DEFAULT_PROFILE)
+        before_absent = fixed_namespace_snapshot(manager)
+        manager.status_payload(target)
+        manager.plan_payload(target, setup, profile)
+        manager.software_status_payload(target)
+        if fixed_namespace_snapshot(manager) != before_absent:
+            raise ValueError("read-only commands changed the fixed namespace for absent target")
+
+        manager.write_setup(target, setup, profile)
+        before_existing = fixed_namespace_snapshot(manager)
+        manager.status_payload(target)
+        manager.plan_payload(target, setup, profile)
+        manager.software_status_payload(target)
+        if fixed_namespace_snapshot(manager) != before_existing:
+            raise ValueError("read-only commands changed the fixed namespace for existing target")
+    finally:
+        temp.cleanup()
+
+
+def validate_remove_cli_late_tree_cleanup_regression(manager: Any) -> None:
+    temp, target = make_isolated_target("remove-tree-cleanup-")
+    try:
+        manager.write_setup(
+            target,
+            manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP),
+            manager.load_profile(manager.DEFAULT_PROFILE),
+        )
+        write_stub_software(manager, target)
+        before = (
+            path_graph_snapshot(target, max_file_bytes=manager.SOFTWARE_MAX_BYTES),
+            fixed_namespace_snapshot(manager),
+        )
+        original_cleanup_tree = manager.cleanup_tree_object_sidecars
+
+        def fail_tree_cleanup_once(
+            transaction: Any, *, staged: bool, rollback: bool
+        ) -> None:
+            if rollback:
+                raise OSError("injected late tree cleanup failure")
+            original_cleanup_tree(transaction, staged=staged, rollback=rollback)
+
+        manager.cleanup_tree_object_sidecars = fail_tree_cleanup_once
+        try:
+            try:
+                manager.remove_software(target)
+            except manager.KimicodeSetupError as exc:
+                if "injected late tree cleanup failure" not in str(exc):
+                    raise ValueError(f"remove-cli late cleanup returned {exc}") from exc
+            else:
+                raise ValueError("remove-cli late tree cleanup failure unexpectedly succeeded")
+        finally:
+            manager.cleanup_tree_object_sidecars = original_cleanup_tree
+        after = (
+            path_graph_snapshot(target, max_file_bytes=manager.SOFTWARE_MAX_BYTES),
+            fixed_namespace_snapshot(manager),
+        )
+        if after != before:
+            raise ValueError("remove-cli late tree cleanup failure did not restore exact graph")
+        residue_fragments = (
+            ".nddev.tmp.",
+            ".nddev.rollback.",
+            ".nddev-kimicode-software-stage.",
+            ".nddev-kimicode-software-rollback.",
+        )
+        residue = [
+            path.as_posix()
+            for path in target.parent.rglob("*")
+            if any(fragment in path.name for fragment in residue_fragments)
+        ]
+        if residue:
+            raise ValueError(f"remove-cli late tree cleanup left residue: {residue}")
     finally:
         temp.cleanup()
 
@@ -2197,20 +2410,20 @@ def validate_runtime_regressions() -> None:
     for required in (
         "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)",
         'kind="external-bootstrap"',
-        'kind="external-product"',
         'kind="target-internal"',
         "EXTERNAL_LOCK_NAMESPACE",
-        "EXTERNAL_PRODUCT_LOCK_CANONICAL_TARGET",
         "ensure_external_lock_root()",
+        "acquire_product_coordination_lock(system_root)",
+        "release_product_coordination_lock(releasing_product_fd)",
+        "acquire_existing_lock_file(",
+        "publish_lock_payload(fd, canonical_json(desired_payload), label)",
         "protect_internal_lock_parent(lock_parent)",
         "validate_lock_binding",
         "binding is malformed",
         "current.st_dev != info.st_dev or current.st_ino != info.st_ino",
         "bootstrap_lock_path(canonical_target_path, canonical_target)",
-        "product_coordination_lock_path()",
         "canonicalize_target_under_product_lock(target)",
         "release_lock_file(releasing_bootstrap_fd, bootstrap_path, remove_file=False)",
-        "release_lock_file(releasing_product_fd, product_path, remove_file=False)",
         "release_lock_file(releasing_internal_fd, internal_path, remove_file=False)",
         "os.fchmod(fd, 0o500)",
         "lock_path(target).parent",
@@ -2238,7 +2451,7 @@ def validate_runtime_regressions() -> None:
     external_start = manager_text.index("def external_lifecycle_lock")
     external_end = manager_text.index("def target_lock")
     external_source = manager_text[external_start:external_end]
-    product_index = external_source.index("product_fd = acquire_lock_file(")
+    product_index = external_source.index("product_fd = acquire_product_coordination_lock(")
     canonicalize_index = external_source.index(
         "canonical_target_path = canonicalize_target_under_product_lock(target)"
     )
@@ -2266,19 +2479,19 @@ def validate_runtime_regressions() -> None:
     status_start = manager_text.index("def status_payload")
     status_end = manager_text.index("def stamp_managed_paths")
     status_source = manager_text[status_start:status_end]
-    if "with external_lifecycle_lock(target)" not in status_source:
+    if "with readonly_external_lifecycle_lock(target)" not in status_source:
         raise ValueError("status must read target state under external lifecycle coordination")
     software_start = manager_text.index("def software_status_payload")
     software_end = manager_text.index("def parse_os_release")
     software_source = manager_text[software_start:software_end]
-    if "with external_lifecycle_lock(target)" not in software_source:
+    if "with readonly_external_lifecycle_lock(target)" not in software_source:
         raise ValueError(
             "software-status must read target state under external lifecycle coordination"
         )
     plan_start = manager_text.index("def plan_payload")
     plan_end = manager_text.index("def software_root")
     plan_source = manager_text[plan_start:plan_end]
-    if "with external_lifecycle_lock(target)" not in plan_source:
+    if "with readonly_external_lifecycle_lock(target)" not in plan_source:
         raise ValueError("plan must read target state under external lifecycle coordination")
     install_start = manager_text.index("def install_or_update_software")
     install_end = manager_text.index("def verify_removed_software_postcondition")
@@ -2333,9 +2546,12 @@ def validate_runtime_regressions() -> None:
         validate_strict_backup_restore_regression(manager)
         validate_remove_cli_regression(manager)
         validate_lifecycle_lock_order_regression(manager)
+        validate_readonly_external_lock_no_residue_regression(manager)
         validate_unsupported_command_preflight_regression(manager)
         validate_unsupported_launch_preflight_regression(manager)
         validate_external_lock_binding_regression(manager)
+        validate_lock_binding_publication_rollback_regression(manager)
+        validate_remove_cli_late_tree_cleanup_regression(manager)
         validate_external_lock_persistent_inode_handover_regression(manager)
         validate_internal_lock_persistent_inode_handover_regression(manager)
         validate_launch_lock_concurrency_regression(manager)
@@ -2520,7 +2736,9 @@ def validate_lifecycle_lock_order_regression(manager: Any) -> None:
         target_parent = target.parent
         backup_root = manager.backup_pool(target)
         events: list[str] = []
+        real_product_lock = manager.acquire_product_coordination_lock
         real_acquire = manager.acquire_lock_file
+        real_acquire_existing = manager.acquire_existing_lock_file
         real_stat_existing = manager.stat_existing
         real_reject_symlink_ancestors = manager.reject_symlink_ancestors
 
@@ -2534,16 +2752,30 @@ def validate_lifecycle_lock_order_regression(manager: Any) -> None:
                 or backup_root in candidate.parents
             )
 
+        def traced_product_lock(path: Path) -> int:
+            events.append("product-lock")
+            return real_product_lock(path)
+
         def traced_acquire_lock_file(
             path: Path, label: str, *, canonical_target: str, kind: str
         ) -> int:
-            if kind == "external-product":
-                events.append("product-lock")
-            elif kind == "external-bootstrap":
+            if kind == "external-bootstrap":
                 events.append("external-lock")
             elif kind == "target-internal":
                 events.append("target-lock")
             return real_acquire(
+                path,
+                label,
+                canonical_target=canonical_target,
+                kind=kind,
+            )
+
+        def traced_acquire_existing_lock_file(
+            path: Path, label: str, *, canonical_target: str, kind: str
+        ) -> int | None:
+            if kind == "external-bootstrap":
+                events.append("external-lock")
+            return real_acquire_existing(
                 path,
                 label,
                 canonical_target=canonical_target,
@@ -2560,21 +2792,25 @@ def validate_lifecycle_lock_order_regression(manager: Any) -> None:
                 events.append("target-ancestor-check")
             real_reject_symlink_ancestors(path)
 
+        manager.acquire_product_coordination_lock = traced_product_lock
         manager.acquire_lock_file = traced_acquire_lock_file
+        manager.acquire_existing_lock_file = traced_acquire_existing_lock_file
         manager.stat_existing = traced_stat_existing
         manager.reject_symlink_ancestors = traced_reject_symlink_ancestors
         try:
-            manager.status_payload(target)
-            status_events = list(events)
-            events.clear()
             manager.write_setup(
                 target,
                 manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP),
                 manager.load_profile(manager.DEFAULT_PROFILE),
             )
             write_events = list(events)
+            events.clear()
+            manager.status_payload(target)
+            status_events = list(events)
         finally:
+            manager.acquire_product_coordination_lock = real_product_lock
             manager.acquire_lock_file = real_acquire
+            manager.acquire_existing_lock_file = real_acquire_existing
             manager.stat_existing = real_stat_existing
             manager.reject_symlink_ancestors = real_reject_symlink_ancestors
 
