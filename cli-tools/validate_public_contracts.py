@@ -1237,6 +1237,8 @@ def validate_metadata() -> None:
         raise ValueError("contract must state full-auto has no active blocking hooks")
     if contract["safety"].get("launch_holds_lifecycle_lock") is not True:
         raise ValueError("contract must state launch holds the lifecycle lock")
+    if contract["safety"].get("launch_uses_external_product_coordination_lock") is not True:
+        raise ValueError("contract must state launch uses external product coordination")
     if contract["safety"].get("launch_uses_external_target_bound_lifecycle_lock") is not True:
         raise ValueError("contract must state launch uses an external target-bound lifecycle lock")
     if contract["safety"].get("launch_keeps_external_lock_file_persistent") is not True:
@@ -1289,7 +1291,7 @@ def validate_metadata() -> None:
         raise ValueError("contract must document the stable flock mechanism")
     if "fixed validated system temp root" not in runtime_launch.get("lifecycle_lock_mechanism", ""):
         raise ValueError("contract must document fixed bootstrap root")
-    if "both lock files are never unlinked" not in runtime_launch.get(
+    if "all persistent lock files are never unlinked" not in runtime_launch.get(
         "lifecycle_lock_mechanism", ""
     ):
         raise ValueError("contract must document persistent lifecycle lock files")
@@ -1302,6 +1304,7 @@ def validate_metadata() -> None:
     if "same-UID" not in runtime_launch.get("same_uid_tamper_boundary", ""):
         raise ValueError("contract must document the same-UID tamper boundary")
     if manifest.get("runtime_launch") != {
+        "external_product_coordination_lock": True,
         "external_target_bound_lifecycle_lock": True,
         "external_lock_persistent_inode": True,
         "external_lock_fixed_system_bootstrap_root": True,
@@ -2194,15 +2197,20 @@ def validate_runtime_regressions() -> None:
     for required in (
         "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)",
         'kind="external-bootstrap"',
+        'kind="external-product"',
         'kind="target-internal"',
         "EXTERNAL_LOCK_NAMESPACE",
+        "EXTERNAL_PRODUCT_LOCK_CANONICAL_TARGET",
         "ensure_external_lock_root()",
         "protect_internal_lock_parent(lock_parent)",
         "validate_lock_binding",
         "binding is malformed",
         "current.st_dev != info.st_dev or current.st_ino != info.st_ino",
-        "bootstrap_lock_path(target, canonical_target)",
+        "bootstrap_lock_path(canonical_target_path, canonical_target)",
+        "product_coordination_lock_path()",
+        "canonicalize_target_under_product_lock(target)",
         "release_lock_file(releasing_bootstrap_fd, bootstrap_path, remove_file=False)",
+        "release_lock_file(releasing_product_fd, product_path, remove_file=False)",
         "release_lock_file(releasing_internal_fd, internal_path, remove_file=False)",
         "os.fchmod(fd, 0o500)",
         "lock_path(target).parent",
@@ -2222,11 +2230,23 @@ def validate_runtime_regressions() -> None:
     if "        target,\n" in protected_source:
         raise ValueError("launch protection must not chmod the managed target root")
     canonical_start = manager_text.index("def lock_canonical_target")
-    canonical_end = manager_text.index("def fixed_system_temp_root")
+    canonical_end = manager_text.index("def canonicalize_target_under_product_lock")
     canonical_source = manager_text[canonical_start:canonical_end]
     for forbidden in ("resolve(", "stat_existing(", "reject_symlink_ancestors("):
         if forbidden in canonical_source:
             raise ValueError("lock canonical target must remain lexical before external locking")
+    external_start = manager_text.index("def external_lifecycle_lock")
+    external_end = manager_text.index("def target_lock")
+    external_source = manager_text[external_start:external_end]
+    product_index = external_source.index("product_fd = acquire_lock_file(")
+    canonicalize_index = external_source.index(
+        "canonical_target_path = canonicalize_target_under_product_lock(target)"
+    )
+    bootstrap_index = external_source.index("bootstrap_fd = acquire_lock_file(")
+    if not product_index < canonicalize_index < bootstrap_index:
+        raise ValueError(
+            "external lifecycle lock must product-coordinate before canonical target locking"
+        )
     target_lock_start = manager_text.index("def target_lock")
     target_lock_end = manager_text.index("def safe_target_path")
     target_lock_source = manager_text[target_lock_start:target_lock_end]
@@ -2234,7 +2254,7 @@ def validate_runtime_regressions() -> None:
         raise ValueError("target lock must acquire external lifecycle coordination first")
     external_index = target_lock_source.index("with external_lifecycle_lock(target)")
     for fragment in (
-        "reject_symlink_ancestors(target)",
+        "target = Path(canonical_target)",
         'stat_existing(target.parent, "target parent")',
         'stat_existing(target, "target")',
         "snapshot_tree(\n                    lock_parent_path(target)",
@@ -2517,7 +2537,9 @@ def validate_lifecycle_lock_order_regression(manager: Any) -> None:
         def traced_acquire_lock_file(
             path: Path, label: str, *, canonical_target: str, kind: str
         ) -> int:
-            if kind == "external-bootstrap":
+            if kind == "external-product":
+                events.append("product-lock")
+            elif kind == "external-bootstrap":
                 events.append("external-lock")
             elif kind == "target-internal":
                 events.append("target-lock")
@@ -2557,17 +2579,21 @@ def validate_lifecycle_lock_order_regression(manager: Any) -> None:
             manager.reject_symlink_ancestors = real_reject_symlink_ancestors
 
         for label, observed in (("status", status_events), ("write_setup", write_events)):
+            if "product-lock" not in observed:
+                raise ValueError(f"{label} did not acquire product lifecycle coordination")
             if "external-lock" not in observed:
                 raise ValueError(f"{label} did not acquire an external lifecycle lock")
+            if observed.index("product-lock") > observed.index("external-lock"):
+                raise ValueError(f"{label} target-bound lock preceded product coordination")
             first_target = next(
                 (index for index, event in enumerate(observed) if event.startswith("target-")),
                 None,
             )
             if first_target is None:
                 raise ValueError(f"{label} did not exercise target-state observation")
-            if observed.index("external-lock") > first_target:
+            if observed.index("product-lock") > first_target:
                 raise ValueError(
-                    f"{label} observed target state before external lifecycle lock: {observed}"
+                    f"{label} observed target state before product lifecycle lock: {observed}"
                 )
     finally:
         temp.cleanup()

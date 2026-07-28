@@ -23,7 +23,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -48,6 +48,7 @@ EXTERNAL_LOCK_ROOT_NAME = (
     f"{PRODUCT_NAME}.{os.getuid() if hasattr(os, 'getuid') else 'nouid'}.locks"
 )
 EXTERNAL_LOCK_NAMESPACE = f"{PRODUCT_NAME}:external-bootstrap:v1"
+EXTERNAL_PRODUCT_LOCK_CANONICAL_TARGET = f"{PRODUCT_NAME}:product-coordination:v1"
 EXTERNAL_LOCK_SUFFIX = "external.lock"
 CURRENT_SETUP_SCHEMA = 2
 LEGACY_SETUP_SCHEMA = 1
@@ -394,11 +395,38 @@ class KimicodeArgumentParser(argparse.ArgumentParser):
 @dataclass
 class DirectoryTransaction:
     created: list[Path]
+    directory_signatures: dict[Path, DirectoryObjectSignature | None] = field(
+        default_factory=dict
+    )
+
+    def remember_directory(self, path: Path, label: str) -> None:
+        if path not in self.directory_signatures:
+            self.directory_signatures[path] = directory_object_signature(path, label)
+
+    def cleanup_once(self) -> None:
+        for path in reversed(self.created):
+            if path_exists_no_follow(path):
+                durable_rmdir(path)
+        for path, signature in sorted(
+            self.directory_signatures.items(),
+            key=lambda item: len(item[0].parts),
+            reverse=True,
+        ):
+            restore_directory_object_signature(path, signature, str(path))
+
+    def verify_clean(self) -> None:
+        for path in self.created:
+            if path_exists_no_follow(path):
+                fail(f"created directory rollback residue remains: {path}")
+        for path, signature in self.directory_signatures.items():
+            verify_directory_object_signature(path, signature, str(path))
 
     def cleanup(self) -> None:
-        for path in reversed(self.created):
-            with contextlib.suppress(OSError):
-                path.rmdir()
+        restore_with_retries(
+            self.cleanup_once,
+            self.verify_clean,
+            "created directory cleanup",
+        )
 
 
 @dataclass(frozen=True)
@@ -450,6 +478,7 @@ class SoftwareStateSnapshot:
     stamp: FileSnapshot
     entrypoint_parent_present: bool
     entrypoint_parent_mode: int | None
+    entrypoint_parent_signature: DirectoryObjectSignature | None
 
 
 @dataclass(frozen=True)
@@ -656,6 +685,7 @@ def ensure_directory_chain(path: Path, transaction: DirectoryTransaction, label:
             fail(f"{label} must not contain symlink ancestors: {current}")
         if not stat.S_ISDIR(info.st_mode):
             fail(f"{label} must be a real directory: {current}")
+        transaction.remember_directory(current, f"{label} existing directory")
         break
     for directory in reversed(missing):
         directory.mkdir(mode=OWNER_DIRECTORY_MODE)
@@ -669,7 +699,6 @@ def validate_target(
     create: bool = False,
     transaction: DirectoryTransaction | None = None,
 ) -> Path:
-    reject_symlink_ancestors(target)
     parent = target.parent
     info = stat_existing(target, "target")
     if info is None:
@@ -681,6 +710,7 @@ def validate_target(
         try:
             ensure_directory_chain(parent, local_transaction, "target parent")
             require_owner_private_directory(parent, "target parent")
+            local_transaction.remember_directory(parent, "target parent")
             target.mkdir(mode=OWNER_DIRECTORY_MODE)
             target.chmod(OWNER_DIRECTORY_MODE)
             local_transaction.created.append(target)
@@ -700,7 +730,6 @@ def validate_target(
 
 
 def canonical_target_readonly(target: Path) -> str:
-    reject_symlink_ancestors(target)
     info = stat_existing(target, "target")
     if info is not None and not stat.S_ISDIR(info.st_mode):
         fail("target must be a real directory")
@@ -725,6 +754,17 @@ def lock_path(target: Path) -> Path:
 
 def lock_canonical_target(target: Path) -> str:
     return lexical_target_identity(target)
+
+
+def canonicalize_target_under_product_lock(target: Path) -> Path:
+    lexical_target_identity(target)
+    info = stat_existing(target, "target")
+    if info is not None and not stat.S_ISDIR(info.st_mode):
+        fail("target must be a real directory")
+    canonical = target.resolve(strict=False)
+    lexical_target_identity(canonical)
+    reject_symlink_ancestors(canonical)
+    return canonical
 
 
 def fixed_system_temp_root() -> Path:
@@ -771,6 +811,13 @@ def ensure_external_lock_root() -> Path:
 def bootstrap_lock_path(target: Path, canonical_target: str | None = None) -> Path:
     canonical = canonical_target if canonical_target is not None else lock_canonical_target(target)
     digest = sha256_bytes(f"{EXTERNAL_LOCK_NAMESPACE}\0{canonical}".encode("utf-8"))
+    return ensure_external_lock_root() / f"{digest}.{EXTERNAL_LOCK_SUFFIX}"
+
+
+def product_coordination_lock_path() -> Path:
+    digest = sha256_bytes(
+        f"{EXTERNAL_LOCK_NAMESPACE}\0{EXTERNAL_PRODUCT_LOCK_CANONICAL_TARGET}".encode("utf-8")
+    )
     return ensure_external_lock_root() / f"{digest}.{EXTERNAL_LOCK_SUFFIX}"
 
 
@@ -967,7 +1014,7 @@ def restore_lock_snapshot(path: Path, snapshot: TreeSnapshot, label: str) -> Non
 
 @contextlib.contextmanager
 def external_lifecycle_lock(target: Path):
-    canonical_target = lock_canonical_target(target)
+    lexical_target_identity(target)
     external_lock_root = fixed_system_temp_root() / EXTERNAL_LOCK_ROOT_NAME
     external_lock_snapshot = snapshot_tree(
         external_lock_root,
@@ -975,11 +1022,22 @@ def external_lifecycle_lock(target: Path):
         max_file_bytes=METADATA_MAX_BYTES,
         max_paths=128,
     )
-    bootstrap_path = bootstrap_lock_path(target, canonical_target)
+    product_path = product_coordination_lock_path()
+    bootstrap_path: Path | None = None
+    product_fd: int | None = None
     bootstrap_fd: int | None = None
     restored = False
     failed = False
     try:
+        product_fd = acquire_lock_file(
+            product_path,
+            "external product coordination lock",
+            canonical_target=EXTERNAL_PRODUCT_LOCK_CANONICAL_TARGET,
+            kind="external-product",
+        )
+        canonical_target_path = canonicalize_target_under_product_lock(target)
+        canonical_target = str(canonical_target_path)
+        bootstrap_path = bootstrap_lock_path(canonical_target_path, canonical_target)
         bootstrap_fd = acquire_lock_file(
             bootstrap_path,
             "external bootstrap lifecycle lock",
@@ -996,6 +1054,10 @@ def external_lifecycle_lock(target: Path):
                 releasing_bootstrap_fd = bootstrap_fd
                 bootstrap_fd = None
                 release_lock_file(releasing_bootstrap_fd, bootstrap_path, remove_file=False)
+            if product_fd is not None:
+                releasing_product_fd = product_fd
+                product_fd = None
+                release_lock_file(releasing_product_fd, product_path, remove_file=False)
             if failed:
                 restore_lock_snapshot(
                     external_lock_root,
@@ -1004,10 +1066,14 @@ def external_lifecycle_lock(target: Path):
                 )
                 restored = True
     except BaseException:
-        if bootstrap_fd is not None:
+        if bootstrap_fd is not None and bootstrap_path is not None:
             releasing_bootstrap_fd = bootstrap_fd
             bootstrap_fd = None
             release_lock_file(releasing_bootstrap_fd, bootstrap_path, remove_file=False)
+        if product_fd is not None:
+            releasing_product_fd = product_fd
+            product_fd = None
+            release_lock_file(releasing_product_fd, product_path, remove_file=False)
         if not restored:
             restore_lock_snapshot(
                 external_lock_root,
@@ -1027,7 +1093,7 @@ def target_lock(target: Path, *, create_parent: bool = False):
     target_creation_snapshot: TreeSnapshot | None = None
     try:
         with external_lifecycle_lock(target) as canonical_target:
-            reject_symlink_ancestors(target)
+            target = Path(canonical_target)
             parent_info = stat_existing(target.parent, "target parent")
             if create_parent:
                 ensure_directory_chain(target.parent, transaction, "target parent")
@@ -1040,6 +1106,7 @@ def target_lock(target: Path, *, create_parent: bool = False):
             target_info = stat_existing(target, "target")
             if target_info is None and create_parent:
                 target_creation_snapshot = TreeSnapshot(entries=None)
+                transaction.remember_directory(target.parent, "target parent")
                 target.mkdir(mode=OWNER_DIRECTORY_MODE)
                 target.chmod(OWNER_DIRECTORY_MODE)
                 transaction.created.append(target)
@@ -2657,8 +2724,8 @@ def _status_payload_locked(target: Path) -> dict[str, Any]:
 
 def status_payload(target: Path) -> dict[str, Any]:
     require_supported_product_host()
-    with external_lifecycle_lock(target):
-        return _status_payload_locked(target)
+    with external_lifecycle_lock(target) as canonical_target:
+        return _status_payload_locked(Path(canonical_target))
 
 
 def stamp_managed_paths(stamp: dict[str, Any] | None) -> tuple[str, ...]:
@@ -3547,9 +3614,9 @@ def plan_payload(
     migrate_legacy: bool = False,
 ) -> dict[str, Any]:
     require_supported_product_host()
-    with external_lifecycle_lock(target):
+    with external_lifecycle_lock(target) as canonical_target:
         return _plan_payload_locked(
-            target,
+            Path(canonical_target),
             setup,
             profile_data,
             migrate_legacy=migrate_legacy,
@@ -3779,8 +3846,8 @@ def _software_status_payload_locked(target: Path) -> dict[str, Any]:
 
 def software_status_payload(target: Path) -> dict[str, Any]:
     require_supported_product_host()
-    with external_lifecycle_lock(target):
-        return _software_status_payload_locked(target)
+    with external_lifecycle_lock(target) as canonical_target:
+        return _software_status_payload_locked(Path(canonical_target))
 
 
 def parse_os_release(text: str, *, source: str) -> LinuxDistribution:
@@ -4164,6 +4231,7 @@ def snapshot_software_state(target: Path) -> SoftwareStateSnapshot:
         entrypoint_parent_mode=stat.S_IMODE(parent_info.st_mode)
         if parent_info is not None
         else None,
+        entrypoint_parent_signature=directory_object_signature(entrypoint_parent, "bin"),
     )
 
 
@@ -4189,6 +4257,7 @@ def verify_software_state(target: Path, snapshot: SoftwareStateSnapshot) -> None
     )
     parent = software_entrypoint(target).parent
     parent_info = stat_existing(parent, "bin")
+    verify_directory_object_signature(parent, snapshot.entrypoint_parent_signature, "bin")
     if snapshot.entrypoint_parent_present:
         if parent_info is None:
             fail("software rollback postcondition failed: bin parent is missing")
@@ -4237,6 +4306,7 @@ def restore_software_state_once(target: Path, snapshot: SoftwareStateSnapshot) -
             fsync_directory(parent.parent)
     else:
         remove_empty_directory_if_empty(parent)
+    restore_directory_object_signature(parent, snapshot.entrypoint_parent_signature, "bin")
     verify_software_state(target, snapshot)
 
 
@@ -4340,6 +4410,7 @@ def stage_binary_copy(source: Path, destination: Path, target: Path) -> tuple[Pa
 
 def create_transient_directory(parent: Path, name: str, label: str) -> Path:
     require_owner_private_directory(parent, f"{label} parent")
+    parent_signature = directory_object_signature(parent, f"{label} parent")
     path = parent / f"{name}{os.getpid()}.{time.time_ns()}"
     created = False
     try:
@@ -4355,17 +4426,43 @@ def create_transient_directory(parent: Path, name: str, label: str) -> Path:
                 max_file_bytes=SOFTWARE_MAX_BYTES,
                 max_paths=SOFTWARE_MAX_PATHS + 16,
             )
+        restore_directory_object_signature(parent, parent_signature, f"{label} parent")
         raise
     return path
 
 
-def cleanup_transient_directory(path: Path, label: str) -> None:
-    restore_tree_snapshot(
-        path,
-        TreeSnapshot(entries=None),
+def cleanup_transient_directory(
+    path: Path,
+    label: str,
+    *,
+    parent_signature: DirectoryObjectSignature | None = None,
+) -> None:
+    def cleanup_once() -> None:
+        restore_tree_snapshot_once(
+            path,
+            TreeSnapshot(entries=None),
+            label,
+            max_file_bytes=SOFTWARE_MAX_BYTES,
+            max_paths=SOFTWARE_MAX_PATHS + 16,
+        )
+        if parent_signature is not None:
+            restore_directory_object_signature(path.parent, parent_signature, f"{label} parent")
+
+    def verify_clean() -> None:
+        verify_tree_snapshot(
+            path,
+            TreeSnapshot(entries=None),
+            label,
+            max_file_bytes=SOFTWARE_MAX_BYTES,
+            max_paths=SOFTWARE_MAX_PATHS + 16,
+        )
+        if parent_signature is not None:
+            verify_directory_object_signature(path.parent, parent_signature, f"{label} parent")
+
+    restore_with_retries(
+        cleanup_once,
+        verify_clean,
         label,
-        max_file_bytes=SOFTWARE_MAX_BYTES,
-        max_paths=SOFTWARE_MAX_PATHS + 16,
     )
 
 
@@ -4420,6 +4517,7 @@ def install_or_update_software(target: Path, *, mode: str) -> dict[str, Any]:
                 fail("migrate-cli requires legacy target-owned Bun software state")
 
             parent = target.parent
+            stage_parent_signature = directory_object_signature(parent, "software stage parent")
             stage_root = create_transient_directory(
                 parent,
                 f".{target.name}{SOFTWARE_STAGE_FRAGMENT}.",
@@ -4480,14 +4578,22 @@ def install_or_update_software(target: Path, *, mode: str) -> dict[str, Any]:
                 tree_transaction.apply_once()
                 file_transaction.apply_once()
                 verify_installed_software_postcondition(target, stamp=stamp, binary=binary)
-                cleanup_transient_directory(stage_root, "software stage")
-                tree_transaction.commit()
+                cleanup_transient_directory(
+                    stage_root,
+                    "software stage",
+                    parent_signature=stage_parent_signature,
+                )
                 file_transaction.commit()
+                tree_transaction.commit()
             except BaseException:
                 file_transaction.rollback()
                 tree_transaction.rollback()
                 restore_software_state(target, snapshot)
-                cleanup_transient_directory(stage_root, "software stage")
+                cleanup_transient_directory(
+                    stage_root,
+                    "software stage",
+                    parent_signature=stage_parent_signature,
+                )
                 raise
             return {
                 "changed": True,
@@ -4569,8 +4675,8 @@ def remove_software(target: Path) -> dict[str, Any]:
             tree_transaction.apply_once()
             file_transaction.apply_once()
             verify_removed_software_postcondition(target)
-            tree_transaction.commit()
             file_transaction.commit()
+            tree_transaction.commit()
         except BaseException:
             file_transaction.rollback()
             tree_transaction.rollback()

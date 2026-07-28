@@ -317,6 +317,7 @@
     "ubuntu_glibc_version_floor_source": "no-official-floor"
   },
   "runtime_launch": {
+    "external_product_coordination_lock": true,
     "external_target_bound_lifecycle_lock": true,
     "external_lock_persistent_inode": true,
     "external_lock_fixed_system_bootstrap_root": true,
