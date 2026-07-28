@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import errno
 import hashlib
 import importlib.util
 import io
@@ -1243,8 +1244,29 @@ def validate_metadata() -> None:
         raise ValueError("contract must state launch uses an external target-bound lifecycle lock")
     if contract["safety"].get("launch_keeps_external_lock_file_persistent") is not True:
         raise ValueError("contract must state external lifecycle lock files are persistent")
-    if contract["safety"].get("read_only_commands_leave_no_external_lock_residue") is not True:
-        raise ValueError("contract must state read-only commands leave no external lock residue")
+    if contract["safety"].get("external_anchor_publication_no_replace") is not True:
+        raise ValueError("contract must state external anchors use no-replace publication")
+    if contract["safety"].get("external_anchor_final_path_commit_point") is not True:
+        raise ValueError("contract must state final-path anchor publication is the commit point")
+    if contract["safety"].get("external_product_anchor_monotonic") is not True:
+        raise ValueError("contract must state product anchors are monotonic")
+    if contract["safety"].get("external_target_anchor_monotonic") is not True:
+        raise ValueError("contract must state target anchors are monotonic")
+    if contract["safety"].get("read_only_commands_do_not_create_external_anchors") is not True:
+        raise ValueError("contract must state read-only commands do not create external anchors")
+    if contract["safety"].get("read_only_cold_no_anchor_double_check") is not True:
+        raise ValueError("contract must state cold read-only double-checks anchor absence")
+    cleanup_safety_keys = (
+        "cleanup_journal_two_phase_no_replace",
+        "cleanup_journal_path_safe_relative_tombstones",
+        "cleanup_pending_read_only_report_only",
+        "cleanup_pending_malformed_state_fails_closed",
+        "cleanup_pending_mutations_drain_first",
+        "cleanup_pending_noop_is_not_true_noop",
+    )
+    for key in cleanup_safety_keys:
+        if contract["safety"].get(key) is not True:
+            raise ValueError(f"contract must state cleanup journal safety key: {key}")
     if contract["safety"].get("launch_keeps_internal_lock_file_persistent") is not True:
         raise ValueError("contract must state internal lifecycle lock files are persistent")
     if contract["safety"].get("launch_protects_internal_lock_directory_while_held") is not True:
@@ -1287,24 +1309,32 @@ def validate_metadata() -> None:
         "portable_handoff_mechanism", ""
     ):
         raise ValueError("contract must not overclaim portable exact-inode execution")
-    if "external bootstrap lock" not in runtime_launch.get("lifecycle_lock_scope", "").lower():
+    if "product handoff" not in runtime_launch.get("lifecycle_lock_scope", "").lower():
         raise ValueError("contract must document external lock acquisition order")
     if "fcntl.flock" not in runtime_launch.get("lifecycle_lock_mechanism", ""):
         raise ValueError("contract must document the stable flock mechanism")
-    if "fixed validated system temp root" not in runtime_launch.get("lifecycle_lock_mechanism", ""):
+    if "fixed validated product/UID 0700 system temp root" not in runtime_launch.get(
+        "lifecycle_lock_mechanism", ""
+    ):
         raise ValueError("contract must document fixed bootstrap root")
-    if "target-bound persistent lock files are never unlinked" not in runtime_launch.get(
-        "lifecycle_lock_mechanism", ""
+    mechanism = runtime_launch.get("lifecycle_lock_mechanism", "")
+    for required in (
+        "monotonic 0600 external product anchor named global.lock",
+        "monotonic 0600 canonical target anchor",
+        "complete fsynced no-replace binding publication",
+        "final-path visibility is the rollback commit point",
+        "parent-directory sync completes crash durability",
+        "never truncated, rebound, replaced, or unlinked",
+        "Read-only status, plan, and software-status do not create anchors",
+        "immutable complete cleanup journal",
+        "relative tombstone names",
+        "no-replace publication",
+        "read-only report-only cleanup_pending state",
+        "malformed-state fail-closed",
+        "mutation-only drain",
     ):
-        raise ValueError("contract must document persistent lifecycle lock files")
-    if "marker-free external product coordination" not in runtime_launch.get(
-        "lifecycle_lock_mechanism", ""
-    ):
-        raise ValueError("contract must document marker-free product coordination")
-    if "successful read-only status, plan, and software-status restore" not in runtime_launch.get(
-        "lifecycle_lock_mechanism", ""
-    ):
-        raise ValueError("contract must document read-only namespace restoration")
+        if required not in mechanism:
+            raise ValueError(f"contract must document lifecycle mechanism: {required}")
     if "restored to 0700" not in runtime_launch.get("lifecycle_lock_mechanism", ""):
         raise ValueError("contract must document internal lock directory restoration")
     if "dedicated target-local lock directory" not in runtime_launch.get(
@@ -1316,9 +1346,22 @@ def validate_metadata() -> None:
     if manifest.get("runtime_launch") != {
         "external_product_coordination_lock": True,
         "external_target_bound_lifecycle_lock": True,
+        "external_product_anchor_persistent_inode": True,
+        "external_target_anchor_persistent_inode": True,
         "external_lock_persistent_inode": True,
         "external_lock_fixed_system_bootstrap_root": True,
-        "read_only_external_lock_residue_free": True,
+        "external_anchor_no_replace_publication": True,
+        "external_anchor_final_path_commit_point": True,
+        "external_anchor_hardlink_publication": False,
+        "read_only_external_anchor_no_create": True,
+        "read_only_cold_no_anchor_double_check": True,
+        "different_targets_concurrent_after_product_handoff": True,
+        "cleanup_journal_no_replace_publication": True,
+        "cleanup_journal_relative_tombstones": True,
+        "cleanup_pending_read_only_report_only": True,
+        "cleanup_pending_malformed_state_fails_closed": True,
+        "cleanup_pending_mutations_drain_first": True,
+        "cleanup_journal_hardlink_alias_recovery": True,
         "internal_lock_persistent_inode": True,
         "internal_lock_directory_protected_while_held": True,
         "holds_lifecycle_lock_through_child": True,
@@ -1611,6 +1654,7 @@ def path_graph_snapshot(root: Path, *, max_file_bytes: int) -> tuple[Any, ...]:
                     info.st_dev,
                     info.st_ino,
                     stat.S_IMODE(info.st_mode),
+                    info.st_nlink,
                     info.st_size,
                     info.st_mtime_ns,
                 )
@@ -1623,6 +1667,7 @@ def path_graph_snapshot(root: Path, *, max_file_bytes: int) -> tuple[Any, ...]:
                     info.st_dev,
                     info.st_ino,
                     stat.S_IMODE(info.st_mode),
+                    info.st_nlink,
                     info.st_size,
                     info.st_mtime_ns,
                     file_sha256_no_follow(path, max_file_bytes),
@@ -1636,6 +1681,7 @@ def path_graph_snapshot(root: Path, *, max_file_bytes: int) -> tuple[Any, ...]:
                     info.st_dev,
                     info.st_ino,
                     stat.S_IMODE(info.st_mode),
+                    info.st_nlink,
                     info.st_size,
                     info.st_mtime_ns,
                 )
@@ -1787,7 +1833,7 @@ def validate_corrupt_backup_regression(manager: Any) -> None:
 
 
 def validate_external_lock_binding_regression(manager: Any) -> None:
-    temp, target = make_isolated_target("external-lock-binding-")
+    temp, target = make_isolated_target("external-lock-binding-valid-")
     try:
         setup = manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP)
         manager.write_setup(target, setup, manager.load_profile(manager.DEFAULT_PROFILE))
@@ -1798,12 +1844,10 @@ def validate_external_lock_binding_regression(manager: Any) -> None:
             raise ValueError("target lifecycle lock must be persistent after normal release")
         internal_info = internal_path.lstat()
 
-        lock_path.write_bytes(b"")
-        lock_path.chmod(0o600)
-        manager.write_setup(target, setup, manager.load_profile("safe"), require_existing=True)
         if not lock_path.is_file():
             raise ValueError("external bootstrap lock must be persistent after normal release")
         first_info = lock_path.lstat()
+        manager.write_setup(target, setup, manager.load_profile("safe"), require_existing=True)
         if not internal_path.is_file():
             raise ValueError("target lifecycle lock disappeared after normal release")
         if (internal_info.st_dev, internal_info.st_ino) != (
@@ -1811,111 +1855,344 @@ def validate_external_lock_binding_regression(manager: Any) -> None:
             internal_path.lstat().st_ino,
         ):
             raise ValueError("target lifecycle lock inode changed across normal release")
-
-        lock_path.write_bytes(b"not json\n")
-        lock_path.chmod(0o600)
-        try:
-            manager.write_setup(
-                target, setup, manager.load_profile(manager.DEFAULT_PROFILE), require_existing=True
-            )
-        except manager.KimicodeSetupError as exc:
-            if "binding is malformed" not in str(exc):
-                raise ValueError(
-                    f"malformed external lock binding returned unstable error: {exc}"
-                ) from exc
-        else:
-            raise ValueError("malformed external lock binding unexpectedly succeeded")
-
-        payload = manager.lock_payload(
-            "external-bootstrap",
-            str(target.parent / "other-target"),
-            lock_path,
-        )
-        lock_path.write_bytes(manager.canonical_json(payload))
-        lock_path.chmod(0o600)
-        try:
-            manager.write_setup(
-                target, setup, manager.load_profile(manager.DEFAULT_PROFILE), require_existing=True
-            )
-        except manager.KimicodeSetupError as exc:
-            if "different canonical target" not in str(exc):
-                raise ValueError(f"external lock binding returned unstable error: {exc}") from exc
-        else:
-            raise ValueError("external lock binding mismatch unexpectedly succeeded")
-
-        payload = manager.lock_payload(
-            "external-bootstrap", canonical_target, target / "wrong.lock"
-        )
-        lock_path.write_bytes(manager.canonical_json(payload))
-        lock_path.chmod(0o600)
-        try:
-            manager.write_setup(
-                target, setup, manager.load_profile(manager.DEFAULT_PROFILE), require_existing=True
-            )
-        except manager.KimicodeSetupError as exc:
-            if "different lock path" not in str(exc):
-                raise ValueError(
-                    f"external lock path binding returned unstable error: {exc}"
-                ) from exc
-        else:
-            raise ValueError("external lock path binding mismatch unexpectedly succeeded")
-
-        payload = manager.lock_payload("external-bootstrap", canonical_target, lock_path)
-        lock_path.write_bytes(manager.canonical_json(payload))
-        lock_path.chmod(0o600)
-        manager.write_setup(target, setup, manager.load_profile("safe"), require_existing=True)
         second_info = lock_path.lstat()
         if (first_info.st_dev, first_info.st_ino) != (second_info.st_dev, second_info.st_ino):
             raise ValueError("external bootstrap lock inode changed across normal release")
     finally:
         temp.cleanup()
 
+    def expect_rejected_anchor(label: str, mutate: Any, expected: str) -> None:
+        case_temp, case_target = make_isolated_target(f"external-lock-{label}-")
+        try:
+            setup = manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP)
+            manager.write_setup(
+                case_target,
+                setup,
+                manager.load_profile(manager.DEFAULT_PROFILE),
+            )
+            canonical = manager.lock_canonical_target(case_target)
+            target_anchor = manager.bootstrap_lock_path(case_target, canonical)
+            mutate(case_target, target_anchor, canonical)
+            try:
+                manager.write_setup(
+                    case_target,
+                    setup,
+                    manager.load_profile("safe"),
+                    require_existing=True,
+                )
+            except manager.KimicodeSetupError as exc:
+                if expected not in str(exc):
+                    raise ValueError(f"{label} returned unstable error: {exc}") from exc
+            else:
+                raise ValueError(f"{label} unexpectedly succeeded")
+        finally:
+            case_temp.cleanup()
+
+    expect_rejected_anchor(
+        "empty",
+        lambda _target, anchor, _canonical: (anchor.write_bytes(b""), anchor.chmod(0o600)),
+        "binding is missing",
+    )
+    expect_rejected_anchor(
+        "malformed",
+        lambda _target, anchor, _canonical: (
+            anchor.write_bytes(b"not json\n"),
+            anchor.chmod(0o600),
+        ),
+        "binding is malformed",
+    )
+    expect_rejected_anchor(
+        "canonical-mismatch",
+        lambda target, anchor, _canonical: (
+            anchor.write_bytes(
+                manager.canonical_json(
+                    manager.lock_payload(
+                        "external-bootstrap",
+                        str(target.parent / "other-target"),
+                        anchor,
+                    )
+                )
+            ),
+            anchor.chmod(0o600),
+        ),
+        "different canonical target",
+    )
+    expect_rejected_anchor(
+        "path-mismatch",
+        lambda _target, anchor, canonical: (
+            anchor.write_bytes(
+                manager.canonical_json(
+                    manager.lock_payload("external-bootstrap", canonical, anchor.parent / "wrong")
+                )
+            ),
+            anchor.chmod(0o600),
+        ),
+        "different lock path",
+    )
+    product_temp, product_target = make_isolated_target("external-lock-product-malformed-")
+    original_bootstrap = manager.fixed_system_temp_root
+    try:
+        system_root = Path(product_temp.name) / "system-root"
+        system_root.mkdir(mode=0o777)
+        system_root.chmod(0o1777)
+        manager.fixed_system_temp_root = lambda: system_root
+        root = manager.ensure_external_lock_root()
+        product_anchor = manager.external_product_anchor_path(root)
+        product_anchor.write_bytes(b"not json\n")
+        product_anchor.chmod(0o600)
+        try:
+            manager.write_setup(
+                product_target,
+                manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP),
+                manager.load_profile(manager.DEFAULT_PROFILE),
+            )
+        except manager.KimicodeSetupError as exc:
+            if "binding is malformed" not in str(exc):
+                raise ValueError(f"product malformed returned unstable error: {exc}") from exc
+        else:
+            raise ValueError("product malformed unexpectedly succeeded")
+    finally:
+        manager.fixed_system_temp_root = original_bootstrap
+        product_temp.cleanup()
+
 
 def validate_lock_binding_publication_rollback_regression(manager: Any) -> None:
-    temp, target = make_isolated_target("external-lock-partial-")
+    def anchor_temp_residue(anchor: Path) -> list[str]:
+        if not anchor.parent.exists():
+            return []
+        return sorted(
+            path.name
+            for path in anchor.parent.iterdir()
+            if path.name.startswith(f".{anchor.name}.nddev.tmp.")
+        )
+
+    def assert_anchor_complete(
+        anchor: Path,
+        *,
+        canonical: str,
+        kind: str,
+        label: str,
+    ) -> None:
+        info = anchor.lstat()
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError(f"{label} anchor is not a regular file")
+        if info.st_nlink != 1:
+            raise ValueError(f"{label} anchor link count is not exact")
+        if stat.S_IMODE(info.st_mode) != 0o600:
+            raise ValueError(f"{label} anchor mode is not 0600")
+        fd = manager.acquire_existing_lock_file(
+            anchor,
+            "external lifecycle anchor",
+            canonical_target=canonical,
+            kind=kind,
+        )
+        if fd is None:
+            raise ValueError(f"{label} final anchor could not be opened")
+        manager.release_lock_file(fd, anchor, remove_file=False)
+        if anchor_temp_residue(anchor):
+            raise ValueError(f"{label} anchor left unpublished temp aliases")
+
+    def run_fault_case(anchor_kind: str, fault: str) -> None:
+        temp, target = make_isolated_target(f"external-lock-{anchor_kind}-{fault}-")
+        original_bootstrap = manager.fixed_system_temp_root
+        try:
+            if anchor_kind == "product":
+                system_root = Path(temp.name) / "system-root"
+                system_root.mkdir(mode=0o777)
+                system_root.chmod(0o1777)
+                manager.fixed_system_temp_root = lambda: system_root
+            root = manager.ensure_external_lock_root()
+            if anchor_kind == "product":
+                lock_path = manager.external_product_anchor_path(root)
+                canonical = manager.EXTERNAL_PRODUCT_ANCHOR_CANONICAL_TARGET
+                kind = "external-product"
+            else:
+                canonical = manager.lock_canonical_target(target)
+                lock_path = manager.bootstrap_lock_path(
+                    target,
+                    canonical,
+                    external_lock_root=root,
+                )
+                kind = "external-bootstrap"
+            before = fixed_namespace_snapshot(manager)
+            originals = {
+                "open": manager.os.open,
+                "fchmod": manager.os.fchmod,
+                "write_all": manager.write_all,
+                "fsync": manager.os.fsync,
+                "rename_no_replace": manager.rename_no_replace,
+                "fsync_directory": manager.fsync_directory,
+            }
+            faulted = False
+
+            def fail_once(message: str) -> None:
+                nonlocal faulted
+                if not faulted:
+                    faulted = True
+                    raise OSError(message)
+
+            def open_wrapper(path: Any, flags: int, mode: int = 0o777) -> int:
+                if fault == "create" and str(Path(path).name).startswith(f".{lock_path.name}."):
+                    fail_once("injected lock create failure")
+                return originals["open"](path, flags, mode)
+
+            def fchmod_wrapper(fd: int, mode: int) -> None:
+                if fault == "fchmod":
+                    fail_once("injected lock fchmod failure")
+                return originals["fchmod"](fd, mode)
+
+            def write_all_wrapper(fd: int, data: bytes) -> None:
+                if fault == "write":
+                    originals["write_all"](fd, bytes(data)[:7])
+                    fail_once("injected lock binding write failure")
+                return originals["write_all"](fd, data)
+
+            def fsync_wrapper(fd: int) -> None:
+                if fault == "file-fsync":
+                    fail_once("injected lock file fsync failure")
+                return originals["fsync"](fd)
+
+            def rename_no_replace_wrapper(source: Path, destination: Path, label: str) -> bool:
+                if fault == "publish":
+                    fail_once("injected lock no-replace publication failure")
+                return originals["rename_no_replace"](source, destination, label)
+
+            def fsync_directory_wrapper(path: Path) -> None:
+                if fault == "parent-fsync" and Path(path) == lock_path.parent:
+                    fail_once("injected lock parent fsync failure")
+                return originals["fsync_directory"](path)
+
+            manager.os.open = open_wrapper
+            manager.os.fchmod = fchmod_wrapper
+            manager.write_all = write_all_wrapper
+            manager.os.fsync = fsync_wrapper
+            manager.rename_no_replace = rename_no_replace_wrapper
+            manager.fsync_directory = fsync_directory_wrapper
+            try:
+                try:
+                    manager.publish_missing_lock_file(
+                        lock_path,
+                        "external lifecycle anchor",
+                        canonical_target=canonical,
+                        kind=kind,
+                    )
+                except BaseException as exc:
+                    if "injected lock" not in str(exc):
+                        raise ValueError(
+                            f"{anchor_kind} {fault} returned unstable error: {exc}"
+                        ) from exc
+                else:
+                    raise ValueError(f"{anchor_kind} {fault} unexpectedly succeeded")
+            finally:
+                manager.os.open = originals["open"]
+                manager.os.fchmod = originals["fchmod"]
+                manager.write_all = originals["write_all"]
+                manager.os.fsync = originals["fsync"]
+                manager.rename_no_replace = originals["rename_no_replace"]
+                manager.fsync_directory = originals["fsync_directory"]
+            if not faulted:
+                raise ValueError(f"{anchor_kind} {fault} fault was not injected")
+            if fault == "parent-fsync":
+                assert_anchor_complete(
+                    lock_path,
+                    canonical=canonical,
+                    kind=kind,
+                    label=f"{anchor_kind} {fault}",
+                )
+            elif fixed_namespace_snapshot(manager) != before:
+                raise ValueError(f"{anchor_kind} {fault} did not restore exact namespace")
+        finally:
+            manager.fixed_system_temp_root = original_bootstrap
+            temp.cleanup()
+
+    for anchor_kind in ("product", "target"):
+        for fault in ("create", "fchmod", "write", "file-fsync", "publish", "parent-fsync"):
+            run_fault_case(anchor_kind, fault)
+
+    temp, target = make_isolated_target("external-lock-lock-acquisition-")
     try:
-        canonical_target = manager.lock_canonical_target(target)
-        lock_path = manager.bootstrap_lock_path(target, canonical_target)
-        previous_payload = manager.lock_payload("external-bootstrap", canonical_target, lock_path)
-        previous_payload["pid"] = -1
-        previous_bytes = manager.canonical_json(previous_payload)
-        lock_path.write_bytes(previous_bytes)
-        lock_path.chmod(0o600)
-        before = fixed_namespace_snapshot(manager)
-        original_write = manager.os.write
+        root = manager.ensure_external_lock_root()
+        canonical = manager.lock_canonical_target(target)
+        anchor = manager.bootstrap_lock_path(target, canonical, external_lock_root=root)
+        original_flock = manager.fcntl.flock
         faulted = False
 
-        def partial_write(fd: int, data: Any) -> int:
+        def flock_once(fd: int, flags: int) -> None:
             nonlocal faulted
-            chunk = bytes(data)
-            if not faulted and chunk.startswith(b"{"):
+            if not faulted:
                 faulted = True
-                original_write(fd, chunk[:7])
-                raise OSError("injected partial external lock marker write")
-            return original_write(fd, data)
+                raise OSError(errno.EAGAIN, "injected lock acquisition failure")
+            return original_flock(fd, flags)
 
-        manager.os.write = partial_write
+        manager.fcntl.flock = flock_once
         try:
             try:
                 manager.acquire_lock_file(
-                    lock_path,
+                    anchor,
                     "external bootstrap lifecycle lock",
-                    canonical_target=canonical_target,
+                    canonical_target=canonical,
                     kind="external-bootstrap",
                 )
-            except OSError as exc:
-                if "injected partial external lock marker write" not in str(exc):
-                    raise ValueError(f"external lock partial write returned {exc}") from exc
+            except manager.KimicodeSetupError as exc:
+                if "target is locked" not in str(exc):
+                    raise ValueError(f"lock acquisition returned unstable error: {exc}") from exc
             else:
-                raise ValueError("external lock partial write unexpectedly succeeded")
+                raise ValueError("lock acquisition failure unexpectedly succeeded")
         finally:
-            manager.os.write = original_write
+            manager.fcntl.flock = original_flock
         if not faulted:
-            raise ValueError("external lock marker write fault was not injected")
-        if lock_path.read_bytes() != previous_bytes:
-            raise ValueError("external lock marker partial write did not restore previous bytes")
-        if fixed_namespace_snapshot(manager) != before:
-            raise ValueError("external lock marker partial write did not restore exact namespace")
+            raise ValueError("lock acquisition fault was not injected")
+        assert_anchor_complete(
+            anchor,
+            canonical=canonical,
+            kind="external-bootstrap",
+            label="lock acquisition",
+        )
+    finally:
+        temp.cleanup()
+
+    temp, target = make_isolated_target("external-lock-handoff-")
+    try:
+        root = manager.ensure_external_lock_root()
+        original_release = manager.release_product_coordination_lock
+        faulted = False
+
+        def release_then_fail(fd: int) -> None:
+            nonlocal faulted
+            original_release(fd)
+            if not faulted:
+                faulted = True
+                raise OSError("injected product handoff failure")
+
+        manager.release_product_coordination_lock = release_then_fail
+        try:
+            try:
+                with manager.external_lifecycle_lock(target):
+                    raise ValueError("handoff failure did not interrupt entry")
+            except OSError as exc:
+                if "injected product handoff failure" not in str(exc):
+                    raise ValueError(f"handoff returned unstable error: {exc}") from exc
+            else:
+                raise ValueError("handoff failure unexpectedly succeeded")
+        finally:
+            manager.release_product_coordination_lock = original_release
+        if not faulted:
+            raise ValueError("handoff fault was not injected")
+        product_anchor = manager.external_product_anchor_path(root)
+        assert_anchor_complete(
+            product_anchor,
+            canonical=manager.EXTERNAL_PRODUCT_ANCHOR_CANONICAL_TARGET,
+            kind="external-product",
+            label="handoff product",
+        )
+        canonical = manager.lock_canonical_target(target)
+        target_anchor = manager.bootstrap_lock_path(target, canonical, external_lock_root=root)
+        assert_anchor_complete(
+            target_anchor,
+            canonical=canonical,
+            kind="external-bootstrap",
+            label="handoff target",
+        )
     finally:
         temp.cleanup()
 
@@ -1939,62 +2216,6 @@ def validate_readonly_external_lock_no_residue_regression(manager: Any) -> None:
         manager.software_status_payload(target)
         if fixed_namespace_snapshot(manager) != before_existing:
             raise ValueError("read-only commands changed the fixed namespace for existing target")
-    finally:
-        temp.cleanup()
-
-
-def validate_remove_cli_late_tree_cleanup_regression(manager: Any) -> None:
-    temp, target = make_isolated_target("remove-tree-cleanup-")
-    try:
-        manager.write_setup(
-            target,
-            manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP),
-            manager.load_profile(manager.DEFAULT_PROFILE),
-        )
-        write_stub_software(manager, target)
-        before = (
-            path_graph_snapshot(target, max_file_bytes=manager.SOFTWARE_MAX_BYTES),
-            fixed_namespace_snapshot(manager),
-        )
-        original_cleanup_tree = manager.cleanup_tree_object_sidecars
-
-        def fail_tree_cleanup_once(
-            transaction: Any, *, staged: bool, rollback: bool
-        ) -> None:
-            if rollback:
-                raise OSError("injected late tree cleanup failure")
-            original_cleanup_tree(transaction, staged=staged, rollback=rollback)
-
-        manager.cleanup_tree_object_sidecars = fail_tree_cleanup_once
-        try:
-            try:
-                manager.remove_software(target)
-            except manager.KimicodeSetupError as exc:
-                if "injected late tree cleanup failure" not in str(exc):
-                    raise ValueError(f"remove-cli late cleanup returned {exc}") from exc
-            else:
-                raise ValueError("remove-cli late tree cleanup failure unexpectedly succeeded")
-        finally:
-            manager.cleanup_tree_object_sidecars = original_cleanup_tree
-        after = (
-            path_graph_snapshot(target, max_file_bytes=manager.SOFTWARE_MAX_BYTES),
-            fixed_namespace_snapshot(manager),
-        )
-        if after != before:
-            raise ValueError("remove-cli late tree cleanup failure did not restore exact graph")
-        residue_fragments = (
-            ".nddev.tmp.",
-            ".nddev.rollback.",
-            ".nddev-kimicode-software-stage.",
-            ".nddev-kimicode-software-rollback.",
-        )
-        residue = [
-            path.as_posix()
-            for path in target.parent.rglob("*")
-            if any(fragment in path.name for fragment in residue_fragments)
-        ]
-        if residue:
-            raise ValueError(f"remove-cli late tree cleanup left residue: {residue}")
     finally:
         temp.cleanup()
 
@@ -2408,20 +2629,29 @@ def validate_runtime_regressions() -> None:
         if forbidden in fixed_source:
             raise ValueError("manager bootstrap root must not derive from ambient runtime state")
     for required in (
-        "fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)",
+        "lock_mode: int = fcntl.LOCK_EX",
+        "fcntl.flock(fd, lock_mode | fcntl.LOCK_NB)",
         'kind="external-bootstrap"',
+        'kind="external-product"',
         'kind="target-internal"',
         "EXTERNAL_LOCK_NAMESPACE",
+        "EXTERNAL_PRODUCT_ANCHOR_NAME",
+        "RENAME_EXCL_DARWIN",
+        "RENAME_NOREPLACE_LINUX",
         "ensure_external_lock_root()",
-        "acquire_product_coordination_lock(system_root)",
+        "external_product_anchor_path(external_lock_root)",
+        "acquire_product_coordination_lock(",
         "release_product_coordination_lock(releasing_product_fd)",
         "acquire_existing_lock_file(",
-        "publish_lock_payload(fd, canonical_json(desired_payload), label)",
+        "publish_missing_lock_file(",
+        "rename_no_replace(stage, path, label)",
+        "published = True",
+        "if info.st_nlink != 1",
         "protect_internal_lock_parent(lock_parent)",
         "validate_lock_binding",
         "binding is malformed",
         "current.st_dev != info.st_dev or current.st_ino != info.st_ino",
-        "bootstrap_lock_path(canonical_target_path, canonical_target)",
+        "external_lock_root=external_lock_root",
         "canonicalize_target_under_product_lock(target)",
         "release_lock_file(releasing_bootstrap_fd, bootstrap_path, remove_file=False)",
         "release_lock_file(releasing_internal_fd, internal_path, remove_file=False)",
@@ -2437,6 +2667,57 @@ def validate_runtime_regressions() -> None:
     ):
         if required not in manager_text:
             raise ValueError(f"manager is missing launch hardening fragment: {required}")
+    for forbidden in (
+        "os.link(",
+        "publish_lock_payload",
+        "os.ftruncate(fd, 0)",
+    ):
+        if (
+            forbidden
+            in manager_text[
+                manager_text.index("def validate_lock_info") : manager_text.index(
+                    "def protect_internal_lock_parent"
+                )
+            ]
+        ):
+            raise ValueError(
+                f"manager must not use unsafe external anchor publication: {forbidden}"
+            )
+    cleanup_start = manager_text.index("def cleanup_journal_dir")
+    cleanup_end = manager_text.index("def require_tree_entry_identity")
+    cleanup_source = manager_text[cleanup_start:cleanup_end]
+    for required in (
+        "relative_name",
+        "cleanup_journal_stage_alias_pattern",
+        "recover_cleanup_journal_publication_alias_for_mutation(target)",
+        "read_cleanup_journal_with_publication_alias",
+        "rename_no_replace(stage, journal_path, CLEANUP_JOURNAL_NAME)",
+        "CleanupJournalPublishResult(published=True, cleanup_pending=True)",
+        "unknown_entries = set(entries) - {CLEANUP_JOURNAL_NAME} - seen",
+        "cleanup_pending_metadata",
+    ):
+        if required not in cleanup_source:
+            raise ValueError(f"cleanup journal implementation is missing {required}")
+    for forbidden in (
+        '"path": str(',
+        '"absolute_path"',
+        "os.replace(stage, journal_path)",
+        "atomic_write(journal_path",
+    ):
+        if forbidden in cleanup_source:
+            raise ValueError(f"cleanup journal must not publish unsafe path state: {forbidden}")
+    readonly_status_source = manager_text[
+        manager_text.index("def _status_payload_locked") : manager_text.index("def status_payload")
+    ]
+    if "cleanup_pending_metadata(target)" not in readonly_status_source:
+        raise ValueError("status must report cleanup_pending without draining")
+    readonly_software_source = manager_text[
+        manager_text.index("def _software_status_payload_locked") : manager_text.index(
+            "def software_status_payload"
+        )
+    ]
+    if "cleanup_pending_metadata(target)" not in readonly_software_source:
+        raise ValueError("software-status must report cleanup_pending without draining")
     protected_start = manager_text.index("def protected_launch_path")
     protected_end = manager_text.index("def revalidate_launch_executable")
     protected_source = manager_text[protected_start:protected_end]
@@ -2460,6 +2741,19 @@ def validate_runtime_regressions() -> None:
         raise ValueError(
             "external lifecycle lock must product-coordinate before canonical target locking"
         )
+    readonly_source = manager_text[
+        manager_text.index("def readonly_external_lifecycle_lock") : manager_text.index(
+            "def target_lock"
+        )
+    ]
+    for required in (
+        "publish_missing=False",
+        "lock_mode=fcntl.LOCK_SH",
+        "RetryReadOnlyLifecycle",
+        "stat_existing(\n                external_product_anchor_path(external_lock_root)",
+    ):
+        if required not in readonly_source:
+            raise ValueError(f"read-only lifecycle path is missing {required}")
     target_lock_start = manager_text.index("def target_lock")
     target_lock_end = manager_text.index("def safe_target_path")
     target_lock_source = manager_text[target_lock_start:target_lock_end]
@@ -2479,19 +2773,22 @@ def validate_runtime_regressions() -> None:
     status_start = manager_text.index("def status_payload")
     status_end = manager_text.index("def stamp_managed_paths")
     status_source = manager_text[status_start:status_end]
-    if "with readonly_external_lifecycle_lock(target)" not in status_source:
+    if "run_under_readonly_external_lifecycle(target, _status_payload_locked)" not in status_source:
         raise ValueError("status must read target state under external lifecycle coordination")
     software_start = manager_text.index("def software_status_payload")
     software_end = manager_text.index("def parse_os_release")
     software_source = manager_text[software_start:software_end]
-    if "with readonly_external_lifecycle_lock(target)" not in software_source:
+    if (
+        "run_under_readonly_external_lifecycle(target, _software_status_payload_locked)"
+        not in software_source
+    ):
         raise ValueError(
             "software-status must read target state under external lifecycle coordination"
         )
     plan_start = manager_text.index("def plan_payload")
     plan_end = manager_text.index("def software_root")
     plan_source = manager_text[plan_start:plan_end]
-    if "with readonly_external_lifecycle_lock(target)" not in plan_source:
+    if "run_under_readonly_external_lifecycle(" not in plan_source:
         raise ValueError("plan must read target state under external lifecycle coordination")
     install_start = manager_text.index("def install_or_update_software")
     install_end = manager_text.index("def verify_removed_software_postcondition")
@@ -2551,7 +2848,6 @@ def validate_runtime_regressions() -> None:
         validate_unsupported_launch_preflight_regression(manager)
         validate_external_lock_binding_regression(manager)
         validate_lock_binding_publication_rollback_regression(manager)
-        validate_remove_cli_late_tree_cleanup_regression(manager)
         validate_external_lock_persistent_inode_handover_regression(manager)
         validate_internal_lock_persistent_inode_handover_regression(manager)
         validate_launch_lock_concurrency_regression(manager)
@@ -2752,12 +3048,23 @@ def validate_lifecycle_lock_order_regression(manager: Any) -> None:
                 or backup_root in candidate.parents
             )
 
-        def traced_product_lock(path: Path) -> int:
+        def traced_product_lock(
+            path: Path,
+            *,
+            lock_mode: int = manager.fcntl.LOCK_EX,
+            publish_missing: bool = True,
+        ) -> int | None:
             events.append("product-lock")
-            return real_product_lock(path)
+            return real_product_lock(path, lock_mode=lock_mode, publish_missing=publish_missing)
 
         def traced_acquire_lock_file(
-            path: Path, label: str, *, canonical_target: str, kind: str
+            path: Path,
+            label: str,
+            *,
+            canonical_target: str,
+            kind: str,
+            lock_mode: int = manager.fcntl.LOCK_EX,
+            create: bool = True,
         ) -> int:
             if kind == "external-bootstrap":
                 events.append("external-lock")
@@ -2768,10 +3075,17 @@ def validate_lifecycle_lock_order_regression(manager: Any) -> None:
                 label,
                 canonical_target=canonical_target,
                 kind=kind,
+                lock_mode=lock_mode,
+                create=create,
             )
 
         def traced_acquire_existing_lock_file(
-            path: Path, label: str, *, canonical_target: str, kind: str
+            path: Path,
+            label: str,
+            *,
+            canonical_target: str,
+            kind: str,
+            lock_mode: int = manager.fcntl.LOCK_EX,
         ) -> int | None:
             if kind == "external-bootstrap":
                 events.append("external-lock")
@@ -2780,6 +3094,7 @@ def validate_lifecycle_lock_order_regression(manager: Any) -> None:
                 label,
                 canonical_target=canonical_target,
                 kind=kind,
+                lock_mode=lock_mode,
             )
 
         def traced_stat_existing(path: Path, label: str) -> os.stat_result | None:
