@@ -28,7 +28,7 @@ Do not copy volatile release pins or checksum lists into prose. Use these owners
 ## Public Checks
 
 ```bash
-python3 -m py_compile cli-tools/nddev_kimicode.py cli-tools/validate_public_contracts.py builder/nddev-builder/hooks/nddev-builder-pretooluse.py
 python3 cli-tools/validate_public_contracts.py
 python3 cli-tools/nddev_kimicode.py list --json
+python3 cli-tools/nddev_kimicode.py --help
 ```
