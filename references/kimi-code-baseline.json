@@ -32,10 +32,14 @@
   "official_binary_install": {
     "install_script_url": "https://code.kimi.com/kimi-code/install.sh",
     "install_script_sha256": "638927825e96825edbb563de5e0cb06f8a0551c53e026ade8b717b0f25cb83d2",
+    "install_powershell_url": "https://code.kimi.com/kimi-code/install.ps1",
+    "install_powershell_sha256": "28a0473a7c56d41eae52cb4dbd3232f87a9133dd7af416a6a04dfbf7856fa9fc",
+    "install_powershell_size_bytes": 15891,
+    "install_powershell_product_supported": false,
     "latest_url": "https://code.kimi.com/kimi-code/latest",
     "manifest_url": "https://code.kimi.com/kimi-code/binaries/0.29.2/manifest.json",
     "manifest_sha256": "6057703f6430964741198c81617737bcec917082d1ce4aadd7a1b8c29787ae9b",
-    "observed_vendor_platforms": ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"],
+    "observed_vendor_platforms": ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64", "win32-arm64", "win32-x64"],
     "production_supported_hosts": ["macos-arm64", "macos-x64", "ubuntu-glibc-arm64", "ubuntu-glibc-x64"],
     "host_to_vendor_platform": {
       "macos-arm64": "darwin-arm64",
@@ -48,19 +52,51 @@
     "platforms": {
       "darwin-arm64": {
         "filename": "kimi-code-darwin-arm64",
-        "checksum": "25dc8b14f8bb5ef98470577265b1e9c95892c168f34e9639c5f63b48d4ece6fb"
+        "url": "https://code.kimi.com/kimi-code/binaries/0.29.2/kimi-code-darwin-arm64",
+        "size_bytes": 160002496,
+        "sha256": "25dc8b14f8bb5ef98470577265b1e9c95892c168f34e9639c5f63b48d4ece6fb",
+        "checksum": "25dc8b14f8bb5ef98470577265b1e9c95892c168f34e9639c5f63b48d4ece6fb",
+        "supported_product_hosts": ["macos-arm64"]
       },
       "darwin-x64": {
         "filename": "kimi-code-darwin-x64",
-        "checksum": "fe59f14cab74971768377e586bf3be30c1ca04079c058d4b492827ca4dfd6b16"
+        "url": "https://code.kimi.com/kimi-code/binaries/0.29.2/kimi-code-darwin-x64",
+        "size_bytes": 162344320,
+        "sha256": "fe59f14cab74971768377e586bf3be30c1ca04079c058d4b492827ca4dfd6b16",
+        "checksum": "fe59f14cab74971768377e586bf3be30c1ca04079c058d4b492827ca4dfd6b16",
+        "supported_product_hosts": ["macos-x64"]
       },
       "linux-arm64": {
         "filename": "kimi-code-linux-arm64",
-        "checksum": "5fb64e74eeec0b3900732cfbc3679cc505beb51aa323f486154fd79b0e20b26a"
+        "url": "https://code.kimi.com/kimi-code/binaries/0.29.2/kimi-code-linux-arm64",
+        "size_bytes": 160500864,
+        "sha256": "5fb64e74eeec0b3900732cfbc3679cc505beb51aa323f486154fd79b0e20b26a",
+        "checksum": "5fb64e74eeec0b3900732cfbc3679cc505beb51aa323f486154fd79b0e20b26a",
+        "supported_product_hosts": ["ubuntu-glibc-arm64"]
       },
       "linux-x64": {
         "filename": "kimi-code-linux-x64",
-        "checksum": "f9977d259ed36019793cadf04b1f0343f12aaebfa76f90fa26cd3b02be671231"
+        "url": "https://code.kimi.com/kimi-code/binaries/0.29.2/kimi-code-linux-x64",
+        "size_bytes": 162860224,
+        "sha256": "f9977d259ed36019793cadf04b1f0343f12aaebfa76f90fa26cd3b02be671231",
+        "checksum": "f9977d259ed36019793cadf04b1f0343f12aaebfa76f90fa26cd3b02be671231",
+        "supported_product_hosts": ["ubuntu-glibc-x64"]
+      },
+      "win32-arm64": {
+        "filename": "kimi-code-win32-arm64.exe",
+        "url": "https://code.kimi.com/kimi-code/binaries/0.29.2/kimi-code-win32-arm64.exe",
+        "size_bytes": 120212992,
+        "sha256": "26cd0ab7267aab92530a9584778deb5fa2c37c44131c8b2d8ec653e474f288c8",
+        "checksum": "26cd0ab7267aab92530a9584778deb5fa2c37c44131c8b2d8ec653e474f288c8",
+        "supported_product_hosts": []
+      },
+      "win32-x64": {
+        "filename": "kimi-code-win32-x64.exe",
+        "url": "https://code.kimi.com/kimi-code/binaries/0.29.2/kimi-code-win32-x64.exe",
+        "size_bytes": 131644416,
+        "sha256": "32ea71e814b53958afaa37f15982647e6c832cb70922941ca35a57d01f64e12f",
+        "checksum": "32ea71e814b53958afaa37f15982647e6c832cb70922941ca35a57d01f64e12f",
+        "supported_product_hosts": []
       }
     }
   },

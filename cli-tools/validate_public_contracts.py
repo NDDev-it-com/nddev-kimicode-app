@@ -99,27 +99,58 @@ PROFILES = ["safe", "full-auto"]
 DEFAULT_PROFILE = "full-auto"
 MANIFEST_SHA256 = "6057703f6430964741198c81617737bcec917082d1ce4aadd7a1b8c29787ae9b"
 INSTALL_SCRIPT_SHA256 = "638927825e96825edbb563de5e0cb06f8a0551c53e026ade8b717b0f25cb83d2"
+INSTALL_POWERSHELL_SHA256 = "28a0473a7c56d41eae52cb4dbd3232f87a9133dd7af416a6a04dfbf7856fa9fc"
+INSTALL_POWERSHELL_SIZE_BYTES = 15891
 NPM_INTEGRITY = "sha512-NmID/2+rCbZXvnQIBZxZlLzeUjETjb1BPzfkUoVs6AhQv9xuGKLzQvcUJB+yksRZnWE+ikLMWyIn75rVfMMP4w=="
 NPM_SHASUM = "9e8da7ca4e822048a28d1e12ff46c8ea5ecb23ac"
-BINARY_PLATFORMS = {
-    "darwin-arm64": (
-        "kimi-code-darwin-arm64",
-        "25dc8b14f8bb5ef98470577265b1e9c95892c168f34e9639c5f63b48d4ece6fb",
-    ),
-    "darwin-x64": (
-        "kimi-code-darwin-x64",
-        "fe59f14cab74971768377e586bf3be30c1ca04079c058d4b492827ca4dfd6b16",
-    ),
-    "linux-arm64": (
-        "kimi-code-linux-arm64",
-        "5fb64e74eeec0b3900732cfbc3679cc505beb51aa323f486154fd79b0e20b26a",
-    ),
-    "linux-x64": (
-        "kimi-code-linux-x64",
-        "f9977d259ed36019793cadf04b1f0343f12aaebfa76f90fa26cd3b02be671231",
-    ),
+OBSERVED_BINARY_ARTIFACTS = {
+    "darwin-arm64": {
+        "filename": "kimi-code-darwin-arm64",
+        "url": "https://code.kimi.com/kimi-code/binaries/0.29.2/kimi-code-darwin-arm64",
+        "size_bytes": 160002496,
+        "sha256": "25dc8b14f8bb5ef98470577265b1e9c95892c168f34e9639c5f63b48d4ece6fb",
+        "supported_product_hosts": ["macos-arm64"],
+    },
+    "darwin-x64": {
+        "filename": "kimi-code-darwin-x64",
+        "url": "https://code.kimi.com/kimi-code/binaries/0.29.2/kimi-code-darwin-x64",
+        "size_bytes": 162344320,
+        "sha256": "fe59f14cab74971768377e586bf3be30c1ca04079c058d4b492827ca4dfd6b16",
+        "supported_product_hosts": ["macos-x64"],
+    },
+    "linux-arm64": {
+        "filename": "kimi-code-linux-arm64",
+        "url": "https://code.kimi.com/kimi-code/binaries/0.29.2/kimi-code-linux-arm64",
+        "size_bytes": 160500864,
+        "sha256": "5fb64e74eeec0b3900732cfbc3679cc505beb51aa323f486154fd79b0e20b26a",
+        "supported_product_hosts": ["ubuntu-glibc-arm64"],
+    },
+    "linux-x64": {
+        "filename": "kimi-code-linux-x64",
+        "url": "https://code.kimi.com/kimi-code/binaries/0.29.2/kimi-code-linux-x64",
+        "size_bytes": 162860224,
+        "sha256": "f9977d259ed36019793cadf04b1f0343f12aaebfa76f90fa26cd3b02be671231",
+        "supported_product_hosts": ["ubuntu-glibc-x64"],
+    },
+    "win32-arm64": {
+        "filename": "kimi-code-win32-arm64.exe",
+        "url": "https://code.kimi.com/kimi-code/binaries/0.29.2/kimi-code-win32-arm64.exe",
+        "size_bytes": 120212992,
+        "sha256": "26cd0ab7267aab92530a9584778deb5fa2c37c44131c8b2d8ec653e474f288c8",
+        "supported_product_hosts": [],
+    },
+    "win32-x64": {
+        "filename": "kimi-code-win32-x64.exe",
+        "url": "https://code.kimi.com/kimi-code/binaries/0.29.2/kimi-code-win32-x64.exe",
+        "size_bytes": 131644416,
+        "sha256": "32ea71e814b53958afaa37f15982647e6c832cb70922941ca35a57d01f64e12f",
+        "supported_product_hosts": [],
+    },
 }
-OBSERVED_VENDOR_PLATFORMS = ["darwin-arm64", "darwin-x64", "linux-arm64", "linux-x64"]
+BINARY_PLATFORMS = {
+    key: (value["filename"], value["sha256"]) for key, value in OBSERVED_BINARY_ARTIFACTS.items()
+}
+OBSERVED_VENDOR_PLATFORMS = list(OBSERVED_BINARY_ARTIFACTS)
 SUPPORTED_HOSTS = ["macos-arm64", "macos-x64", "ubuntu-glibc-arm64", "ubuntu-glibc-x64"]
 HOST_TO_VENDOR_PLATFORM = {
     "macos-arm64": "darwin-arm64",
@@ -672,6 +703,12 @@ def validate_baseline(baseline: dict[str, Any]) -> None:
     install = baseline["official_binary_install"]
     if install.get("install_script_sha256") != INSTALL_SCRIPT_SHA256:
         raise ValueError("install script digest mismatch")
+    if (
+        install.get("install_powershell_sha256") != INSTALL_POWERSHELL_SHA256
+        or install.get("install_powershell_size_bytes") != INSTALL_POWERSHELL_SIZE_BYTES
+        or install.get("install_powershell_product_supported") is not False
+    ):
+        raise ValueError("PowerShell install surface must remain observed and product-unsupported")
     if install.get("manifest_sha256") != MANIFEST_SHA256:
         raise ValueError("binary manifest digest mismatch")
     platforms = install.get("platforms")
@@ -687,10 +724,12 @@ def validate_baseline(baseline: dict[str, Any]) -> None:
         raise ValueError("baseline must not invent an upstream Ubuntu/glibc version floor")
     if install.get("ubuntu_glibc_version_floor_source") != "no-official-floor":
         raise ValueError("baseline must record no-official-floor for Ubuntu/glibc")
-    for key, (filename, checksum) in BINARY_PLATFORMS.items():
+    for key, artifact in OBSERVED_BINARY_ARTIFACTS.items():
         entry = platforms[key]
-        if entry.get("filename") != filename or entry.get("checksum") != checksum:
-            raise ValueError(f"official binary digest mismatch for {key}")
+        expected = dict(artifact)
+        expected["checksum"] = artifact["sha256"]
+        if entry != expected:
+            raise ValueError(f"official binary observation mismatch for {key}")
     if baseline["permission_model"].get("full_auto") != "auto with plan mode disabled":
         raise ValueError("baseline must record full-auto native auto mapping")
     if baseline["native_surfaces"].get("direct_plugin_install_state_write") is not False:
@@ -964,6 +1003,17 @@ def validate_metadata() -> None:
         raise ValueError("contract must map full-auto to native auto")
     if setup_system.get("yolo_profile_shipped") is not False:
         raise ValueError("contract must not ship yolo")
+    if (
+        setup_system.get("update_command")
+        != "python3 cli-tools/nddev_kimicode.py update --target /absolute/target --json"
+    ):
+        raise ValueError("contract must expose distinct setup update command")
+    if manifest.get("setup_lifecycle") != {
+        "update_command": "python3 cli-tools/nddev_kimicode.py update --target /absolute/target --json",
+        "update_identity": "refreshes the installed setup/profile identity from the current public catalog",
+        "update_absent_noop": False,
+    }:
+        raise ValueError("manifest must expose setup update lifecycle")
     if contract["safety"].get("full_auto_active_blocking_hooks") is not False:
         raise ValueError("contract must state full-auto has no active blocking hooks")
     if contract["safety"].get("launch_holds_lifecycle_lock") is not True:
@@ -1066,9 +1116,22 @@ def validate_metadata() -> None:
         raise ValueError("contract must scope remove-cli to target-owned software paths")
     if manifest["software_install"].get("remove_absent_noop") is not True:
         raise ValueError("manifest must expose deterministic absent remove-cli no-op")
-    runtime_compatibility = contract["runtime_compatibility"]
+    expected_powershell = {
+        "powershell_script_url": "https://code.kimi.com/kimi-code/install.ps1",
+        "powershell_script_sha256": INSTALL_POWERSHELL_SHA256,
+        "powershell_script_size_bytes": INSTALL_POWERSHELL_SIZE_BYTES,
+        "product_supported": False,
+    }
+    if (runtime_compatibility := contract["runtime_compatibility"]).get(
+        "official_windows_install_surface"
+    ) != expected_powershell:
+        raise ValueError("contract must preserve product-unsupported PowerShell surface")
+    if manifest["software_install"].get("official_windows_install_surface") != expected_powershell:
+        raise ValueError("manifest must preserve product-unsupported PowerShell surface")
     if runtime_compatibility.get("observed_vendor_platforms") != OBSERVED_VENDOR_PLATFORMS:
         raise ValueError("contract must preserve observed vendor platform keys")
+    if runtime_compatibility.get("observed_vendor_artifacts") != OBSERVED_BINARY_ARTIFACTS:
+        raise ValueError("contract must preserve observed vendor artifact observations")
     if runtime_compatibility.get("supported_hosts") != SUPPORTED_HOSTS:
         raise ValueError("contract must support only canonical NDDev hosts")
     if runtime_compatibility.get("host_to_vendor_platform") != HOST_TO_VENDOR_PLATFORM:
@@ -1089,6 +1152,8 @@ def validate_metadata() -> None:
     software_runtime = manifest["software_runtime"]
     if software_runtime.get("observed_vendor_platforms") != OBSERVED_VENDOR_PLATFORMS:
         raise ValueError("manifest must preserve observed vendor platform keys")
+    if software_runtime.get("observed_vendor_artifacts") != OBSERVED_BINARY_ARTIFACTS:
+        raise ValueError("manifest must preserve observed vendor artifact observations")
     if software_runtime.get("supported_hosts") != SUPPORTED_HOSTS:
         raise ValueError("manifest must support only canonical NDDev hosts")
     if software_runtime.get("host_to_vendor_platform") != HOST_TO_VENDOR_PLATFORM:
@@ -1313,6 +1378,57 @@ def validate_status_launch_allowed_regression(manager: Any) -> None:
                 )
         finally:
             manager.KIMI_BINARY_PLATFORMS = original_platforms
+    finally:
+        temp.cleanup()
+
+
+def validate_setup_update_regression(manager: Any) -> None:
+    temp, target = make_isolated_target("setup-update-")
+    try:
+        setup = manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP)
+        profile = manager.load_profile(manager.DEFAULT_PROFILE)
+        installed = manager.write_setup(target, setup, profile)
+        if installed.get("backup_slot") is not None:
+            raise ValueError("fresh setup install must not create a backup")
+
+        no_op = manager.update_setup(target)
+        if no_op.get("changed") or no_op.get("removed") or no_op.get("changed_paths"):
+            raise ValueError("warm setup update must be a true no-op")
+        if no_op.get("backup_slot") is not None:
+            raise ValueError("warm setup update must not create a backup")
+
+        original_render_config = manager.render_config
+
+        def refreshed_config(*args: Any, **kwargs: Any) -> str:
+            rendered = original_render_config(*args, **kwargs)
+            return rendered.replace(
+                f"{manager.MANAGED_END}\n",
+                f"setup_refresh_marker = true\n{manager.MANAGED_END}\n",
+            )
+
+        manager.render_config = refreshed_config
+        try:
+            refreshed = manager.update_setup(target)
+            if refreshed.get("content_setup_id") != manager.DEFAULT_CONTENT_SETUP:
+                raise ValueError("setup update changed installed setup identity")
+            if refreshed.get("permission_profile_id") != manager.DEFAULT_PROFILE:
+                raise ValueError("setup update changed installed profile identity")
+            if refreshed.get("backup_slot") != 0:
+                raise ValueError("changed setup update must create a backup slot")
+            if "config.toml" not in refreshed.get("changed", []):
+                raise ValueError("setup update did not report refreshed config")
+            if "setup_refresh_marker = true" not in (target / "config.toml").read_text(
+                encoding="utf-8"
+            ):
+                raise ValueError("setup update did not publish refreshed managed content")
+
+            repeated = manager.update_setup(target)
+            if repeated.get("changed") or repeated.get("removed") or repeated.get("changed_paths"):
+                raise ValueError("repeated setup update must be a true no-op")
+            if repeated.get("backup_slot") is not None:
+                raise ValueError("repeated setup update must not churn backups")
+        finally:
+            manager.render_config = original_render_config
     finally:
         temp.cleanup()
 
@@ -1726,6 +1842,17 @@ def validate_supported_host_detection_regression(manager: Any) -> None:
         raise ValueError("manager unsupported host categories mismatch")
     if manager.KIMI_PRODUCT_HOST_TO_VENDOR_PLATFORM != HOST_TO_VENDOR_PLATFORM:
         raise ValueError("manager host-to-vendor platform map mismatch")
+    if tuple(manager.KIMI_OBSERVED_VENDOR_PLATFORMS) != tuple(OBSERVED_VENDOR_PLATFORMS):
+        raise ValueError("manager observed vendor platform keys mismatch")
+    if manager.KIMI_OBSERVED_BINARY_PLATFORMS != OBSERVED_BINARY_ARTIFACTS:
+        raise ValueError("manager observed vendor artifact map mismatch")
+    if sorted(manager.KIMI_BINARY_PLATFORMS) != sorted(HOST_TO_VENDOR_PLATFORM.values()):
+        raise ValueError("manager install platform map must contain only supported host assets")
+    if (
+        manager.KIMI_INSTALL_POWERSHELL_SHA256 != INSTALL_POWERSHELL_SHA256
+        or manager.KIMI_INSTALL_POWERSHELL_SIZE_BYTES != INSTALL_POWERSHELL_SIZE_BYTES
+    ):
+        raise ValueError("manager PowerShell surface observation mismatch")
     if manager.KIMI_UBUNTU_GLIBC_VERSION_FLOOR is not None:
         raise ValueError("manager must not invent an Ubuntu/glibc version floor")
     with tempfile.TemporaryDirectory(prefix=".tmp-kimicode-host-detect-") as temp:
@@ -1854,7 +1981,7 @@ def validate_runtime_regressions() -> None:
         "lock_path(target).parent",
         "with protected_launch_path(invocation.target):",
         "expected_digest=invocation.expected_entrypoint_digest",
-        "host_platform_key = detect_official_platform()",
+        "host_platform_key = require_supported_product_host().vendor_platform_key",
         "launch requires current target-owned Kimi Code binary: host platform",
         "is_current_owner(opened)",
         "opened.st_dev != info.st_dev or opened.st_ino != info.st_ino",
@@ -1867,11 +1994,76 @@ def validate_runtime_regressions() -> None:
     protected_source = manager_text[protected_start:protected_end]
     if "        target,\n" in protected_source:
         raise ValueError("launch protection must not chmod the managed target root")
+    canonical_start = manager_text.index("def lock_canonical_target")
+    canonical_end = manager_text.index("def fixed_system_temp_root")
+    canonical_source = manager_text[canonical_start:canonical_end]
+    for forbidden in ("resolve(", "stat_existing(", "reject_symlink_ancestors("):
+        if forbidden in canonical_source:
+            raise ValueError("lock canonical target must remain lexical before external locking")
+    target_lock_start = manager_text.index("def target_lock")
+    target_lock_end = manager_text.index("def safe_target_path")
+    target_lock_source = manager_text[target_lock_start:target_lock_end]
+    if "with external_lifecycle_lock(target)" not in target_lock_source:
+        raise ValueError("target lock must acquire external lifecycle coordination first")
+    external_index = target_lock_source.index("with external_lifecycle_lock(target)")
+    for fragment in (
+        "reject_symlink_ancestors(target)",
+        'stat_existing(target.parent, "target parent")',
+        'stat_existing(target, "target")',
+        "snapshot_tree(\n                    lock_parent_path(target)",
+    ):
+        if fragment not in target_lock_source:
+            raise ValueError(f"target lock is missing ordered fragment: {fragment}")
+        if target_lock_source.index(fragment) < external_index:
+            raise ValueError("target filesystem inspection precedes external lifecycle lock")
+    status_start = manager_text.index("def status_payload")
+    status_end = manager_text.index("def stamp_managed_paths")
+    status_source = manager_text[status_start:status_end]
+    if "with external_lifecycle_lock(target)" not in status_source:
+        raise ValueError("status must read target state under external lifecycle coordination")
+    software_start = manager_text.index("def software_status_payload")
+    software_end = manager_text.index("def parse_os_release")
+    software_source = manager_text[software_start:software_end]
+    if "with external_lifecycle_lock(target)" not in software_source:
+        raise ValueError(
+            "software-status must read target state under external lifecycle coordination"
+        )
+    plan_start = manager_text.index("def plan_payload")
+    plan_end = manager_text.index("def software_root")
+    plan_source = manager_text[plan_start:plan_end]
+    if "with external_lifecycle_lock(target)" not in plan_source:
+        raise ValueError("plan must read target state under external lifecycle coordination")
+    install_start = manager_text.index("def install_or_update_software")
+    install_end = manager_text.index("def verify_removed_software_postcondition")
+    install_source = manager_text[install_start:install_end]
+    if "path_exists_no_follow(target)" in install_source:
+        raise ValueError("software install/update must not inspect target before target_lock")
+    if install_source.index("with target_lock(target") > install_source.index(
+        "_software_status_payload_locked(target)"
+    ):
+        raise ValueError("software install/update status must run after target_lock acquisition")
+    remove_start = manager_text.index("def remove_software")
+    remove_end = manager_text.index("def reject_managed_launch_overrides")
+    remove_source = manager_text[remove_start:remove_end]
+    if remove_source.index("with target_lock(target") > remove_source.index(
+        "_software_status_payload_locked(target)"
+    ):
+        raise ValueError("remove-cli status must run after target_lock acquisition")
+    dispatch_start = manager_text.index("def dispatch")
+    dispatch_end = manager_text.index("def main")
+    dispatch_source = manager_text[dispatch_start:dispatch_end]
+    switch_source = dispatch_source[
+        dispatch_source.index('if args.command == "switch-profile"') : dispatch_source.index(
+            'if args.command == "migrate"'
+        )
+    ]
+    if "read_stamp(target)" in switch_source:
+        raise ValueError("switch-profile dispatch must not read target state before lifecycle lock")
     prepare_start = manager_text.index("def prepare_launch_invocation(")
     prepare_end = manager_text.index("def launch(")
     prepare_source = manager_text[prepare_start:prepare_end]
     if prepare_source.index(
-        "host_platform_key = detect_official_platform()"
+        "host_platform_key = require_supported_product_host().vendor_platform_key"
     ) > prepare_source.index("with target_lock(target):"):
         raise ValueError(
             "prepare launch must reject unsupported hosts before acquiring lifecycle locks"
@@ -1879,18 +2071,21 @@ def validate_runtime_regressions() -> None:
     launch_start = manager_text.index("def launch(")
     launch_end = manager_text.index("def parse_args")
     launch_source = manager_text[launch_start:launch_end]
-    if launch_source.index("host_platform_key = detect_official_platform()") > launch_source.index(
-        "with target_lock(target):"
-    ):
+    if launch_source.index(
+        "host_platform_key = require_supported_product_host().vendor_platform_key"
+    ) > launch_source.index("with target_lock(target):"):
         raise ValueError("launch must reject unsupported hosts before acquiring lifecycle locks")
 
     def run_isolated_runtime_regressions() -> None:
         validate_supported_host_detection_regression(manager)
         validate_json_argument_error_regression(manager)
+        validate_setup_update_regression(manager)
         validate_status_launch_allowed_regression(manager)
         validate_corrupt_backup_regression(manager)
         validate_strict_backup_restore_regression(manager)
         validate_remove_cli_regression(manager)
+        validate_lifecycle_lock_order_regression(manager)
+        validate_unsupported_command_preflight_regression(manager)
         validate_unsupported_launch_preflight_regression(manager)
         validate_external_lock_binding_regression(manager)
         validate_external_lock_persistent_inode_handover_regression(manager)
@@ -1996,6 +2191,204 @@ def validate_remove_cli_regression(manager: Any) -> None:
             raise ValueError("remove-cli repeated absent state must be a no-op")
     finally:
         temp.cleanup()
+
+
+def validate_lifecycle_lock_order_regression(manager: Any) -> None:
+    temp, target = make_isolated_target("lock-order-")
+    try:
+        target_parent = target.parent
+        backup_root = manager.backup_pool(target)
+        events: list[str] = []
+        real_acquire = manager.acquire_lock_file
+        real_stat_existing = manager.stat_existing
+        real_reject_symlink_ancestors = manager.reject_symlink_ancestors
+
+        def in_target_scope(path: Path) -> bool:
+            candidate = Path(path)
+            return (
+                candidate == target
+                or candidate == target_parent
+                or target in candidate.parents
+                or candidate == backup_root
+                or backup_root in candidate.parents
+            )
+
+        def traced_acquire_lock_file(
+            path: Path, label: str, *, canonical_target: str, kind: str
+        ) -> int:
+            if kind == "external-bootstrap":
+                events.append("external-lock")
+            elif kind == "target-internal":
+                events.append("target-lock")
+            return real_acquire(
+                path,
+                label,
+                canonical_target=canonical_target,
+                kind=kind,
+            )
+
+        def traced_stat_existing(path: Path, label: str) -> os.stat_result | None:
+            if in_target_scope(path):
+                events.append(f"target-stat:{label}")
+            return real_stat_existing(path, label)
+
+        def traced_reject_symlink_ancestors(path: Path) -> None:
+            if in_target_scope(path):
+                events.append("target-ancestor-check")
+            real_reject_symlink_ancestors(path)
+
+        manager.acquire_lock_file = traced_acquire_lock_file
+        manager.stat_existing = traced_stat_existing
+        manager.reject_symlink_ancestors = traced_reject_symlink_ancestors
+        try:
+            manager.status_payload(target)
+            status_events = list(events)
+            events.clear()
+            manager.write_setup(
+                target,
+                manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP),
+                manager.load_profile(manager.DEFAULT_PROFILE),
+            )
+            write_events = list(events)
+        finally:
+            manager.acquire_lock_file = real_acquire
+            manager.stat_existing = real_stat_existing
+            manager.reject_symlink_ancestors = real_reject_symlink_ancestors
+
+        for label, observed in (("status", status_events), ("write_setup", write_events)):
+            if "external-lock" not in observed:
+                raise ValueError(f"{label} did not acquire an external lifecycle lock")
+            first_target = next(
+                (index for index, event in enumerate(observed) if event.startswith("target-")),
+                None,
+            )
+            if first_target is None:
+                raise ValueError(f"{label} did not exercise target-state observation")
+            if observed.index("external-lock") > first_target:
+                raise ValueError(
+                    f"{label} observed target state before external lifecycle lock: {observed}"
+                )
+    finally:
+        temp.cleanup()
+
+
+def command_argv(name: str, target: Path) -> list[str]:
+    if name in {"status", "update", "remove", "software-status"}:
+        return [name, "--target", str(target), "--json"]
+    if name in {"install-cli", "update-cli", "migrate-cli", "remove-cli"}:
+        return [name, "--target", str(target), "--json"]
+    if name == "plan":
+        return [name, "--target", str(target), "--json"]
+    if name == "install":
+        return [name, "--target", str(target), "--json"]
+    if name == "switch-profile":
+        return [name, "--profile", "safe", "--target", str(target), "--json"]
+    if name == "migrate":
+        return [name, "--target", str(target), "--json"]
+    if name == "restore":
+        return [name, "--backup", "0", "--target", str(target), "--json"]
+    if name == "launch":
+        return [name, "--target", str(target), "--json", "--", "--version"]
+    raise ValueError(f"unhandled command fixture: {name}")
+
+
+def invoke_json_error(manager: Any, argv: list[str]) -> tuple[int, dict[str, Any], str]:
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+    with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr):
+        code = manager.main(argv)
+    try:
+        payload = json.loads(stdout.getvalue())
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"command did not return JSON: {argv}: {stdout.getvalue()}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"command returned non-object JSON: {argv}: {payload}")
+    return code, payload, stderr.getvalue()
+
+
+def validate_unsupported_command_preflight_regression(manager: Any) -> None:
+    cases = (
+        ("windows", "Windows", "AMD64", "unknown", False),
+        ("non-ubuntu-linux", "Linux", "x86_64", "debian", False),
+        ("linux-musl", "Linux", "x86_64", "ubuntu", True),
+        ("unsupported-architecture", "Linux", "riscv64", "ubuntu", False),
+    )
+    commands = (
+        "status",
+        "plan",
+        "install",
+        "update",
+        "switch-profile",
+        "migrate",
+        "restore",
+        "remove",
+        "software-status",
+        "install-cli",
+        "update-cli",
+        "migrate-cli",
+        "remove-cli",
+        "launch",
+    )
+    original_system = manager.platform.system
+    original_machine = manager.platform.machine
+    original_distribution = manager.detect_linux_distribution
+    original_musl = manager.linux_libc_is_musl
+    original_fetch = manager.fetch_url_bytes
+    fetches: list[str] = []
+
+    def blocked_fetch(url: str, **_kwargs: Any) -> bytes:
+        fetches.append(url)
+        raise ValueError(f"unexpected network fetch under unsupported host: {url}")
+
+    manager.fetch_url_bytes = blocked_fetch
+    try:
+        for category, system, machine, distro_id, musl in cases:
+            manager.platform.system = lambda system=system: system
+            manager.platform.machine = lambda machine=machine: machine
+            manager.detect_linux_distribution = lambda *args, distro_id=distro_id, **kwargs: (
+                manager.LinuxDistribution(
+                    distro_id=distro_id,
+                    id_like=(),
+                    pretty_name=distro_id,
+                    source="public validator fixture",
+                )
+            )
+            manager.linux_libc_is_musl = lambda *args, musl=musl, **kwargs: musl
+            for command in commands:
+                temp, target = make_isolated_target(f"host-preflight-{category}-{command}-")
+                before = bootstrap_tree_snapshot(manager)
+                try:
+                    code, payload, stderr = invoke_json_error(
+                        manager,
+                        command_argv(command, target),
+                    )
+                    if code != 2:
+                        raise ValueError(f"{command} on {category} returned {code}, expected 2")
+                    if stderr:
+                        raise ValueError(f"{command} on {category} wrote stderr: {stderr}")
+                    expected = f"unsupported host category: {category}"
+                    if expected not in str(payload.get("error")):
+                        raise ValueError(
+                            f"{command} on {category} returned unstable error: {payload}"
+                        )
+                    if target.exists():
+                        raise ValueError(f"{command} on {category} created target")
+                    if before != bootstrap_tree_snapshot(manager):
+                        raise ValueError(f"{command} on {category} created lock artifacts")
+                    if list(
+                        target.parent.glob(f".{target.name}{manager.SOFTWARE_STAGE_FRAGMENT}.*")
+                    ):
+                        raise ValueError(f"{command} on {category} created software stage")
+                finally:
+                    temp.cleanup()
+    finally:
+        manager.fetch_url_bytes = original_fetch
+        manager.platform.system = original_system
+        manager.platform.machine = original_machine
+        manager.detect_linux_distribution = original_distribution
+        manager.linux_libc_is_musl = original_musl
+    if fetches:
+        raise ValueError(f"unsupported host commands attempted network fetches: {fetches}")
 
 
 def validate_unsupported_launch_preflight_regression(manager: Any) -> None:

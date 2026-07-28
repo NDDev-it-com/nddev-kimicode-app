@@ -26,6 +26,8 @@ host IDs, unsupported categories, and vendor asset mapping are owned by
 
 `cli-tools/nddev_kimicode.py` owns the command parser and JSON payloads. Use
 `--help` from the repository root when you need the current command surface.
+The setup `update` command refreshes the already installed setup/profile
+identity from the current public catalog.
 
 ## Runtime Baseline
 
@@ -39,7 +41,9 @@ behavior is owned by `cli-tools/nddev_kimicode.py`.
 `update-cli`, `migrate-cli`, and `remove-cli` own the target-owned Kimi software
 lifecycle. `remove-cli` is a deterministic no-op when target-owned software
 presence is absent. Ubuntu desktop and server share the same `ID=ubuntu` glibc
-host check; upstream publishes no official Ubuntu/glibc version floor.
+host check; upstream publishes no official Ubuntu/glibc version floor. Windows
+artifacts and the official PowerShell installer are recorded as upstream
+observations only and remain product-unsupported.
 
 `launch` holds the managed lifecycle boundary until the child process exits, so
 setup, profile, software, restore, and remove mutations fail while the managed

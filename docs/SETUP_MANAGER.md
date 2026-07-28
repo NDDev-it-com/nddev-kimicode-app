@@ -8,7 +8,8 @@ The manager writes NDDev-owned setup content into the explicit target. The exact
 managed path set is owned by `cli-tools/nddev_kimicode.py:content_managed_paths`.
 Managed TOML and Markdown content is written inside NDDev marker blocks so local
 state outside those blocks survives install, profile switches, migration,
-restore, and remove.
+restore, update, and remove. Setup `update` refreshes the installed setup and
+profile identity from the current public catalog.
 
 Runtime plugin install state remains Kimi-owned and is not written directly by
 the manager.
@@ -41,7 +42,9 @@ never launch.
 
 Release versions, URLs, manifest hashes, upstream platform assets, product host
 mapping, and the no-official-floor Ubuntu/glibc observation are owned by
-`references/kimi-code-baseline.json` and `config/nddev-contract.json`.
+`references/kimi-code-baseline.json` and `config/nddev-contract.json`. Windows
+artifacts and the official PowerShell installer are recorded as upstream
+observations only and remain product-unsupported.
 
 ## Launch Isolation
 
