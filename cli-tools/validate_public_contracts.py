@@ -993,8 +993,20 @@ def validate_external_lock_binding_regression(manager: Any) -> None:
         if not internal_path.is_file():
             raise ValueError("target lifecycle lock must be persistent after normal release")
         internal_info = internal_path.lstat()
+        valid_payload = manager.canonical_json(
+            manager.lock_payload("external-bootstrap", canonical_target, lock_path)
+        )
 
         lock_path.write_bytes(b"")
+        lock_path.chmod(0o600)
+        try:
+            manager.write_setup(target, setup, manager.load_profile("safe"), require_existing=True)
+        except manager.KimicodeSetupError as exc:
+            if "binding is missing" not in str(exc):
+                raise ValueError(f"empty external lock binding returned unstable error: {exc}") from exc
+        else:
+            raise ValueError("empty external lock binding unexpectedly succeeded")
+        lock_path.write_bytes(valid_payload)
         lock_path.chmod(0o600)
         manager.write_setup(target, setup, manager.load_profile("safe"), require_existing=True)
         if not lock_path.is_file():
@@ -1014,6 +1026,8 @@ def validate_external_lock_binding_regression(manager: Any) -> None:
                 raise ValueError(f"malformed external lock binding returned unstable error: {exc}") from exc
         else:
             raise ValueError("malformed external lock binding unexpectedly succeeded")
+        lock_path.write_bytes(valid_payload)
+        lock_path.chmod(0o600)
 
         payload = manager.lock_payload(
             "external-bootstrap",
@@ -1029,6 +1043,8 @@ def validate_external_lock_binding_regression(manager: Any) -> None:
                 raise ValueError(f"external lock binding returned unstable error: {exc}") from exc
         else:
             raise ValueError("external lock binding mismatch unexpectedly succeeded")
+        lock_path.write_bytes(valid_payload)
+        lock_path.chmod(0o600)
 
         payload = manager.lock_payload("external-bootstrap", canonical_target, target / "wrong.lock")
         lock_path.write_bytes(manager.canonical_json(payload))
@@ -1041,8 +1057,7 @@ def validate_external_lock_binding_regression(manager: Any) -> None:
         else:
             raise ValueError("external lock path binding mismatch unexpectedly succeeded")
 
-        payload = manager.lock_payload("external-bootstrap", canonical_target, lock_path)
-        lock_path.write_bytes(manager.canonical_json(payload))
+        lock_path.write_bytes(valid_payload)
         lock_path.chmod(0o600)
         manager.write_setup(target, setup, manager.load_profile("safe"), require_existing=True)
         second_info = lock_path.lstat()
@@ -1351,6 +1366,21 @@ def validate_runtime_regressions() -> None:
     protected_source = manager_text[protected_start:protected_end]
     if "        target,\n" in protected_source:
         raise ValueError("launch protection must not chmod the managed target root")
+    lock_source = manager_text[manager_text.index("def open_lock_file") : manager_text.index("def release_lock_file")]
+    if "os.ftruncate" in lock_source:
+        raise ValueError("lifecycle lock final anchors must not be truncated or rebound")
+    if "O_CREAT | os.O_EXCL" in lock_source:
+        raise ValueError("lifecycle lock final anchors must not be created empty")
+    for required in (
+        "def rename_no_replace",
+        "RENAME_EXCL_DARWIN",
+        "RENAME_NOREPLACE_LINUX",
+        "publish_missing_lock_file",
+        "write_lock_stage_file",
+        "fsync_directory(parent)",
+    ):
+        if required not in manager_text:
+            raise ValueError(f"manager is missing atomic lock publication fragment: {required}")
 
     def run_isolated_runtime_regressions() -> None:
         validate_status_launch_allowed_regression(manager)

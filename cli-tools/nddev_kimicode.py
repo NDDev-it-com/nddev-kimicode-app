@@ -7,6 +7,7 @@ import argparse
 import base64
 import binascii
 import contextlib
+import ctypes
 import errno
 import fcntl
 import hashlib
@@ -45,6 +46,15 @@ LOCK_NAME = "lifecycle.lock"
 EXTERNAL_LOCK_ROOT_NAME = f"{PRODUCT_NAME}.{os.getuid() if hasattr(os, 'getuid') else 'nouid'}.locks"
 EXTERNAL_LOCK_NAMESPACE = f"{PRODUCT_NAME}:external-bootstrap:v1"
 EXTERNAL_LOCK_SUFFIX = "external.lock"
+AT_FDCWD_BY_SYSTEM = {"darwin": -2, "linux": -100}
+RENAME_EXCL_DARWIN = 0x00000004
+RENAME_NOREPLACE_LINUX = 1
+RENAMEAT2_SYSCALL_BY_MACHINE = {
+    "amd64": 316,
+    "x86_64": 316,
+    "aarch64": 276,
+    "arm64": 276,
+}
 CURRENT_SETUP_SCHEMA = 2
 LEGACY_SETUP_SCHEMA = 1
 MANAGED_BEGIN = "# BEGIN NDDEV-KIMICODE MANAGED"
@@ -488,7 +498,139 @@ def validate_lock_info(info: os.stat_result, label: str) -> None:
         fail(f"{label} mode must be 0600")
 
 
-def open_lock_file(path: Path, label: str) -> int:
+def fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        fail(f"directory could not be opened for fsync: {path}: {exc}")
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    while view:
+        written = os.write(fd, view)
+        view = view[written:]
+
+
+def write_lock_stage_file(path: Path, payload: bytes, label: str) -> None:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
+    try:
+        try:
+            write_all(fd, payload)
+            os.fchmod(fd, OWNER_FILE_MODE)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+    except BaseException:
+        with contextlib.suppress(FileNotFoundError):
+            path.unlink()
+        raise
+    info = stat_existing(path, label)
+    if info is None:
+        fail(f"{label} staged file is missing")
+    validate_lock_info(info, label)
+    if read_existing_file(path, max_bytes=METADATA_MAX_BYTES, label=label) != payload:
+        fail(f"{label} staged binding postcondition failed")
+
+
+def cleanup_lock_stage_file(path: Path) -> None:
+    with contextlib.suppress(FileNotFoundError):
+        path.unlink()
+    with contextlib.suppress(OSError):
+        fsync_directory(path.parent)
+
+
+def rename_no_replace(source: Path, destination: Path, label: str) -> bool:
+    system = platform.system().lower()
+    source_bytes = os.fsencode(source)
+    destination_bytes = os.fsencode(destination)
+    if system == "darwin":
+        libc = ctypes.CDLL(None, use_errno=True)
+        renameatx_np = libc.renameatx_np
+        renameatx_np.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
+        renameatx_np.restype = ctypes.c_int
+        result = renameatx_np(
+            AT_FDCWD_BY_SYSTEM["darwin"],
+            source_bytes,
+            AT_FDCWD_BY_SYSTEM["darwin"],
+            destination_bytes,
+            RENAME_EXCL_DARWIN,
+        )
+    elif system == "linux":
+        machine = platform.machine().lower()
+        syscall_number = RENAMEAT2_SYSCALL_BY_MACHINE.get(machine)
+        if syscall_number is None:
+            fail(f"{label} no-replace publication is unsupported on this architecture")
+        libc = ctypes.CDLL(None, use_errno=True)
+        syscall = libc.syscall
+        syscall.restype = ctypes.c_long
+        result = syscall(
+            ctypes.c_long(syscall_number),
+            ctypes.c_int(AT_FDCWD_BY_SYSTEM["linux"]),
+            ctypes.c_char_p(source_bytes),
+            ctypes.c_int(AT_FDCWD_BY_SYSTEM["linux"]),
+            ctypes.c_char_p(destination_bytes),
+            ctypes.c_uint(RENAME_NOREPLACE_LINUX),
+        )
+    else:
+        fail(f"{label} no-replace publication is unsupported on this platform")
+    if result == 0:
+        return True
+    error = ctypes.get_errno()
+    if error == errno.EEXIST:
+        return False
+    if error in {errno.ENOSYS, errno.EINVAL, errno.ENOTSUP, errno.EOPNOTSUPP}:
+        fail(f"{label} no-replace publication primitive is unavailable")
+    fail(f"{label} no-replace publication failed: {os.strerror(error)}")
+
+
+def publish_missing_lock_file(path: Path, label: str, *, canonical_target: str, kind: str) -> None:
+    parent = path.parent
+    if stat_existing(parent, f"{label} parent") is None:
+        fail(f"{label} parent is missing")
+    payload = canonical_json(lock_payload(kind, canonical_target, path))
+    stage = path.with_name(f".{path.name}.nddev.tmp.{os.getpid()}.{time.time_ns()}")
+    published = False
+    try:
+        write_lock_stage_file(stage, payload, f"{label} staged binding")
+        if not rename_no_replace(stage, path, label):
+            cleanup_lock_stage_file(stage)
+            return
+        published = True
+        fsync_directory(parent)
+    except BaseException:
+        if path_exists_no_follow(stage):
+            with contextlib.suppress(BaseException):
+                cleanup_lock_stage_file(stage)
+        raise
+    if published:
+        fd = open_lock_file(path, label, create=False)
+        if fd is None:
+            fail(f"{label} disappeared after publication")
+        try:
+            validate_lock_binding(
+                read_lock_payload(fd, label),
+                kind=kind,
+                canonical_target=canonical_target,
+                path=path,
+                label=label,
+            )
+        finally:
+            os.close(fd)
+
+
+def open_lock_file(path: Path, label: str, *, create: bool = False) -> int | None:
     flags = os.O_RDWR
     if not hasattr(os, "O_NOFOLLOW"):
         fail("lifecycle lock requires O_NOFOLLOW support")
@@ -499,15 +641,9 @@ def open_lock_file(path: Path, label: str) -> int:
     try:
         fd = os.open(path, flags, OWNER_FILE_MODE)
     except FileNotFoundError:
-        try:
-            fd = os.open(path, flags | os.O_CREAT | os.O_EXCL, OWNER_FILE_MODE)
-        except FileExistsError:
-            try:
-                fd = os.open(path, flags, OWNER_FILE_MODE)
-            except OSError as exc:
-                fail(f"{label} could not be opened safely: {exc}")
-        except OSError as exc:
-            fail(f"{label} could not be opened safely: {exc}")
+        if create:
+            fail(f"{label} is missing")
+        return None
     except OSError as exc:
         fail(f"{label} could not be opened safely: {exc}")
     try:
@@ -575,7 +711,11 @@ def validate_lock_binding(
     label: str,
 ) -> None:
     if payload is None:
-        return
+        fail(f"{label} binding is missing")
+    if set(payload) != {"schema_version", "product_name", "kind", "canonical_target", "path", "pid"}:
+        fail(f"{label} binding is malformed")
+    if payload.get("schema_version") != 3:
+        fail(f"{label} binding schema is unsupported")
     if payload.get("product_name") != PRODUCT_NAME or payload.get("kind") != kind:
         fail(f"{label} is bound to another lifecycle owner")
     if payload.get("canonical_target") != canonical_target:
@@ -585,7 +725,16 @@ def validate_lock_binding(
 
 
 def acquire_lock_file(path: Path, label: str, *, canonical_target: str, kind: str) -> int:
-    fd = open_lock_file(path, label)
+    if stat_existing(path, label) is None:
+        publish_missing_lock_file(
+            path,
+            label,
+            canonical_target=canonical_target,
+            kind=kind,
+        )
+    fd = open_lock_file(path, label, create=False)
+    if fd is None:
+        fail(f"{label} is missing")
     try:
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except OSError as exc:
@@ -602,11 +751,6 @@ def acquire_lock_file(path: Path, label: str, *, canonical_target: str, kind: st
             path=path,
             label=label,
         )
-        payload = canonical_json(lock_payload(kind, canonical_target, path))
-        os.ftruncate(fd, 0)
-        os.lseek(fd, 0, os.SEEK_SET)
-        os.write(fd, payload)
-        os.fsync(fd)
     except BaseException:
         with contextlib.suppress(OSError):
             fcntl.flock(fd, fcntl.LOCK_UN)
