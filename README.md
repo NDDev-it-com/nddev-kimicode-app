@@ -6,6 +6,8 @@ The manager requires an explicit absolute target and never defaults to the
 user's live `~/.kimi-code`. It writes target-bound setup files, stamps ownership,
 keeps rotating backups, installs a target-owned official Kimi binary, and
 launches `bin/kimi` with isolated `HOME`, `TMPDIR`, and `KIMI_CODE_HOME`.
+Launch runs in the caller's current project directory by default, or in an
+explicit absolute project directory passed with manager `--workspace`.
 
 ## Model
 
@@ -34,7 +36,7 @@ python3 cli-tools/nddev_kimicode.py software-status --target /absolute/target --
 python3 cli-tools/nddev_kimicode.py install-cli --target /absolute/target --json
 python3 cli-tools/nddev_kimicode.py update-cli --target /absolute/target --json
 python3 cli-tools/nddev_kimicode.py migrate-cli --target /absolute/target --json
-python3 cli-tools/nddev_kimicode.py launch --target /absolute/target --
+python3 cli-tools/nddev_kimicode.py launch --target /absolute/target [--workspace /absolute/project] --
 ```
 
 ## Runtime Baseline
@@ -51,7 +53,8 @@ Kimi software.
 `launch` holds the managed lifecycle boundary until the child process exits, so
 setup, profile, software, restore, and remove mutations fail while the managed
 CLI is running. The manager revalidates the target-owned Kimi executable before
-handoff while preserving writable target and runtime state for the launched CLI.
+handoff, passes an explicit child working directory, and preserves writable
+target and runtime state for the launched CLI.
 Exact lock ordering, path protection, executable checks, and portable handoff
 mechanics are owned by `cli-tools/nddev_kimicode.py` and summarized by
 `config/nddev-contract.json`; official binary provenance is owned by
