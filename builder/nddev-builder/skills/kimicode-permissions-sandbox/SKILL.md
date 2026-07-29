@@ -23,14 +23,10 @@ audit that source before changing launch override constants or regressions.
 Do not copy the parser's full option or command list into this Skill, and do not
 deny flags that are not accepted by the audited upstream parser.
 
-Target isolation is separate from permission posture:
-
-- `HOME` points to `$KIMI_CODE_HOME/.nddev-kimicode-runtime/home`.
-- `KIMI_CODE_HOME` points to the explicit target.
-- `TMPDIR` points to target-owned runtime temp state.
-- `KIMI_DISABLE_TELEMETRY=1` is set.
-- `KIMI_CODE_BACKGROUND_KEEP_ALIVE_ON_EXIT=0` is set.
-- Live provider credentials and `KIMI_MODEL_*` variables are not inherited.
+Target isolation is separate from permission posture. The launch environment,
+credential filtering, runtime temp scope, and telemetry/keep-alive settings are
+owned by `cli-tools/nddev_kimicode.py` and summarized in
+`config/nddev-contract.json`; do not duplicate that environment list here.
 
 Never treat hooks as the only security boundary. Kimi hooks are fail-open by
 design; manager-side target checks, launch override blocking, locks, backups,

@@ -8,25 +8,14 @@ disableModelInvocation: false
 
 # Kimi Hooks
 
-Managed target path:
-
-- `$KIMI_CODE_HOME/hooks/nddev-builder-pretooluse.py`
-
 Config owner:
 
-- `cli-tools/nddev_kimicode.py` renders `[[hooks]]` in `$KIMI_CODE_HOME/config.toml`.
+- `cli-tools/nddev_kimicode.py` owns hook path selection and rendered config.
 - The default `full-auto` profile does not activate blocking hooks.
 - The `safe` profile may activate a `PreToolUse` hook as a supervised-mode guard.
 
-Hook schema:
-
-- `event`
-- `matcher`
-- `command`
-- `timeout`
-
 Do not add extra fields to `[[hooks]]`; Kimi fails config loading on unsupported
-hook fields.
+hook fields. Audit the manager renderer before changing hook schema assumptions.
 
 Adapter rules:
 

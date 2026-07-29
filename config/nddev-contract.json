@@ -18,9 +18,14 @@
   },
   "setup_system": {
     "content_catalog_root": "setups",
-    "content_setup_ids": ["nddev-builder"],
+    "content_setup_ids": [
+      "nddev-builder"
+    ],
     "permission_profile_root": "profiles",
-    "permission_profile_ids": ["safe", "full-auto"],
+    "permission_profile_ids": [
+      "safe",
+      "full-auto"
+    ],
     "default_content_setup": "nddev-builder",
     "default_permission_profile": "full-auto",
     "safe_native_permission_mode": "manual",
@@ -30,11 +35,12 @@
     "status_command": "python3 cli-tools/nddev_kimicode.py status --target /absolute/target --json",
     "plan_command": "python3 cli-tools/nddev_kimicode.py plan --setup nddev-builder --profile full-auto --target /absolute/target --json",
     "install_command": "python3 cli-tools/nddev_kimicode.py install --setup nddev-builder --profile full-auto --target /absolute/target --json",
+    "update_command": "python3 cli-tools/nddev_kimicode.py update --target /absolute/target --json",
     "switch_profile_command": "python3 cli-tools/nddev_kimicode.py switch-profile --profile safe --target /absolute/target --json",
     "migrate_command": "python3 cli-tools/nddev_kimicode.py migrate --setup nddev-builder --profile full-auto --target /absolute/target --json",
     "restore_command": "python3 cli-tools/nddev_kimicode.py restore --backup 0 --target /absolute/target --json",
     "remove_command": "python3 cli-tools/nddev_kimicode.py remove --target /absolute/target --json",
-    "launch_command": "python3 cli-tools/nddev_kimicode.py launch --target /absolute/target [--workspace /absolute/project] --"
+    "launch_command": "python3 cli-tools/nddev_kimicode.py launch --target /absolute/target --"
   },
   "safety": {
     "absolute_target_required": true,
@@ -50,9 +56,22 @@
     "launch_filters_live_credentials": true,
     "launch_blocks_managed_mode_overrides": true,
     "launch_holds_lifecycle_lock": true,
-    "launch_uses_external_product_lifecycle_lock": true,
+    "launch_uses_external_product_coordination_lock": true,
     "launch_uses_external_target_bound_lifecycle_lock": true,
     "launch_keeps_external_lock_file_persistent": true,
+    "external_anchor_publication_no_replace": true,
+    "external_anchor_final_path_commit_point": true,
+    "external_product_anchor_monotonic": true,
+    "external_target_anchor_monotonic": true,
+    "read_only_commands_do_not_create_external_anchors": true,
+    "read_only_cold_no_anchor_double_check": true,
+    "read_only_cold_namespace_must_be_empty": true,
+    "cleanup_journal_two_phase_no_replace": true,
+    "cleanup_journal_path_safe_relative_tombstones": true,
+    "cleanup_pending_read_only_report_only": true,
+    "cleanup_pending_malformed_state_fails_closed": true,
+    "cleanup_pending_mutations_drain_first": true,
+    "cleanup_pending_noop_is_not_true_noop": true,
     "launch_keeps_internal_lock_file_persistent": true,
     "launch_protects_internal_lock_directory_while_held": true,
     "launch_uses_stable_fcntl_flock": true,
@@ -68,9 +87,282 @@
     "tested_release": "0.29.2",
     "official_install_channel": "official-binary",
     "npm_alternative_recorded": true,
+    "supported_hosts": [
+      "macos-arm64",
+      "macos-x64",
+      "ubuntu-glibc-arm64",
+      "ubuntu-glibc-x64"
+    ],
+    "unsupported_host_categories": [
+      "windows",
+      "non-ubuntu-linux",
+      "linux-musl",
+      "unsupported-architecture"
+    ],
+    "host_to_vendor_platform": {
+      "macos-arm64": "darwin-arm64",
+      "macos-x64": "darwin-x64",
+      "ubuntu-glibc-arm64": "linux-arm64",
+      "ubuntu-glibc-x64": "linux-x64"
+    },
+    "observed_vendor_platforms": [
+      "darwin-arm64",
+      "darwin-x64",
+      "linux-arm64",
+      "linux-x64",
+      "win32-arm64",
+      "win32-x64"
+    ],
+    "observed_vendor_artifacts": {
+      "darwin-arm64": {
+        "filename": "kimi-code-darwin-arm64",
+        "url": "https://code.kimi.com/kimi-code/binaries/0.29.2/kimi-code-darwin-arm64",
+        "size_bytes": 160002496,
+        "sha256": "25dc8b14f8bb5ef98470577265b1e9c95892c168f34e9639c5f63b48d4ece6fb",
+        "supported_product_hosts": [
+          "macos-arm64"
+        ]
+      },
+      "darwin-x64": {
+        "filename": "kimi-code-darwin-x64",
+        "url": "https://code.kimi.com/kimi-code/binaries/0.29.2/kimi-code-darwin-x64",
+        "size_bytes": 162344320,
+        "sha256": "fe59f14cab74971768377e586bf3be30c1ca04079c058d4b492827ca4dfd6b16",
+        "supported_product_hosts": [
+          "macos-x64"
+        ]
+      },
+      "linux-arm64": {
+        "filename": "kimi-code-linux-arm64",
+        "url": "https://code.kimi.com/kimi-code/binaries/0.29.2/kimi-code-linux-arm64",
+        "size_bytes": 160500864,
+        "sha256": "5fb64e74eeec0b3900732cfbc3679cc505beb51aa323f486154fd79b0e20b26a",
+        "supported_product_hosts": [
+          "ubuntu-glibc-arm64"
+        ]
+      },
+      "linux-x64": {
+        "filename": "kimi-code-linux-x64",
+        "url": "https://code.kimi.com/kimi-code/binaries/0.29.2/kimi-code-linux-x64",
+        "size_bytes": 162860224,
+        "sha256": "f9977d259ed36019793cadf04b1f0343f12aaebfa76f90fa26cd3b02be671231",
+        "supported_product_hosts": [
+          "ubuntu-glibc-x64"
+        ]
+      },
+      "win32-arm64": {
+        "filename": "kimi-code-win32-arm64.exe",
+        "url": "https://code.kimi.com/kimi-code/binaries/0.29.2/kimi-code-win32-arm64.exe",
+        "size_bytes": 120212992,
+        "sha256": "26cd0ab7267aab92530a9584778deb5fa2c37c44131c8b2d8ec653e474f288c8",
+        "supported_product_hosts": []
+      },
+      "win32-x64": {
+        "filename": "kimi-code-win32-x64.exe",
+        "url": "https://code.kimi.com/kimi-code/binaries/0.29.2/kimi-code-win32-x64.exe",
+        "size_bytes": 131644416,
+        "sha256": "32ea71e814b53958afaa37f15982647e6c832cb70922941ca35a57d01f64e12f",
+        "supported_product_hosts": []
+      }
+    },
+    "official_windows_install_surface": {
+      "powershell_script_url": "https://code.kimi.com/kimi-code/install.ps1",
+      "powershell_script_sha256": "28a0473a7c56d41eae52cb4dbd3232f87a9133dd7af416a6a04dfbf7856fa9fc",
+      "powershell_script_size_bytes": 15891,
+      "product_supported": false
+    },
+    "ubuntu_glibc_version_floor": null,
+    "ubuntu_glibc_version_floor_source": "no-official-floor",
     "windows_supported": false,
     "macos_supported": true,
-    "ubuntu_linux_glibc_supported": true
+    "ubuntu_linux_glibc_supported": true,
+    "generic_linux_supported": false,
+    "non_ubuntu_linux_supported": false,
+    "linux_musl_supported": false,
+    "vendor_distribution_observations": {
+      "github_release_assets": {
+        "source_family": "github-release-assets",
+        "release_url": "https://github.com/MoonshotAI/kimi-code/releases/tag/%40moonshot-ai/kimi-code%400.29.2",
+        "api_url": "https://api.github.com/repos/MoonshotAI/kimi-code/releases/tags/%40moonshot-ai%2Fkimi-code%400.29.2",
+        "release_id": 360239506,
+        "tag": "@moonshot-ai/kimi-code@0.29.2",
+        "asset_count": 13,
+        "platform_zip_count": 6,
+        "sha256_sidecar_count": 6,
+        "manifest_count": 1,
+        "assets": {
+          "kimi-code-darwin-arm64.zip": {
+            "kind": "platform-zip",
+            "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.29.2/kimi-code-darwin-arm64.zip",
+            "size_bytes": 50866147,
+            "sha256": "33fe10b7059ec39eecad8fc36b25059abc80c3d64d6d3975aa15c8fe183f5784"
+          },
+          "kimi-code-darwin-arm64.zip.sha256": {
+            "kind": "sha256-sidecar",
+            "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.29.2/kimi-code-darwin-arm64.zip.sha256",
+            "size_bytes": 93,
+            "sha256": "073f840e4bc81de3c12c638147cf0265f03e53bd11b63d4b9d708fe5a4b23192"
+          },
+          "kimi-code-darwin-x64.zip": {
+            "kind": "platform-zip",
+            "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.29.2/kimi-code-darwin-x64.zip",
+            "size_bytes": 51878729,
+            "sha256": "5e206bfe7251aa391b6700a53f6431dd2d9bf89e2693ab6eb440e20a332a72df"
+          },
+          "kimi-code-darwin-x64.zip.sha256": {
+            "kind": "sha256-sidecar",
+            "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.29.2/kimi-code-darwin-x64.zip.sha256",
+            "size_bytes": 91,
+            "sha256": "e8864e2529e91883de1ec3deb859e7b998634d7dcd0c54eb8d806372e8e7a6c1"
+          },
+          "kimi-code-linux-arm64.zip": {
+            "kind": "platform-zip",
+            "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.29.2/kimi-code-linux-arm64.zip",
+            "size_bytes": 54391806,
+            "sha256": "674622a6a274b7b84f2127a55c66b3744c0286fc37ae1ef20cf9c411042e63a8"
+          },
+          "kimi-code-linux-arm64.zip.sha256": {
+            "kind": "sha256-sidecar",
+            "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.29.2/kimi-code-linux-arm64.zip.sha256",
+            "size_bytes": 92,
+            "sha256": "6f05e3e7be7b5a16c7c739307afdb70dc23c00f72648f75e328217826591a16e"
+          },
+          "kimi-code-linux-x64.zip": {
+            "kind": "platform-zip",
+            "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.29.2/kimi-code-linux-x64.zip",
+            "size_bytes": 54418242,
+            "sha256": "20c184d8b0c0f8d7245a58eaf9c130be05878618e17e221eeefd352dcc011147"
+          },
+          "kimi-code-linux-x64.zip.sha256": {
+            "kind": "sha256-sidecar",
+            "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.29.2/kimi-code-linux-x64.zip.sha256",
+            "size_bytes": 90,
+            "sha256": "d77ca236c83e3d4d8af1d6fe5c11876a6c1c4a8257b50754a053d9d5f1e0e59e"
+          },
+          "kimi-code-win32-arm64.zip": {
+            "kind": "platform-zip",
+            "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.29.2/kimi-code-win32-arm64.zip",
+            "size_bytes": 42022575,
+            "sha256": "379be73d6b7fb9fbb582c3187e90251efddaf5a18caf16c77dfc5158c39b1a5c"
+          },
+          "kimi-code-win32-arm64.zip.sha256": {
+            "kind": "sha256-sidecar",
+            "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.29.2/kimi-code-win32-arm64.zip.sha256",
+            "size_bytes": 92,
+            "sha256": "2bd34e8feabf9c75cfb6abf75f52faca90a5fb34030ab77ce3de326528bd90cd"
+          },
+          "kimi-code-win32-x64.zip": {
+            "kind": "platform-zip",
+            "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.29.2/kimi-code-win32-x64.zip",
+            "size_bytes": 45840378,
+            "sha256": "0abd43b7428f493b2736ac3a4c8fc315e5fc4aa22dfb26dd764e1348e5b80718"
+          },
+          "kimi-code-win32-x64.zip.sha256": {
+            "kind": "sha256-sidecar",
+            "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.29.2/kimi-code-win32-x64.zip.sha256",
+            "size_bytes": 90,
+            "sha256": "1b9276869597b39f42184dac95999961c8d2a7fa08ecb59ebbe6b2d1b17775b0"
+          },
+          "manifest.json": {
+            "kind": "manifest",
+            "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.29.2/manifest.json",
+            "size_bytes": 1041,
+            "sha256": "650a07b7b10f74eec20fb12b452f80b5319e6250563abf60acee97fc3aac9e12"
+          }
+        }
+      },
+      "code_kimi_binary_manifest": {
+        "source_family": "code.kimi.com-binary-manifest",
+        "manifest_url": "https://code.kimi.com/kimi-code/binaries/0.29.2/manifest.json",
+        "manifest_sha256": "6057703f6430964741198c81617737bcec917082d1ce4aadd7a1b8c29787ae9b",
+        "manifest_size_bytes": 929,
+        "version": "0.29.2",
+        "tag": "@moonshot-ai/kimi-code@0.29.2",
+        "platform_count": 6,
+        "observed_vendor_platforms": [
+          "darwin-arm64",
+          "darwin-x64",
+          "linux-arm64",
+          "linux-x64",
+          "win32-arm64",
+          "win32-x64"
+        ],
+        "platforms": {
+          "darwin-arm64": {
+            "filename": "kimi-code-darwin-arm64",
+            "url": "https://code.kimi.com/kimi-code/binaries/0.29.2/kimi-code-darwin-arm64",
+            "size_bytes": 160002496,
+            "sha256": "25dc8b14f8bb5ef98470577265b1e9c95892c168f34e9639c5f63b48d4ece6fb",
+            "supported_product_hosts": [
+              "macos-arm64"
+            ]
+          },
+          "darwin-x64": {
+            "filename": "kimi-code-darwin-x64",
+            "url": "https://code.kimi.com/kimi-code/binaries/0.29.2/kimi-code-darwin-x64",
+            "size_bytes": 162344320,
+            "sha256": "fe59f14cab74971768377e586bf3be30c1ca04079c058d4b492827ca4dfd6b16",
+            "supported_product_hosts": [
+              "macos-x64"
+            ]
+          },
+          "linux-arm64": {
+            "filename": "kimi-code-linux-arm64",
+            "url": "https://code.kimi.com/kimi-code/binaries/0.29.2/kimi-code-linux-arm64",
+            "size_bytes": 160500864,
+            "sha256": "5fb64e74eeec0b3900732cfbc3679cc505beb51aa323f486154fd79b0e20b26a",
+            "supported_product_hosts": [
+              "ubuntu-glibc-arm64"
+            ]
+          },
+          "linux-x64": {
+            "filename": "kimi-code-linux-x64",
+            "url": "https://code.kimi.com/kimi-code/binaries/0.29.2/kimi-code-linux-x64",
+            "size_bytes": 162860224,
+            "sha256": "f9977d259ed36019793cadf04b1f0343f12aaebfa76f90fa26cd3b02be671231",
+            "supported_product_hosts": [
+              "ubuntu-glibc-x64"
+            ]
+          },
+          "win32-arm64": {
+            "filename": "kimi-code-win32-arm64.exe",
+            "url": "https://code.kimi.com/kimi-code/binaries/0.29.2/kimi-code-win32-arm64.exe",
+            "size_bytes": 120212992,
+            "sha256": "26cd0ab7267aab92530a9584778deb5fa2c37c44131c8b2d8ec653e474f288c8",
+            "supported_product_hosts": []
+          },
+          "win32-x64": {
+            "filename": "kimi-code-win32-x64.exe",
+            "url": "https://code.kimi.com/kimi-code/binaries/0.29.2/kimi-code-win32-x64.exe",
+            "size_bytes": 131644416,
+            "sha256": "32ea71e814b53958afaa37f15982647e6c832cb70922941ca35a57d01f64e12f",
+            "supported_product_hosts": []
+          }
+        }
+      },
+      "product_selections": {
+        "supported_hosts": [
+          "macos-arm64",
+          "macos-x64",
+          "ubuntu-glibc-arm64",
+          "ubuntu-glibc-x64"
+        ],
+        "host_to_vendor_platform": {
+          "macos-arm64": "darwin-arm64",
+          "macos-x64": "darwin-x64",
+          "ubuntu-glibc-arm64": "linux-arm64",
+          "ubuntu-glibc-x64": "linux-x64"
+        },
+        "unsupported_host_categories": [
+          "windows",
+          "non-ubuntu-linux",
+          "linux-musl",
+          "unsupported-architecture"
+        ],
+        "ubuntu_glibc_version_floor": null,
+        "ubuntu_glibc_version_floor_source": "no-official-floor"
+      }
+    }
   },
   "software_lifecycle": {
     "stamp_file": "NDDEV-KIMICODE-SOFTWARE.json",
@@ -80,10 +372,13 @@
     "install_command": "python3 cli-tools/nddev_kimicode.py install-cli --target /absolute/target --json",
     "update_command": "python3 cli-tools/nddev_kimicode.py update-cli --target /absolute/target --json",
     "migrate_command": "python3 cli-tools/nddev_kimicode.py migrate-cli --target /absolute/target --json",
+    "remove_command": "python3 cli-tools/nddev_kimicode.py remove-cli --target /absolute/target --json",
     "presence_signal": "software-status JSON exposes present=true and presence entries for NDDEV-KIMICODE-SOFTWARE.json, .nddev-kimicode-software, .nddev-kimicode-software/current, or bin/kimi",
     "install_precondition": "install-cli refuses existing target-owned software presence unless current",
     "update_precondition": "update-cli repairs non-legacy official-binary target-owned software presence and refuses absent or legacy software state",
     "migrate_precondition": "migrate-cli is the only transition from legacy Bun schema to official-binary schema",
+    "remove_precondition": "remove-cli is a deterministic no-op when target-owned software presence is absent and otherwise removes only target-owned software paths",
+    "remove_absent_noop": true,
     "channel": "official-binary",
     "manifest_url": "https://code.kimi.com/kimi-code/binaries/0.29.2/manifest.json",
     "manifest_sha256": "6057703f6430964741198c81617737bcec917082d1ce4aadd7a1b8c29787ae9b",
@@ -92,7 +387,10 @@
     "entrypoint": "bin/kimi",
     "entrypoint_kind": "official-binary",
     "status_executes_binary": false,
-    "staged_version_probe": ["bin/kimi", "--version"],
+    "staged_version_probe": [
+      "bin/kimi",
+      "--version"
+    ],
     "private_modes": {
       "directories": "0700",
       "owner_executable_files": "0700",
@@ -103,28 +401,24 @@
   },
   "runtime_launch": {
     "command": "kimi",
-    "direct_command": ["/absolute/target/bin/kimi"],
-    "manager_command": "python3 cli-tools/nddev_kimicode.py launch --target /absolute/target [--workspace /absolute/project] --",
+    "direct_command": [
+      "/absolute/target/bin/kimi"
+    ],
+    "manager_command": "python3 cli-tools/nddev_kimicode.py launch --target /absolute/target --",
     "required_version": "0.29.2",
     "environment_variable": "NDDEV_KIMICODE_TARGET",
     "forwards_arguments": true,
     "forwards_child_exit_code": true,
     "streams_child_stdio": true,
     "json_manager_errors_supported": true,
-    "target_role": "manager-owned-runtime-home",
-    "workspace_default_source": "captured-caller-cwd",
-    "manager_workspace_argument": "--workspace",
-    "child_cwd_policy": "explicit-subprocess-cwd",
-    "native_cwd_flag": null,
-    "workspace_expansion_blocked": ["--add-dir", "--add-dir=<dir>"],
     "target_environment_scope": "target-owned /absolute/target/bin/kimi with isolated HOME, TMPDIR, and KIMI_CODE_HOME; credentials, sessions, logs, skills, agents, plugins, MCP, updates, and runtime data stay under the explicit target",
     "pre_login_supported": true,
-    "lifecycle_lock_scope": "External product coordination is acquired before target creation or inspection, hands off to the canonical external target lock, then the target-local internal lock is acquired; external target and internal locks are held from launch preflight through child process completion and cleanup; internal is released first and external target last",
+    "lifecycle_lock_scope": "Target-bound mutation and launch acquire the persistent external product anchor first before target filesystem observation, canonicalization runs under that product handoff, the canonical target anchor is opened or published under exclusive product coordination, product coordination is released after target-anchor handoff, target-local internal lock is acquired second for mutations and launch, and locks are held from launch preflight through child process completion and cleanup; internal is released first and external target locks last. Read-only commands create no product or target anchor; cold no-anchor reads use the contract's double-check path, and seeded reads open existing anchors without creation.",
     "mutable_runtime_paths": "The managed target root, runtime HOME, runtime TMPDIR, KIMI_CODE_HOME, config, session, plugin, MCP, and log locations remain writable by the launched CLI",
     "pre_handoff_executable_revalidation": "Immediately before subprocess handoff, only the dedicated lock directory, launcher bin directory, and immutable software artifact directories are made read/execute-only; /absolute/target/bin/kimi is reopened without following symlinks and checked for regular file type, current-user ownership, mode 0700, stable inode, and pinned official-binary digest",
-    "portable_handoff_mechanism": "write-protected verified-path handoff with an O_NOFOLLOW identity/digest evidence fd held until the child is spawned; exact-inode fd execution is not the portable macOS contract",
-    "lifecycle_lock_mechanism": "fcntl.flock lifecycle locks: a persistent 0600 external product lock under a product/UID 0700 root below the fixed validated system temp root (/private/tmp on macOS, /tmp on Linux), persistent 0600 canonical external target locks below its targets directory keyed by full sha256 of product namespace plus canonical absolute target, and a persistent 0600 target-local regular lock file under a dedicated lock directory; lock files are never unlinked on normal release, and the dedicated target-local lock directory is write-protected to 0500 while held then restored to 0700",
-    "same_uid_tamper_boundary": "No OS sandbox is claimed against deliberate same-UID chmod or tampering of the fixed bootstrap root outside the manager; ordinary target-local lock-file unlink, internal lock-parent rename bypass, and executable os.replace swaps are denied while the protected launch path and external bootstrap lock are held"
+    "portable_handoff_mechanism": "latest revalidated path handoff with an O_NOFOLLOW identity/digest evidence fd held until the child is spawned; exact-inode fd execution is not the portable macOS contract and is not claimed on supported hosts",
+    "lifecycle_lock_mechanism": "fcntl.flock lifecycle locks: a monotonic 0600 external product anchor named global.lock under the fixed validated product/UID 0700 system temp root (/private/tmp on macOS, /tmp on Linux), a monotonic 0600 canonical target anchor keyed by full sha256 of product namespace plus canonical absolute target, and a persistent 0600 target-local regular lock file under a dedicated target-local lock directory. Missing external anchors are published only by mutating commands with complete fsynced no-replace binding publication; final-path visibility is the rollback commit point, parent-directory sync completes crash durability, and existing anchors are never truncated, rebound, replaced, or unlinked during ordinary lifecycle cleanup. Read-only status, plan, and software-status do not create anchors, and the dedicated target-local lock directory is write-protected to 0500 while held then restored to 0700. Irreversible cleanup retirement uses an immutable complete cleanup journal with relative tombstone names, no-replace publication, read-only report-only cleanup_pending state, malformed-state fail-closed behavior, and mutation-only drain or bounded publication-alias recovery before active state changes",
+    "same_uid_tamper_boundary": "No OS sandbox or independent trust anchor is claimed against deliberate same-UID chmod, target entrypoint replacement, or fixed bootstrap-root tampering outside the manager; hashes and stamps are integrity checks for manager-owned lifecycle drift, not authenticity against a same-UID writer. Ordinary target-local lock-file unlink and internal lock-parent rename bypass are denied while the protected launch path and external bootstrap lock are held"
   },
   "builder_toolkit": {
     "plugin_id": "nddev-builder",

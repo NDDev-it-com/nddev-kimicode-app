@@ -4,25 +4,15 @@
 
 ## Managed Content
 
-The manager writes NDDev-owned content to these target paths:
-
-- `config.toml`
-- `tui.toml`
-- `AGENTS.md`
-- `mcp.json`
-- `skills/`
-- `agents/nddev-builder.md`
-- `hooks/nddev-builder-pretooluse.py`
-- `NDDEV-KIMICODE-SETUP.json`
-
+The manager writes NDDev-owned setup content into the explicit target. The exact
+managed path set is owned by `cli-tools/nddev_kimicode.py:content_managed_paths`.
 Managed TOML and Markdown content is written inside NDDev marker blocks so local
 state outside those blocks survives install, profile switches, migration,
-restore, and remove.
+restore, update, and remove. Setup `update` refreshes the installed setup and
+profile identity from the current public catalog.
 
-The manager does not write runtime-owned plugin install state:
-
-- `plugins/installed.json`
-- `plugins/managed/`
+Runtime plugin install state remains Kimi-owned and is not written directly by
+the manager.
 
 ## Profiles
 
@@ -40,26 +30,29 @@ Native `yolo` is not shipped as an NDDev profile.
 binary presence, entrypoint digest, and installed tree digest without executing
 `kimi`.
 
-`install-cli` installs a verified official Kimi binary into target-owned state.
-`update-cli` repairs or updates current official-binary state. `migrate-cli` is
-the only transition from legacy Bun schema to official-binary schema.
+`install-cli` installs a verified official Kimi binary into target-owned state
+on supported macOS and Ubuntu hosts. `update-cli` repairs or updates current
+official-binary state. `migrate-cli` is the only transition from legacy Bun
+schema to official-binary schema. `remove-cli` removes only target-owned
+software paths and is a deterministic no-op when target-owned software presence
+is absent.
 
 Legacy Bun state may be read for status, migrated, restored, or removed. It must
 never launch.
 
-Release versions, URLs, manifest hashes, and platform binary digests are owned
-by `references/kimi-code-baseline.json`.
+Release versions, URLs, manifest hashes, upstream platform assets, product host
+mapping, and the no-official-floor Ubuntu/glibc observation are owned by
+`references/kimi-code-baseline.json` and `config/nddev-contract.json`. Windows
+artifacts and the official PowerShell installer are recorded as upstream
+observations only and remain product-unsupported.
 
 ## Launch Isolation
 
-`launch` refuses unmanaged, legacy, drifted, or missing-current-software targets.
-It executes `/absolute/target/bin/kimi` with target-local `HOME`, `TMPDIR`, and
-`KIMI_CODE_HOME`, disables telemetry, stops background keep-alive on exit, and
-constructs a fresh child environment without live provider credentials or
-`KIMI_MODEL_*` variables. The child working directory is passed explicitly:
-by default it is the caller's current project directory captured at manager
-entry, and manager `--workspace /absolute/project` selects another existing
-project directory. Kimi has no native cwd flag in the managed launch surface.
+`launch` refuses unsupported hosts, unmanaged, legacy, drifted, or
+missing-current-software targets. It executes `/absolute/target/bin/kimi` with
+target-local `HOME`, `TMPDIR`, and `KIMI_CODE_HOME`, disables telemetry, stops
+background keep-alive on exit, and constructs a fresh child environment without
+live provider credentials or `KIMI_MODEL_*` variables.
 
 The lifecycle boundary is held from launch preflight through child process
 completion and cleanup. While it is held, install, update, migrate, restore,
@@ -72,11 +65,15 @@ Exact lock ordering, path protection, executable checks, runtime directory
 checks, and portable handoff mechanics are owned by
 `cli-tools/nddev_kimicode.py` and summarized by `config/nddev-contract.json`.
 Official binary provenance is owned by `references/kimi-code-baseline.json`.
-The launch boundary is cooperative lifecycle isolation, not an OS sandbox
-against deliberate same-UID tampering outside the manager.
+The launch boundary is cooperative lifecycle isolation, not an OS sandbox or
+authenticity guarantee against deliberate same-UID target entrypoint replacement
+outside the manager.
 
 Child arguments that override managed permission mode, plan mode, prompt mode,
 model selection, Skill directories, agents, sessions, extra workspace scope, or
 software migration/update behavior are rejected before the target-owned binary
-is spawned. This includes native `--add-dir` workspace expansion in split or
-assignment form.
+is spawned.
+
+Unsupported host categories and exact product host IDs are owned by
+`config/nddev-contract.json`. Ubuntu desktop and server share the same
+`ID=ubuntu` glibc check.

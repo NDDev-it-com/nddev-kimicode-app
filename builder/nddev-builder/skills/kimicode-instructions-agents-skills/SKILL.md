@@ -8,12 +8,6 @@ disableModelInvocation: false
 
 # Kimi Instructions, Agents, And Skills
 
-Managed target paths:
-
-- `$KIMI_CODE_HOME/AGENTS.md`
-- `$KIMI_CODE_HOME/skills/`
-- `$KIMI_CODE_HOME/agents/`
-
 Skill rules:
 
 - Prefer directory-form Skills: `<skill-name>/SKILL.md`.
@@ -34,5 +28,7 @@ Agent rules:
 AGENTS.md rules:
 
 - Keep it hierarchical and low-entropy.
-- Point to code-owned facts instead of copying version pins or checksum lists.
-- State that `plugins/installed.json` is runtime-owned and must not be written directly.
+- Point to code-owned facts instead of copying version pins, checksum lists, or
+  managed path inventories.
+- State behavior and ownership boundaries without duplicating the manager's
+  generated target file list.

@@ -15,25 +15,13 @@ Public source path:
 
 - `builder/nddev-builder/kimi.plugin.json`
 
-Supported manifest fields used by NDDev:
-
-- `name`
-- `version`
-- `description`
-- `interface`
-- `skills`
-- `sessionStart`
-- `skillInstructions`
-- `mcpServers`
-
-Native plugin hook fields are not declared in the current NDDev source manifest.
-Profile-specific hook activation is rendered only by `cli-tools/nddev_kimicode.py`
-into `$KIMI_CODE_HOME/config.toml`.
+`builder/nddev-builder/kimi.plugin.json` owns the source manifest fields.
+Profile-specific hook activation is rendered only by
+`cli-tools/nddev_kimicode.py`.
 
 Boundaries:
 
-- Do not write `$KIMI_CODE_HOME/plugins/installed.json`.
-- Do not write `$KIMI_CODE_HOME/plugins/managed/`.
+- Do not write runtime-owned plugin install state directly.
 - Do not claim a plugin is enabled unless Kimi's native `/plugins` flow performed it.
 - Local plugin installs are copied by Kimi into its managed plugin directory and require `/reload` or a new session.
 - Marketplace source may be documented only when a real catalog is published or explicitly configured.

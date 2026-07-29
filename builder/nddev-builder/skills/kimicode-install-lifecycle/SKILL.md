@@ -2,15 +2,15 @@
 name: kimicode-install-lifecycle
 description: Create or review official Kimi binary installation, update, rollback, legacy Bun migration, and launch isolation in nddev-kimicode-app.
 type: prompt
-whenToUse: When changing install-cli, update-cli, migrate-cli, software-status, launch, binary provenance, rollback, or legacy software handling
+whenToUse: When changing install-cli, update-cli, migrate-cli, remove-cli, software-status, launch, binary provenance, rollback, or legacy software handling
 disableModelInvocation: false
 ---
 
 # Kimi Install Lifecycle
 
-The manager owns a target-owned implementation of Kimi's official macOS/Linux
-binary install channel. Do not pipe the official shell installer into live user
-state.
+The manager owns a target-owned implementation of Kimi's official binary
+install channel for the supported product hosts in `config/nddev-contract.json`.
+Do not pipe the official shell installer into live user state.
 
 Source owners:
 
@@ -23,10 +23,13 @@ Lifecycle rules:
 - `install-cli` installs only when no target-owned software presence exists.
 - `update-cli` repairs or updates current schema-2 official-binary state.
 - `migrate-cli` is the only path from legacy Bun schema to official-binary schema.
+- `remove-cli` owns target-owned software removal and preserves user/auth state.
 - `software-status` is structural and must not execute `kimi`.
 - `launch` requires current setup schema and current official-binary software schema.
 - Legacy Bun state may be read for status, migrated, restored, or removed; it must never launch.
-- Rollback restores prior binary tree, entrypoint, and stamp on failure.
-- Official binary state is target-owned under `.nddev-kimicode-software/current` plus `bin/kimi`.
+- Rollback restores prior target-owned software state on failure.
+- Ubuntu desktop and server share the same `ID=ubuntu` glibc host check, and the upstream baseline records no official Ubuntu/glibc version floor.
 
-Do not add Windows support. NDDev supports macOS and Ubuntu/Linux glibc only.
+Do not copy the unsupported-category or platform-asset table into this Skill;
+those values belong in `config/nddev-contract.json` and
+`references/kimi-code-baseline.json`.

@@ -4,22 +4,19 @@
 from __future__ import annotations
 
 import argparse
-import contextlib
-import hashlib
 import importlib.util
+import io
 import json
 import os
 import re
 import shlex
-import signal
+import shutil
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
-import threading
-import time
 from pathlib import Path
-from types import SimpleNamespace
 from typing import Any
 
 sys.dont_write_bytecode = True
@@ -79,22 +76,120 @@ PRIVATE_RELEASE_ROOTS = {"validation", ".agents", ".serena"}
 PRIVATE_RELEASE_PARTS = {"__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache"}
 PRIVATE_RELEASE_SUFFIXES = (".pyc", ".pyo")
 PRIVATE_RELEASE_PREFIXES = (".tmp-kimicode-",)
+PUBLIC_VALIDATION_DOCS = (
+    Path("AGENTS.md"),
+    Path("builder/nddev-builder/skills/nddev-builder/references/public-validation.md"),
+    Path("builder/nddev-builder/skills/kimicode-create-check-release/SKILL.md"),
+)
+CACHE_FREE_PUBLIC_COMMANDS = (
+    ("python3", "cli-tools/validate_public_contracts.py"),
+    ("python3", "cli-tools/nddev_kimicode.py", "list", "--json"),
+    ("python3", "cli-tools/nddev_kimicode.py", "--help"),
+)
+FORBIDDEN_PUBLIC_VALIDATION_COMMAND_TERMS = ("py_compile", "compileall")
 KIMI_VERSION = "0.29.2"
 KIMI_PACKAGE = "@moonshot-ai/kimi-code"
 KIMI_COMMAND = "kimi"
+PYTHON_REQUIRES = ">=3.9"
 CONTENT_SETUPS = ["nddev-builder"]
 PROFILES = ["safe", "full-auto"]
 DEFAULT_PROFILE = "full-auto"
 MANIFEST_SHA256 = "6057703f6430964741198c81617737bcec917082d1ce4aadd7a1b8c29787ae9b"
+CODE_KIMI_MANIFEST_SIZE_BYTES = 929
+GITHUB_RELEASE_API_URL = (
+    "https://api.github.com/repos/MoonshotAI/kimi-code/releases/tags/"
+    "%40moonshot-ai%2Fkimi-code%400.29.2"
+)
+GITHUB_RELEASE_ASSET_NAMES = [
+    "kimi-code-darwin-arm64.zip",
+    "kimi-code-darwin-arm64.zip.sha256",
+    "kimi-code-darwin-x64.zip",
+    "kimi-code-darwin-x64.zip.sha256",
+    "kimi-code-linux-arm64.zip",
+    "kimi-code-linux-arm64.zip.sha256",
+    "kimi-code-linux-x64.zip",
+    "kimi-code-linux-x64.zip.sha256",
+    "kimi-code-win32-arm64.zip",
+    "kimi-code-win32-arm64.zip.sha256",
+    "kimi-code-win32-x64.zip",
+    "kimi-code-win32-x64.zip.sha256",
+    "manifest.json",
+]
+GITHUB_RELEASE_PLATFORM_ZIPS = [
+    name for name in GITHUB_RELEASE_ASSET_NAMES if name.endswith(".zip")
+]
+GITHUB_RELEASE_SHA256_SIDECARS = [
+    name for name in GITHUB_RELEASE_ASSET_NAMES if name.endswith(".zip.sha256")
+]
+GITHUB_RELEASE_MANIFEST_ASSET_SHA256 = (
+    "650a07b7b10f74eec20fb12b452f80b5319e6250563abf60acee97fc3aac9e12"
+)
 INSTALL_SCRIPT_SHA256 = "638927825e96825edbb563de5e0cb06f8a0551c53e026ade8b717b0f25cb83d2"
+INSTALL_POWERSHELL_SHA256 = "28a0473a7c56d41eae52cb4dbd3232f87a9133dd7af416a6a04dfbf7856fa9fc"
+INSTALL_POWERSHELL_SIZE_BYTES = 15891
 NPM_INTEGRITY = "sha512-NmID/2+rCbZXvnQIBZxZlLzeUjETjb1BPzfkUoVs6AhQv9xuGKLzQvcUJB+yksRZnWE+ikLMWyIn75rVfMMP4w=="
 NPM_SHASUM = "9e8da7ca4e822048a28d1e12ff46c8ea5ecb23ac"
-BINARY_PLATFORMS = {
-    "darwin-arm64": ("kimi-code-darwin-arm64", "25dc8b14f8bb5ef98470577265b1e9c95892c168f34e9639c5f63b48d4ece6fb"),
-    "darwin-x64": ("kimi-code-darwin-x64", "fe59f14cab74971768377e586bf3be30c1ca04079c058d4b492827ca4dfd6b16"),
-    "linux-arm64": ("kimi-code-linux-arm64", "5fb64e74eeec0b3900732cfbc3679cc505beb51aa323f486154fd79b0e20b26a"),
-    "linux-x64": ("kimi-code-linux-x64", "f9977d259ed36019793cadf04b1f0343f12aaebfa76f90fa26cd3b02be671231"),
+OBSERVED_BINARY_ARTIFACTS = {
+    "darwin-arm64": {
+        "filename": "kimi-code-darwin-arm64",
+        "url": "https://code.kimi.com/kimi-code/binaries/0.29.2/kimi-code-darwin-arm64",
+        "size_bytes": 160002496,
+        "sha256": "25dc8b14f8bb5ef98470577265b1e9c95892c168f34e9639c5f63b48d4ece6fb",
+        "supported_product_hosts": ["macos-arm64"],
+    },
+    "darwin-x64": {
+        "filename": "kimi-code-darwin-x64",
+        "url": "https://code.kimi.com/kimi-code/binaries/0.29.2/kimi-code-darwin-x64",
+        "size_bytes": 162344320,
+        "sha256": "fe59f14cab74971768377e586bf3be30c1ca04079c058d4b492827ca4dfd6b16",
+        "supported_product_hosts": ["macos-x64"],
+    },
+    "linux-arm64": {
+        "filename": "kimi-code-linux-arm64",
+        "url": "https://code.kimi.com/kimi-code/binaries/0.29.2/kimi-code-linux-arm64",
+        "size_bytes": 160500864,
+        "sha256": "5fb64e74eeec0b3900732cfbc3679cc505beb51aa323f486154fd79b0e20b26a",
+        "supported_product_hosts": ["ubuntu-glibc-arm64"],
+    },
+    "linux-x64": {
+        "filename": "kimi-code-linux-x64",
+        "url": "https://code.kimi.com/kimi-code/binaries/0.29.2/kimi-code-linux-x64",
+        "size_bytes": 162860224,
+        "sha256": "f9977d259ed36019793cadf04b1f0343f12aaebfa76f90fa26cd3b02be671231",
+        "supported_product_hosts": ["ubuntu-glibc-x64"],
+    },
+    "win32-arm64": {
+        "filename": "kimi-code-win32-arm64.exe",
+        "url": "https://code.kimi.com/kimi-code/binaries/0.29.2/kimi-code-win32-arm64.exe",
+        "size_bytes": 120212992,
+        "sha256": "26cd0ab7267aab92530a9584778deb5fa2c37c44131c8b2d8ec653e474f288c8",
+        "supported_product_hosts": [],
+    },
+    "win32-x64": {
+        "filename": "kimi-code-win32-x64.exe",
+        "url": "https://code.kimi.com/kimi-code/binaries/0.29.2/kimi-code-win32-x64.exe",
+        "size_bytes": 131644416,
+        "sha256": "32ea71e814b53958afaa37f15982647e6c832cb70922941ca35a57d01f64e12f",
+        "supported_product_hosts": [],
+    },
 }
+BINARY_PLATFORMS = {
+    key: (value["filename"], value["sha256"]) for key, value in OBSERVED_BINARY_ARTIFACTS.items()
+}
+OBSERVED_VENDOR_PLATFORMS = list(OBSERVED_BINARY_ARTIFACTS)
+SUPPORTED_HOSTS = ["macos-arm64", "macos-x64", "ubuntu-glibc-arm64", "ubuntu-glibc-x64"]
+HOST_TO_VENDOR_PLATFORM = {
+    "macos-arm64": "darwin-arm64",
+    "macos-x64": "darwin-x64",
+    "ubuntu-glibc-arm64": "linux-arm64",
+    "ubuntu-glibc-x64": "linux-x64",
+}
+UNSUPPORTED_HOST_CATEGORIES = [
+    "windows",
+    "non-ubuntu-linux",
+    "linux-musl",
+    "unsupported-architecture",
+]
 CONTRACT_KEYS = {
     "contract_version",
     "product_name",
@@ -139,6 +234,124 @@ def load_manager() -> Any:
     return module
 
 
+def require_mapping(value: Any, expected_keys: set[str], label: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError(f"{label} must be an object")
+    if set(value) != expected_keys:
+        raise ValueError(f"{label} keys are not exact")
+    return value
+
+
+def validate_vendor_distribution_observations(value: Any, label: str) -> None:
+    observations = require_mapping(
+        value,
+        {"github_release_assets", "code_kimi_binary_manifest", "product_selections"},
+        label,
+    )
+    github = require_mapping(
+        observations["github_release_assets"],
+        {
+            "source_family",
+            "release_url",
+            "api_url",
+            "release_id",
+            "tag",
+            "asset_count",
+            "platform_zip_count",
+            "sha256_sidecar_count",
+            "manifest_count",
+            "assets",
+        },
+        f"{label}.github_release_assets",
+    )
+    if github.get("source_family") != "github-release-assets":
+        raise ValueError(f"{label}: GitHub source family mismatch")
+    if github.get("api_url") != GITHUB_RELEASE_API_URL:
+        raise ValueError(f"{label}: GitHub release API URL mismatch")
+    if (
+        github.get("asset_count") != 13
+        or github.get("platform_zip_count") != 6
+        or github.get("sha256_sidecar_count") != 6
+        or github.get("manifest_count") != 1
+    ):
+        raise ValueError(f"{label}: GitHub release asset counts are incomplete")
+    assets = github.get("assets")
+    if not isinstance(assets, dict) or sorted(assets) != GITHUB_RELEASE_ASSET_NAMES:
+        raise ValueError(f"{label}: GitHub release asset name set is incomplete")
+    for name, asset in assets.items():
+        if set(asset) != {"kind", "url", "size_bytes", "sha256"}:
+            raise ValueError(f"{label}: GitHub release asset keys are not exact for {name}")
+        if name in GITHUB_RELEASE_PLATFORM_ZIPS:
+            expected_kind = "platform-zip"
+        elif name in GITHUB_RELEASE_SHA256_SIDECARS:
+            expected_kind = "sha256-sidecar"
+        else:
+            expected_kind = "manifest"
+        if asset.get("kind") != expected_kind:
+            raise ValueError(f"{label}: GitHub release asset kind mismatch for {name}")
+        if not isinstance(asset.get("size_bytes"), int) or asset["size_bytes"] <= 0:
+            raise ValueError(f"{label}: GitHub release asset size is invalid for {name}")
+        if not re.fullmatch(r"[0-9a-f]{64}", str(asset.get("sha256"))):
+            raise ValueError(f"{label}: GitHub release asset sha256 is invalid for {name}")
+    if assets["manifest.json"]["sha256"] != GITHUB_RELEASE_MANIFEST_ASSET_SHA256:
+        raise ValueError(f"{label}: GitHub release manifest asset digest mismatch")
+
+    code_kimi = require_mapping(
+        observations["code_kimi_binary_manifest"],
+        {
+            "source_family",
+            "manifest_url",
+            "manifest_sha256",
+            "manifest_size_bytes",
+            "version",
+            "tag",
+            "platform_count",
+            "observed_vendor_platforms",
+            "platforms",
+        },
+        f"{label}.code_kimi_binary_manifest",
+    )
+    if code_kimi.get("source_family") != "code.kimi.com-binary-manifest":
+        raise ValueError(f"{label}: code.kimi.com source family mismatch")
+    if (
+        code_kimi.get("manifest_sha256") != MANIFEST_SHA256
+        or code_kimi.get("manifest_size_bytes") != CODE_KIMI_MANIFEST_SIZE_BYTES
+        or code_kimi.get("version") != KIMI_VERSION
+        or code_kimi.get("platform_count") != 6
+    ):
+        raise ValueError(f"{label}: code.kimi.com manifest observation mismatch")
+    if code_kimi.get("observed_vendor_platforms") != OBSERVED_VENDOR_PLATFORMS:
+        raise ValueError(f"{label}: code.kimi.com observed platform set mismatch")
+    if code_kimi.get("platforms") != OBSERVED_BINARY_ARTIFACTS:
+        raise ValueError(f"{label}: code.kimi.com platform observations mismatch")
+
+    product = require_mapping(
+        observations["product_selections"],
+        {
+            "supported_hosts",
+            "host_to_vendor_platform",
+            "unsupported_host_categories",
+            "ubuntu_glibc_version_floor",
+            "ubuntu_glibc_version_floor_source",
+        },
+        f"{label}.product_selections",
+    )
+    if (
+        product.get("supported_hosts") != SUPPORTED_HOSTS
+        or product.get("host_to_vendor_platform") != HOST_TO_VENDOR_PLATFORM
+        or product.get("unsupported_host_categories") != UNSUPPORTED_HOST_CATEGORIES
+    ):
+        raise ValueError(f"{label}: product selections do not match canonical host support")
+    if product.get("ubuntu_glibc_version_floor") is not None:
+        raise ValueError(f"{label}: product selections must not invent an Ubuntu/glibc floor")
+    if product.get("ubuntu_glibc_version_floor_source") != "no-official-floor":
+        raise ValueError(f"{label}: product selections must record no-official-floor")
+
+    manager = load_manager()
+    if observations != manager.KIMI_VENDOR_DISTRIBUTION_OBSERVATIONS:
+        raise ValueError(f"{label}: vendor distribution observations differ from manager")
+
+
 def yaml_indent(line: str) -> int:
     return len(line) - len(line.lstrip(" "))
 
@@ -155,7 +368,9 @@ def find_yaml_key(lines: list[str], *, key: str, indent: int) -> tuple[int, str]
     raise ValueError(f"{RELEASE_WORKFLOW}: missing {key}")
 
 
-def find_yaml_child(lines: list[str], *, parent_index: int, key: str, indent: int) -> tuple[int, str]:
+def find_yaml_child(
+    lines: list[str], *, parent_index: int, key: str, indent: int
+) -> tuple[int, str]:
     parent_indent = yaml_indent(lines[parent_index])
     prefix = " " * indent + f"{key}:"
     for index in range(parent_index + 1, len(lines)):
@@ -254,6 +469,30 @@ def validate_release_marker_free(paths: set[str], *, label: str) -> None:
             raise ValueError(f"{RELEASE_WORKFLOW}: {label} contains generated bytecode {raw}")
 
 
+def cache_residue_paths(root: Path) -> list[str]:
+    residue: list[str] = []
+    for path in root.rglob("*"):
+        relative = path.relative_to(root)
+        if any(part in PRIVATE_RELEASE_PARTS for part in relative.parts):
+            residue.append(relative.as_posix())
+            continue
+        if any(part.startswith(PRIVATE_RELEASE_PREFIXES) for part in relative.parts):
+            residue.append(relative.as_posix())
+            continue
+        if relative.name.endswith(PRIVATE_RELEASE_SUFFIXES):
+            residue.append(relative.as_posix())
+    return sorted(residue)
+
+
+def validate_cache_residue_free(root: Path, *, label: str) -> None:
+    residue = cache_residue_paths(root)
+    if residue:
+        sample = ", ".join(residue[:20])
+        if len(residue) > 20:
+            sample += f", ... ({len(residue)} total)"
+        raise ValueError(f"{label} created generated cache residue: {sample}")
+
+
 def release_tree_files() -> tuple[set[str], set[str]]:
     files: set[str] = set()
     entries: set[str] = set()
@@ -271,7 +510,9 @@ def release_tree_files() -> tuple[set[str], set[str]]:
             entries.add(relative)
             files.add(relative)
             continue
-        raise ValueError(f"{RELEASE_WORKFLOW}: archive tree contains unsupported path type {relative}")
+        raise ValueError(
+            f"{RELEASE_WORKFLOW}: archive tree contains unsupported path type {relative}"
+        )
     if len(entries) > 10000 or len(files) > 5000:
         raise ValueError(f"{RELEASE_WORKFLOW}: archive tree is unexpectedly large")
     return files, entries
@@ -317,7 +558,9 @@ def validate_claude_instruction(files: set[str], *, root: Path | None = None) ->
         raise ValueError(f"{RELEASE_WORKFLOW}: .claude must contain exactly CLAUDE.md")
 
     if CLAUDE_INSTRUCTION_PATH not in files:
-        raise ValueError(f"{RELEASE_WORKFLOW}: {CLAUDE_INSTRUCTION_PATH} is not covered by archive closure")
+        raise ValueError(
+            f"{RELEASE_WORKFLOW}: {CLAUDE_INSTRUCTION_PATH} is not covered by archive closure"
+        )
     bridge = base / CLAUDE_INSTRUCTION_PATH
     try:
         bridge_info = bridge.lstat()
@@ -328,7 +571,9 @@ def validate_claude_instruction(files: set[str], *, root: Path | None = None) ->
     if not stat.S_ISREG(bridge_info.st_mode):
         raise ValueError(f"{CLAUDE_INSTRUCTION_PATH}: must be a regular file")
     if bridge.read_bytes() != b"@../AGENTS.md\n":
-        raise ValueError(f"{CLAUDE_INSTRUCTION_PATH}: must contain exactly @../AGENTS.md followed by newline")
+        raise ValueError(
+            f"{CLAUDE_INSTRUCTION_PATH}: must contain exactly @../AGENTS.md followed by newline"
+        )
 
     agents = base / "AGENTS.md"
     try:
@@ -336,7 +581,9 @@ def validate_claude_instruction(files: set[str], *, root: Path | None = None) ->
     except FileNotFoundError:
         raise ValueError(f"{CLAUDE_INSTRUCTION_PATH}: AGENTS.md target is missing") from None
     if stat.S_ISLNK(agents_info.st_mode):
-        raise ValueError(f"{CLAUDE_INSTRUCTION_PATH}: AGENTS.md target must be a regular file, not a symlink")
+        raise ValueError(
+            f"{CLAUDE_INSTRUCTION_PATH}: AGENTS.md target must be a regular file, not a symlink"
+        )
     if not stat.S_ISREG(agents_info.st_mode):
         raise ValueError(f"{CLAUDE_INSTRUCTION_PATH}: AGENTS.md target must be a regular file")
 
@@ -354,7 +601,9 @@ def expect_claude_bridge_rejected(root: Path, files: set[str], expected: str) ->
         validate_claude_instruction(files, root=root)
     except ValueError as exc:
         if expected not in str(exc):
-            raise ValueError(f"Claude bridge structural check returned unstable error: {exc}") from exc
+            raise ValueError(
+                f"Claude bridge structural check returned unstable error: {exc}"
+            ) from exc
         return
     raise ValueError(f"Claude bridge structural check unexpectedly allowed {expected}")
 
@@ -366,13 +615,17 @@ def validate_claude_bridge_structural_regression() -> None:
         files = write_valid_claude_bridge(root)
         validate_claude_instruction(files, root=root)
 
-    def run_case(label: str, mutate: Any, expected: str, files_override: set[str] | None = None) -> None:
+    def run_case(
+        label: str, mutate: Any, expected: str, files_override: set[str] | None = None
+    ) -> None:
         with tempfile.TemporaryDirectory(prefix=f".tmp-kimicode-claude-{label}-") as temp:
             root = Path(temp) / "archive"
             root.mkdir()
             files = write_valid_claude_bridge(root)
             mutate(root)
-            expect_claude_bridge_rejected(root, files if files_override is None else files_override, expected)
+            expect_claude_bridge_rejected(
+                root, files if files_override is None else files_override, expected
+            )
 
     run_case(
         "extra-entry",
@@ -442,7 +695,9 @@ def validate_claude_bridge_structural_regression() -> None:
     )
 
 
-def covered_release_files(paths: list[str], files: set[str], *, label: str, file_set_label: str) -> set[str]:
+def covered_release_files(
+    paths: list[str], files: set[str], *, label: str, file_set_label: str
+) -> set[str]:
     covered: set[str] = set()
     for raw in paths:
         relative = Path(raw)
@@ -457,17 +712,23 @@ def covered_release_files(paths: list[str], files: set[str], *, label: str, file
             raise ValueError(f"{RELEASE_WORKFLOW}: {label} path must not be a symlink: {raw}")
         if stat.S_ISREG(info.st_mode):
             if raw not in files:
-                raise ValueError(f"{RELEASE_WORKFLOW}: {label} file is not in {file_set_label}: {raw}")
+                raise ValueError(
+                    f"{RELEASE_WORKFLOW}: {label} file is not in {file_set_label}: {raw}"
+                )
             covered.add(raw)
             continue
         if stat.S_ISDIR(info.st_mode):
             prefix = raw.rstrip("/") + "/"
             matches = {entry for entry in files if entry.startswith(prefix)}
             if not matches:
-                raise ValueError(f"{RELEASE_WORKFLOW}: {label} directory has no files in {file_set_label}: {raw}")
+                raise ValueError(
+                    f"{RELEASE_WORKFLOW}: {label} directory has no files in {file_set_label}: {raw}"
+                )
             covered.update(matches)
             continue
-        raise ValueError(f"{RELEASE_WORKFLOW}: {label} path must be a regular file or directory: {raw}")
+        raise ValueError(
+            f"{RELEASE_WORKFLOW}: {label} path must be a regular file or directory: {raw}"
+        )
     return covered
 
 
@@ -480,8 +741,13 @@ def validate_release_workflow(path: Path) -> None:
     if '      - "[0-9]+.[0-9]+.[0-9]+"' not in text:
         raise ValueError(f"{RELEASE_WORKFLOW}: release tags must be numeric SemVer")
     publish_index = release_publish_job(lines)
-    permissions_index, _value = find_yaml_child(lines, parent_index=publish_index, key="permissions", indent=4)
-    if parse_yaml_mapping_children(lines, parent_index=permissions_index) != RELEASE_CALLER_PERMISSIONS:
+    permissions_index, _value = find_yaml_child(
+        lines, parent_index=publish_index, key="permissions", indent=4
+    )
+    if (
+        parse_yaml_mapping_children(lines, parent_index=permissions_index)
+        != RELEASE_CALLER_PERMISSIONS
+    ):
         raise ValueError(f"{RELEASE_WORKFLOW}: publish job permissions mismatch")
     _uses_index, uses = find_yaml_child(lines, parent_index=publish_index, key="uses", indent=4)
     expected_uses = (
@@ -490,10 +756,14 @@ def validate_release_workflow(path: Path) -> None:
     if uses != expected_uses:
         raise ValueError(f"{RELEASE_WORKFLOW}: release job must call the pinned shared workflow")
     with_index, _value = find_yaml_child(lines, parent_index=publish_index, key="with", indent=4)
-    _version_index, version = find_yaml_child(lines, parent_index=with_index, key="version", indent=6)
+    _version_index, version = find_yaml_child(
+        lines, parent_index=with_index, key="version", indent=6
+    )
     if version != "${{ github.ref_name }}":
         raise ValueError(f"{RELEASE_WORKFLOW}: version input must be github.ref_name")
-    _package_index, package_name = find_yaml_child(lines, parent_index=with_index, key="package_name", indent=6)
+    _package_index, package_name = find_yaml_child(
+        lines, parent_index=with_index, key="package_name", indent=6
+    )
     if package_name != RELEASE_PACKAGE_NAME:
         raise ValueError(f"{RELEASE_WORKFLOW}: package_name input mismatch")
 
@@ -510,17 +780,27 @@ def validate_release_workflow(path: Path) -> None:
             raise ValueError(f"{RELEASE_WORKFLOW}: release paths missing contract root {root}")
     release_files, file_set_label = release_file_set()
     validate_claude_instruction(release_files)
-    archive_covered = covered_release_files(archive_paths, release_files, label="archive_paths", file_set_label=file_set_label)
-    runtime_covered = covered_release_files(runtime_paths, release_files, label="runtime_paths", file_set_label=file_set_label)
+    archive_covered = covered_release_files(
+        archive_paths, release_files, label="archive_paths", file_set_label=file_set_label
+    )
+    runtime_covered = covered_release_files(
+        runtime_paths, release_files, label="runtime_paths", file_set_label=file_set_label
+    )
     if not runtime_covered <= archive_covered:
         missing = ", ".join(sorted(runtime_covered - archive_covered))
-        raise ValueError(f"{RELEASE_WORKFLOW}: runtime_paths are not covered by archive_paths: {missing}")
+        raise ValueError(
+            f"{RELEASE_WORKFLOW}: runtime_paths are not covered by archive_paths: {missing}"
+        )
     if archive_covered != release_files:
         missing = ", ".join(sorted(release_files - archive_covered))
-        raise ValueError(f"{RELEASE_WORKFLOW}: archive_paths do not cover {file_set_label}: {missing}")
+        raise ValueError(
+            f"{RELEASE_WORKFLOW}: archive_paths do not cover {file_set_label}: {missing}"
+        )
     if runtime_covered != release_files:
         missing = ", ".join(sorted(release_files - runtime_covered))
-        raise ValueError(f"{RELEASE_WORKFLOW}: runtime_paths do not cover {file_set_label}: {missing}")
+        raise ValueError(
+            f"{RELEASE_WORKFLOW}: runtime_paths do not cover {file_set_label}: {missing}"
+        )
 
 
 def validate_workflows() -> None:
@@ -529,7 +809,9 @@ def validate_workflows() -> None:
         path = workflow_root / filename
         if not path.is_file():
             raise ValueError(f"missing workflow {path.relative_to(ROOT)}")
-        expected = f"uses: NDDev-it-com/ci-workflows/{workflow}@{SHARED_CI_COMMIT} # {SHARED_CI_VERSION}"
+        expected = (
+            f"uses: NDDev-it-com/ci-workflows/{workflow}@{SHARED_CI_COMMIT} # {SHARED_CI_VERSION}"
+        )
         text = path.read_text(encoding="utf-8")
         if text.count(expected) != 1:
             raise ValueError(f"{filename}: missing exact shared CI caller")
@@ -560,20 +842,48 @@ def validate_baseline(baseline: dict[str, Any]) -> None:
     release = baseline["release"]
     if release.get("npm_package") != KIMI_PACKAGE or release.get("npm_version") != KIMI_VERSION:
         raise ValueError("baseline release identity mismatch")
+    if release.get("github_release_api_url") != GITHUB_RELEASE_API_URL:
+        raise ValueError("baseline GitHub release API observation mismatch")
     if release.get("integrity") != NPM_INTEGRITY or release.get("shasum") != NPM_SHASUM:
         raise ValueError("baseline npm provenance mismatch")
     install = baseline["official_binary_install"]
+    if install.get("source_family") != "code.kimi.com-binary-manifest":
+        raise ValueError("official binary install must declare the code.kimi.com source family")
+    if install.get("manifest_size_bytes") != CODE_KIMI_MANIFEST_SIZE_BYTES:
+        raise ValueError("official binary manifest size mismatch")
     if install.get("install_script_sha256") != INSTALL_SCRIPT_SHA256:
         raise ValueError("install script digest mismatch")
+    if (
+        install.get("install_powershell_sha256") != INSTALL_POWERSHELL_SHA256
+        or install.get("install_powershell_size_bytes") != INSTALL_POWERSHELL_SIZE_BYTES
+        or install.get("install_powershell_product_supported") is not False
+    ):
+        raise ValueError("PowerShell install surface must remain observed and product-unsupported")
     if install.get("manifest_sha256") != MANIFEST_SHA256:
         raise ValueError("binary manifest digest mismatch")
     platforms = install.get("platforms")
     if not isinstance(platforms, dict) or sorted(platforms) != sorted(BINARY_PLATFORMS):
         raise ValueError("official binary platform set mismatch")
-    for key, (filename, checksum) in BINARY_PLATFORMS.items():
+    if install.get("observed_vendor_platforms") != OBSERVED_VENDOR_PLATFORMS:
+        raise ValueError("baseline must preserve observed vendor platform keys separately")
+    if install.get("production_supported_hosts") != SUPPORTED_HOSTS:
+        raise ValueError("baseline must scope production support to canonical NDDev hosts")
+    if install.get("host_to_vendor_platform") != HOST_TO_VENDOR_PLATFORM:
+        raise ValueError("baseline must map supported hosts to observed vendor asset keys")
+    if install.get("ubuntu_glibc_version_floor") is not None:
+        raise ValueError("baseline must not invent an upstream Ubuntu/glibc version floor")
+    if install.get("ubuntu_glibc_version_floor_source") != "no-official-floor":
+        raise ValueError("baseline must record no-official-floor for Ubuntu/glibc")
+    for key, artifact in OBSERVED_BINARY_ARTIFACTS.items():
         entry = platforms[key]
-        if entry.get("filename") != filename or entry.get("checksum") != checksum:
-            raise ValueError(f"official binary digest mismatch for {key}")
+        expected = dict(artifact)
+        expected["checksum"] = artifact["sha256"]
+        if entry != expected:
+            raise ValueError(f"official binary observation mismatch for {key}")
+    validate_vendor_distribution_observations(
+        baseline.get("vendor_distribution_observations"),
+        "baseline vendor distribution observations",
+    )
     if baseline["permission_model"].get("full_auto") != "auto with plan mode disabled":
         raise ValueError("baseline must record full-auto native auto mapping")
     if baseline["native_surfaces"].get("direct_plugin_install_state_write") is not False:
@@ -587,24 +897,12 @@ def validate_baseline(baseline: dict[str, Any]) -> None:
         != "https://github.com/MoonshotAI/kimi-code/blob/8a45f10eddbb35c317047e82e567cdb59a220b4f/apps/kimi-code/src/cli/commands.ts"
     ):
         raise ValueError("baseline must point to the official Kimi CLI parser owner")
-    grammar = baseline["runtime"].get("native_cli_grammar")
-    if not isinstance(grammar, dict):
-        raise ValueError("baseline must record the native Kimi CLI grammar")
-    if grammar.get("source_url") != "https://www.kimi.com/code/docs/en/kimi-code-cli/reference/kimi-command.html":
-        raise ValueError("baseline native CLI grammar must point to the official Kimi command reference")
-    if grammar.get("short_value_flags") != ["-S", "-m", "-p", "-r"]:
-        raise ValueError("baseline native CLI short value flags are out of sync")
-    if grammar.get("short_boolean_flags") != ["-V", "-h", "-c", "-y"]:
-        raise ValueError("baseline native CLI boolean short flags are out of sync")
-    if grammar.get("workspace_expansion_flags") != ["--add-dir"]:
-        raise ValueError("baseline native CLI workspace expansion flags are out of sync")
-    if grammar.get("hidden_aliases") != {"-r": "--session", "--auto-approve": "--yolo", "--yes": "--yolo"}:
-        raise ValueError("baseline native CLI hidden aliases are out of sync")
-    if grammar.get("unsupported_short_flags") != ["-C"]:
-        raise ValueError("baseline native CLI unsupported short flags are out of sync")
     unsupported = baseline.get("unsupported", {})
     if unsupported.get("windows") is not True:
         raise ValueError("baseline must mark Windows unsupported")
+    for host in ("non_ubuntu_linux", "linux_musl", "unsupported_architecture"):
+        if unsupported.get(host) is not True:
+            raise ValueError(f"baseline must mark {host} unsupported")
 
 
 def frontmatter(text: str, path: Path) -> dict[str, str]:
@@ -621,6 +919,198 @@ def frontmatter(text: str, path: Path) -> dict[str, str]:
             key, value = line.split(":", 1)
             fields[key.strip()] = value.strip().strip('"')
     return fields
+
+
+def public_validation_doc_commands(path: Path) -> dict[int, tuple[str, ...]]:
+    text = path.read_text(encoding="utf-8")
+    relative = path.relative_to(ROOT)
+    for forbidden in FORBIDDEN_PUBLIC_VALIDATION_COMMAND_TERMS:
+        if forbidden in text:
+            raise ValueError(f"{relative}: public validation docs must not publish {forbidden}")
+    commands: dict[int, tuple[str, ...]] = {}
+    for line_number, raw_line in enumerate(text.splitlines(), start=1):
+        stripped = raw_line.strip()
+        if not stripped.startswith("python3 "):
+            continue
+        try:
+            command = tuple(shlex.split(stripped))
+        except ValueError as exc:
+            raise ValueError(
+                f"{relative}:{line_number}: public validation command is not parseable: {exc}"
+            ) from exc
+        if any(term in command for term in FORBIDDEN_PUBLIC_VALIDATION_COMMAND_TERMS):
+            raise ValueError(
+                f"{relative}:{line_number}: public validation command uses cache-producing compiler"
+            )
+        commands[line_number] = command
+    return commands
+
+
+def validate_documented_public_command(
+    command: tuple[str, ...], relative: Path, line_number: int
+) -> None:
+    if len(command) < 2 or command[0] != "python3":
+        raise ValueError(
+            f"{relative}:{line_number}: public validation command must start with python3"
+        )
+    script = Path(command[1])
+    if script.is_absolute() or ".." in script.parts:
+        raise ValueError(
+            f"{relative}:{line_number}: public validation command script path is unsafe"
+        )
+    script_path = ROOT / script
+    if not script_path.is_file():
+        raise ValueError(f"{relative}:{line_number}: public validation command script is missing")
+    argv = list(command[2:])
+    module = load_source_for_parse(script_path)
+    parse_args = getattr(module, "parse_args", None)
+    if parse_args is None:
+        raise ValueError(
+            f"{relative}:{line_number}: public validation command has no parse_args owner"
+        )
+    try:
+        parse_args(argv)
+    except SystemExit as exc:
+        if exc.code not in (None, 0):
+            raise ValueError(
+                f"{relative}:{line_number}: public validation command argv is rejected"
+            ) from exc
+
+
+def load_source_for_parse(path: Path) -> Any:
+    module_name = "_nddev_kimicode_doc_parse_" + re.sub(r"[^A-Za-z0-9_]", "_", path.as_posix())
+    spec = importlib.util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise ValueError(f"could not load {path.relative_to(ROOT)} for documented command parsing")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception as exc:  # pragma: no cover - surfaced as validator failure.
+        raise ValueError(f"could not import {path.relative_to(ROOT)}: {exc}") from exc
+    return module
+
+
+def validate_public_validation_docs() -> None:
+    for relative in PUBLIC_VALIDATION_DOCS:
+        path = ROOT / relative
+        if not path.is_file():
+            raise ValueError(f"missing public validation document {relative}")
+        for line_number, command in public_validation_doc_commands(path).items():
+            validate_documented_public_command(command, relative, line_number)
+
+
+def extract_git_archive(destination: Path) -> None:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(ROOT), "archive", "--format=tar", "HEAD"],
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise ValueError(f"could not export clean git archive: {exc}") from exc
+    with tarfile.open(fileobj=io.BytesIO(result.stdout), mode="r:") as archive:
+        members = archive.getmembers()
+        for member in members:
+            member_path = Path(member.name)
+            if member_path.is_absolute() or any(
+                part in {"", ".", ".."} for part in member_path.parts
+            ):
+                raise ValueError(f"git archive contains unsafe path {member.name}")
+            if member.issym() or member.islnk():
+                raise ValueError(f"git archive contains link {member.name}")
+            output = destination / member_path
+            if member.isdir():
+                output.mkdir(mode=member.mode & 0o777, parents=True, exist_ok=True)
+                output.chmod(member.mode & 0o777)
+                continue
+            if not member.isfile():
+                raise ValueError(f"git archive contains unsupported entry {member.name}")
+            output.parent.mkdir(parents=True, exist_ok=True)
+            source = archive.extractfile(member)
+            if source is None:
+                raise ValueError(f"git archive could not read {member.name}")
+            with source, output.open("xb") as handle:
+                shutil.copyfileobj(source, handle)
+            output.chmod(member.mode & 0o777)
+
+
+def validate_archive_public_commands_cache_free() -> None:
+    if not has_development_git_metadata():
+        return
+    with tempfile.TemporaryDirectory(prefix=".tmp-kimicode-public-archive-") as temp:
+        archive_root = Path(temp) / "archive"
+        archive_root.mkdir()
+        extract_git_archive(archive_root)
+        validate_cache_residue_free(archive_root, label="clean git archive")
+        env = os.environ.copy()
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        env["PYTHONPYCACHEPREFIX"] = str(Path(temp) / "pycache")
+        env["RUFF_CACHE_DIR"] = str(Path(temp) / "ruff-cache")
+        env.pop("PYTHONPATH", None)
+        for command in CACHE_FREE_PUBLIC_COMMANDS:
+            completed = subprocess.run(
+                list(command),
+                cwd=archive_root,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=120,
+            )
+            if completed.returncode != 0:
+                details = (completed.stderr or completed.stdout).strip()
+                raise ValueError(
+                    f"archive public command failed ({shlex.join(command)}): {details}"
+                )
+            validate_cache_residue_free(
+                archive_root,
+                label=f"archive public command {shlex.join(command)}",
+            )
+
+
+def validate_system_python_compatibility() -> None:
+    system_python = Path("/usr/bin/python3")
+    if not system_python.is_file():
+        raise ValueError("required system Python is missing: /usr/bin/python3")
+    with tempfile.TemporaryDirectory(prefix=".tmp-kimicode-system-python-") as temp:
+        env = os.environ.copy()
+        env["PYTHONDONTWRITEBYTECODE"] = "1"
+        env["PYTHONPYCACHEPREFIX"] = str(Path(temp) / "pycache")
+        env.pop("PYTHONPATH", None)
+        compile_script = """
+from pathlib import Path
+roots = [Path("cli-tools"), Path("builder")]
+for root in roots:
+    for path in sorted(root.rglob("*.py"), key=lambda item: item.as_posix()):
+        compile(path.read_text(encoding="utf-8"), path.as_posix(), "exec")
+"""
+        for command in (
+            [str(system_python), "-B", "-c", compile_script],
+            [
+                str(system_python),
+                "-B",
+                str(ROOT / "cli-tools" / "nddev_kimicode.py"),
+                "list",
+                "--json",
+            ],
+        ):
+            completed = subprocess.run(
+                command,
+                cwd=ROOT,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=120,
+            )
+            if completed.returncode != 0:
+                details = (completed.stderr or completed.stdout).strip()
+                raise ValueError(
+                    f"system Python compatibility command failed ({shlex.join(command)}): {details}"
+                )
+        validate_cache_residue_free(ROOT, label="system Python compatibility")
 
 
 def validate_builder_toolkit() -> None:
@@ -654,7 +1144,9 @@ def validate_builder_toolkit() -> None:
     ):
         if not reference.is_file():
             raise ValueError(f"missing routed reference {reference.relative_to(ROOT)}")
-    agent_text = (ROOT / "builder" / "nddev-builder" / "agents" / "nddev-builder.md").read_text(encoding="utf-8")
+    agent_text = (ROOT / "builder" / "nddev-builder" / "agents" / "nddev-builder.md").read_text(
+        encoding="utf-8"
+    )
     if re.search(r"^tools:", agent_text, re.MULTILINE):
         raise ValueError("builder agent must omit tools allowlist to inherit native tools")
     if "disallowedTools: []" not in agent_text:
@@ -686,45 +1178,108 @@ def validate_metadata() -> None:
     baseline = load_json(ROOT / "references" / "kimi-code-baseline.json")
     if build.get("build_version") != version or manifest.get("build_version") != version:
         raise ValueError("build version fields are not synchronized")
-    if build.get("kimi_code_cli_tested") != KIMI_VERSION or manifest.get("kimi_code_cli_tested") != KIMI_VERSION:
+    if build.get("python_requires") != PYTHON_REQUIRES:
+        raise ValueError("build/version.json must require Python >=3.9")
+    if (
+        build.get("kimi_code_cli_tested") != KIMI_VERSION
+        or manifest.get("kimi_code_cli_tested") != KIMI_VERSION
+    ):
         raise ValueError("tested Kimi release fields are not synchronized")
-    if build.get("content_setup_ids") != CONTENT_SETUPS or manifest.get("content_setup_ids") != CONTENT_SETUPS:
+    if (
+        build.get("content_setup_ids") != CONTENT_SETUPS
+        or manifest.get("content_setup_ids") != CONTENT_SETUPS
+    ):
         raise ValueError("content setup ids are not synchronized")
-    if build.get("permission_profile_ids") != PROFILES or manifest.get("permission_profile_ids") != PROFILES:
+    if (
+        build.get("permission_profile_ids") != PROFILES
+        or manifest.get("permission_profile_ids") != PROFILES
+    ):
         raise ValueError("permission profile ids are not synchronized")
-    if build.get("default_permission_profile") != DEFAULT_PROFILE or manifest.get("default_permission_profile") != DEFAULT_PROFILE:
+    if (
+        build.get("default_permission_profile") != DEFAULT_PROFILE
+        or manifest.get("default_permission_profile") != DEFAULT_PROFILE
+    ):
         raise ValueError("default profile must be full-auto")
     if contract.get("contract_version") != 3 or set(contract) != CONTRACT_KEYS:
         raise ValueError("contract v3 top-level keys are not exact")
-    if contract.get("version_ref") != "build/version.json" or contract.get("manifest_ref") != "build/manifest.json":
+    if (
+        contract.get("version_ref") != "build/version.json"
+        or contract.get("manifest_ref") != "build/manifest.json"
+    ):
         raise ValueError("contract refs are invalid")
     setup_system = contract["setup_system"]
-    if setup_system.get("content_setup_ids") != CONTENT_SETUPS or setup_system.get("permission_profile_ids") != PROFILES:
+    if (
+        setup_system.get("content_setup_ids") != CONTENT_SETUPS
+        or setup_system.get("permission_profile_ids") != PROFILES
+    ):
         raise ValueError("contract catalog ids are not synchronized")
     if setup_system.get("full_auto_native_permission_mode") != "auto":
         raise ValueError("contract must map full-auto to native auto")
     if setup_system.get("yolo_profile_shipped") is not False:
         raise ValueError("contract must not ship yolo")
+    if (
+        setup_system.get("update_command")
+        != "python3 cli-tools/nddev_kimicode.py update --target /absolute/target --json"
+    ):
+        raise ValueError("contract must expose distinct setup update command")
+    if manifest.get("setup_lifecycle") != {
+        "update_command": "python3 cli-tools/nddev_kimicode.py update --target /absolute/target --json",
+        "update_identity": "refreshes the installed setup/profile identity from the current public catalog",
+        "update_absent_noop": False,
+    }:
+        raise ValueError("manifest must expose setup update lifecycle")
     if contract["safety"].get("full_auto_active_blocking_hooks") is not False:
         raise ValueError("contract must state full-auto has no active blocking hooks")
     if contract["safety"].get("launch_holds_lifecycle_lock") is not True:
         raise ValueError("contract must state launch holds the lifecycle lock")
-    if contract["safety"].get("launch_uses_external_product_lifecycle_lock") is not True:
-        raise ValueError("contract must state launch uses an external product lifecycle lock")
+    if contract["safety"].get("launch_uses_external_product_coordination_lock") is not True:
+        raise ValueError("contract must state launch uses external product coordination")
     if contract["safety"].get("launch_uses_external_target_bound_lifecycle_lock") is not True:
         raise ValueError("contract must state launch uses an external target-bound lifecycle lock")
     if contract["safety"].get("launch_keeps_external_lock_file_persistent") is not True:
         raise ValueError("contract must state external lifecycle lock files are persistent")
+    if contract["safety"].get("external_anchor_publication_no_replace") is not True:
+        raise ValueError("contract must state external anchors use no-replace publication")
+    if contract["safety"].get("external_anchor_final_path_commit_point") is not True:
+        raise ValueError("contract must state final-path anchor publication is the commit point")
+    if contract["safety"].get("external_product_anchor_monotonic") is not True:
+        raise ValueError("contract must state product anchors are monotonic")
+    if contract["safety"].get("external_target_anchor_monotonic") is not True:
+        raise ValueError("contract must state target anchors are monotonic")
+    if contract["safety"].get("read_only_commands_do_not_create_external_anchors") is not True:
+        raise ValueError("contract must state read-only commands do not create external anchors")
+    if contract["safety"].get("read_only_cold_no_anchor_double_check") is not True:
+        raise ValueError("contract must state cold read-only double-checks anchor absence")
+    if contract["safety"].get("read_only_cold_namespace_must_be_empty") is not True:
+        raise ValueError("contract must state cold read-only requires an empty namespace")
+    cleanup_safety_keys = (
+        "cleanup_journal_two_phase_no_replace",
+        "cleanup_journal_path_safe_relative_tombstones",
+        "cleanup_pending_read_only_report_only",
+        "cleanup_pending_malformed_state_fails_closed",
+        "cleanup_pending_mutations_drain_first",
+        "cleanup_pending_noop_is_not_true_noop",
+    )
+    for key in cleanup_safety_keys:
+        if contract["safety"].get(key) is not True:
+            raise ValueError(f"contract must state cleanup journal safety key: {key}")
     if contract["safety"].get("launch_keeps_internal_lock_file_persistent") is not True:
         raise ValueError("contract must state internal lifecycle lock files are persistent")
     if contract["safety"].get("launch_protects_internal_lock_directory_while_held") is not True:
-        raise ValueError("contract must state internal lifecycle lock directory is protected while held")
+        raise ValueError(
+            "contract must state internal lifecycle lock directory is protected while held"
+        )
     if contract["safety"].get("launch_uses_stable_fcntl_flock") is not True:
         raise ValueError("contract must state launch uses a stable fcntl flock")
     if contract["safety"].get("launch_preserves_mutable_runtime_state_paths") is not True:
         raise ValueError("contract must state launch preserves mutable runtime state paths")
-    if contract["safety"].get("launch_protects_dedicated_lock_and_artifact_directories") is not True:
-        raise ValueError("contract must state launch protects only dedicated lock and artifact directories")
+    if (
+        contract["safety"].get("launch_protects_dedicated_lock_and_artifact_directories")
+        is not True
+    ):
+        raise ValueError(
+            "contract must state launch protects only dedicated lock and artifact directories"
+        )
     if contract["safety"].get("launch_revalidates_executable_before_handoff") is not True:
         raise ValueError("contract must state launch revalidates the executable before handoff")
     runtime_launch = contract["runtime_launch"]
@@ -734,1315 +1289,187 @@ def validate_metadata() -> None:
         raise ValueError("contract must document launch lock scope through child completion")
     if "managed target root" not in runtime_launch.get("mutable_runtime_paths", ""):
         raise ValueError("contract must document writable runtime state paths")
-    if "only the dedicated lock directory" not in runtime_launch.get("pre_handoff_executable_revalidation", ""):
+    if "only the dedicated lock directory" not in runtime_launch.get(
+        "pre_handoff_executable_revalidation", ""
+    ):
         raise ValueError("contract must document narrow launch path protection")
-    if "pinned official-binary digest" not in runtime_launch.get("pre_handoff_executable_revalidation", ""):
+    if "pinned official-binary digest" not in runtime_launch.get(
+        "pre_handoff_executable_revalidation", ""
+    ):
         raise ValueError("contract must document pinned digest revalidation before launch handoff")
-    if "write-protected verified-path handoff" not in runtime_launch.get("portable_handoff_mechanism", ""):
-        raise ValueError("contract must document portable verified-path handoff")
-    if "exact-inode fd execution is not the portable macOS contract" not in runtime_launch.get("portable_handoff_mechanism", ""):
+    if "latest revalidated path handoff" not in runtime_launch.get(
+        "portable_handoff_mechanism", ""
+    ):
+        raise ValueError("contract must document portable latest-path handoff")
+    if "exact-inode fd execution is not the portable macOS contract" not in runtime_launch.get(
+        "portable_handoff_mechanism", ""
+    ):
         raise ValueError("contract must not overclaim portable exact-inode execution")
-    lifecycle_scope = runtime_launch.get("lifecycle_lock_scope", "").lower()
-    if "external product coordination" not in lifecycle_scope:
-        raise ValueError("contract must document external product coordination")
-    if "canonical external target lock" not in lifecycle_scope:
-        raise ValueError("contract must document external target handoff")
+    if "product handoff" not in runtime_launch.get("lifecycle_lock_scope", "").lower():
+        raise ValueError("contract must document external lock acquisition order")
     if "fcntl.flock" not in runtime_launch.get("lifecycle_lock_mechanism", ""):
         raise ValueError("contract must document the stable flock mechanism")
-    if "fixed validated system temp root" not in runtime_launch.get("lifecycle_lock_mechanism", ""):
+    if "fixed validated product/UID 0700 system temp root" not in runtime_launch.get(
+        "lifecycle_lock_mechanism", ""
+    ):
         raise ValueError("contract must document fixed bootstrap root")
-    if "lock files are never unlinked" not in runtime_launch.get("lifecycle_lock_mechanism", ""):
-        raise ValueError("contract must document persistent lifecycle lock files")
+    mechanism = runtime_launch.get("lifecycle_lock_mechanism", "")
+    for required in (
+        "monotonic 0600 external product anchor named global.lock",
+        "monotonic 0600 canonical target anchor",
+        "complete fsynced no-replace binding publication",
+        "final-path visibility is the rollback commit point",
+        "parent-directory sync completes crash durability",
+        "never truncated, rebound, replaced, or unlinked",
+        "Read-only status, plan, and software-status do not create anchors",
+        "immutable complete cleanup journal",
+        "relative tombstone names",
+        "no-replace publication",
+        "read-only report-only cleanup_pending state",
+        "malformed-state fail-closed",
+        "mutation-only drain",
+    ):
+        if required not in mechanism:
+            raise ValueError(f"contract must document lifecycle mechanism: {required}")
     if "restored to 0700" not in runtime_launch.get("lifecycle_lock_mechanism", ""):
         raise ValueError("contract must document internal lock directory restoration")
-    if "dedicated target-local lock directory" not in runtime_launch.get("lifecycle_lock_mechanism", ""):
+    if "dedicated target-local lock directory" not in runtime_launch.get(
+        "lifecycle_lock_mechanism", ""
+    ):
         raise ValueError("contract must document the dedicated lock directory")
     if "same-UID" not in runtime_launch.get("same_uid_tamper_boundary", ""):
         raise ValueError("contract must document the same-UID tamper boundary")
-    if runtime_launch.get("workspace_default_source") != "captured-caller-cwd":
-        raise ValueError("contract must document captured caller cwd as the default launch workspace")
-    if runtime_launch.get("manager_workspace_argument") != "--workspace":
-        raise ValueError("contract must document the manager workspace argument")
-    if runtime_launch.get("child_cwd_policy") != "explicit-subprocess-cwd":
-        raise ValueError("contract must document explicit subprocess cwd handoff")
-    if runtime_launch.get("native_cwd_flag") is not None:
-        raise ValueError("contract must not invent an upstream Kimi cwd flag")
-    if "--add-dir" not in runtime_launch.get("workspace_expansion_blocked", []):
-        raise ValueError("contract must document blocked native workspace expansion")
+    same_uid_boundary = runtime_launch.get("same_uid_tamper_boundary", "")
+    for required in (
+        "No OS sandbox or independent trust anchor is claimed",
+        "target entrypoint replacement",
+        "not authenticity against a same-UID writer",
+    ):
+        if required not in same_uid_boundary:
+            raise ValueError(f"contract must state same-UID boundary: {required}")
+    for forbidden in (
+        "executable os.replace swaps are denied",
+        "same-UID chmod protection",
+    ):
+        if forbidden in same_uid_boundary:
+            raise ValueError(f"contract must not overclaim same-UID launch protection: {forbidden}")
     if manifest.get("runtime_launch") != {
+        "external_product_coordination_lock": True,
         "external_target_bound_lifecycle_lock": True,
-        "external_product_lifecycle_lock": True,
-        "external_product_to_target_handoff": True,
+        "external_product_anchor_persistent_inode": True,
+        "external_target_anchor_persistent_inode": True,
         "external_lock_persistent_inode": True,
         "external_lock_fixed_system_bootstrap_root": True,
+        "external_anchor_no_replace_publication": True,
+        "external_anchor_final_path_commit_point": True,
+        "external_anchor_hardlink_publication": False,
+        "read_only_external_anchor_no_create": True,
+        "read_only_cold_no_anchor_double_check": True,
+        "read_only_cold_namespace_must_be_empty": True,
+        "different_targets_concurrent_after_product_handoff": True,
+        "cleanup_journal_no_replace_publication": True,
+        "cleanup_journal_relative_tombstones": True,
+        "cleanup_pending_read_only_report_only": True,
+        "cleanup_pending_malformed_state_fails_closed": True,
+        "cleanup_pending_mutations_drain_first": True,
+        "cleanup_journal_hardlink_alias_recovery": True,
         "internal_lock_persistent_inode": True,
         "internal_lock_directory_protected_while_held": True,
         "holds_lifecycle_lock_through_child": True,
         "stable_fcntl_flock_lifecycle_lock": True,
-        "write_protected_verified_path_handoff": True,
+        "latest_revalidated_path_handoff": True,
         "mutable_runtime_state_writable_during_launch": True,
         "pre_handoff_executable_revalidation": True,
         "exact_inode_exec": False,
+        "same_uid_tamper_authenticity": False,
         "runtime_dirs_private": True,
-        "default_workspace_source": "captured-caller-cwd",
-        "manager_workspace_argument": "--workspace",
-        "explicit_child_cwd": True,
-        "native_cwd_flag": None,
-        "blocks_native_add_dir_workspace_expansion": True,
     }:
-        raise ValueError("manifest must expose launch lock, executable revalidation, and workspace facts")
+        raise ValueError("manifest must expose launch lock and executable revalidation facts")
     software = contract["software_lifecycle"]
-    if software.get("channel") != "official-binary" or software.get("manifest_sha256") != MANIFEST_SHA256:
+    if (
+        software.get("channel") != "official-binary"
+        or software.get("manifest_sha256") != MANIFEST_SHA256
+    ):
         raise ValueError("contract software lifecycle must use official binary manifest")
     if software.get("status_executes_binary") is not False:
         raise ValueError("software status must remain read-only")
-    if contract["runtime_compatibility"].get("windows_supported") is not False:
+    if (
+        software.get("remove_command")
+        != "python3 cli-tools/nddev_kimicode.py remove-cli --target /absolute/target --json"
+    ):
+        raise ValueError("contract must expose remove-cli")
+    if software.get("remove_absent_noop") is not True:
+        raise ValueError("contract must declare deterministic absent remove-cli no-op")
+    if "only target-owned software paths" not in software.get("remove_precondition", ""):
+        raise ValueError("contract must scope remove-cli to target-owned software paths")
+    if manifest["software_install"].get("remove_absent_noop") is not True:
+        raise ValueError("manifest must expose deterministic absent remove-cli no-op")
+    expected_powershell = {
+        "powershell_script_url": "https://code.kimi.com/kimi-code/install.ps1",
+        "powershell_script_sha256": INSTALL_POWERSHELL_SHA256,
+        "powershell_script_size_bytes": INSTALL_POWERSHELL_SIZE_BYTES,
+        "product_supported": False,
+    }
+    if (runtime_compatibility := contract["runtime_compatibility"]).get(
+        "official_windows_install_surface"
+    ) != expected_powershell:
+        raise ValueError("contract must preserve product-unsupported PowerShell surface")
+    if manifest["software_install"].get("official_windows_install_surface") != expected_powershell:
+        raise ValueError("manifest must preserve product-unsupported PowerShell surface")
+    validate_vendor_distribution_observations(
+        runtime_compatibility.get("vendor_distribution_observations"),
+        "contract vendor distribution observations",
+    )
+    validate_vendor_distribution_observations(
+        manifest["software_install"].get("vendor_distribution_observations"),
+        "manifest vendor distribution observations",
+    )
+    if runtime_compatibility.get("observed_vendor_platforms") != OBSERVED_VENDOR_PLATFORMS:
+        raise ValueError("contract must preserve observed vendor platform keys")
+    if runtime_compatibility.get("observed_vendor_artifacts") != OBSERVED_BINARY_ARTIFACTS:
+        raise ValueError("contract must preserve observed vendor artifact observations")
+    if runtime_compatibility.get("supported_hosts") != SUPPORTED_HOSTS:
+        raise ValueError("contract must support only canonical NDDev hosts")
+    if runtime_compatibility.get("host_to_vendor_platform") != HOST_TO_VENDOR_PLATFORM:
+        raise ValueError("contract must map supported hosts to observed vendor asset keys")
+    if runtime_compatibility.get("unsupported_host_categories") != UNSUPPORTED_HOST_CATEGORIES:
+        raise ValueError("contract unsupported host categories mismatch")
+    if runtime_compatibility.get("ubuntu_glibc_version_floor") is not None:
+        raise ValueError("contract must not invent an upstream Ubuntu/glibc version floor")
+    if runtime_compatibility.get("ubuntu_glibc_version_floor_source") != "no-official-floor":
+        raise ValueError("contract must record no-official-floor for Ubuntu/glibc")
+    if runtime_compatibility.get("windows_supported") is not False:
         raise ValueError("Windows must be unsupported")
+    if runtime_compatibility.get("generic_linux_supported") is not False:
+        raise ValueError("generic Linux must not be supported")
+    for host in ("non_ubuntu_linux_supported", "linux_musl_supported"):
+        if runtime_compatibility.get(host) is not False:
+            raise ValueError(f"{host} must be unsupported")
+    software_runtime = manifest["software_runtime"]
+    if software_runtime.get("observed_vendor_platforms") != OBSERVED_VENDOR_PLATFORMS:
+        raise ValueError("manifest must preserve observed vendor platform keys")
+    if software_runtime.get("observed_vendor_artifacts") != OBSERVED_BINARY_ARTIFACTS:
+        raise ValueError("manifest must preserve observed vendor artifact observations")
+    if software_runtime.get("supported_hosts") != SUPPORTED_HOSTS:
+        raise ValueError("manifest must support only canonical NDDev hosts")
+    if software_runtime.get("host_to_vendor_platform") != HOST_TO_VENDOR_PLATFORM:
+        raise ValueError("manifest must map supported hosts to observed vendor asset keys")
+    if software_runtime.get("unsupported_host_categories") != UNSUPPORTED_HOST_CATEGORIES:
+        raise ValueError("manifest unsupported host categories mismatch")
+    if software_runtime.get("ubuntu_glibc_version_floor") is not None:
+        raise ValueError("manifest must not invent an upstream Ubuntu/glibc version floor")
+    if software_runtime.get("ubuntu_glibc_version_floor_source") != "no-official-floor":
+        raise ValueError("manifest must record no-official-floor for Ubuntu/glibc")
+    if "supported_platforms" in software_runtime:
+        raise ValueError("manifest must not call observed linux assets supported platforms")
     validate_baseline(baseline)
 
 
-def make_isolated_target(label: str) -> tuple[tempfile.TemporaryDirectory[str], Path]:
-    temp = tempfile.TemporaryDirectory(prefix=f".tmp-kimicode-{label}-", dir=str(ROOT))
-    parent = Path(temp.name) / "parent"
-    parent.mkdir(mode=0o700)
-    parent.chmod(0o700)
-    return temp, parent / "target"
-
-
-def directory_metadata_snapshot(path: Path) -> tuple[Any, ...]:
-    info = path.lstat()
-    if not stat.S_ISDIR(info.st_mode):
-        raise ValueError(f"snapshot path is not a directory: {path}")
-    return (
-        info.st_dev,
-        info.st_ino,
-        stat.S_IMODE(info.st_mode),
-        info.st_uid,
-        info.st_gid,
-        info.st_nlink,
-        info.st_size,
-        info.st_atime_ns,
-        info.st_mtime_ns,
-    )
-
-
-def directory_restorable_metadata_snapshot(path: Path) -> tuple[Any, ...]:
-    info = path.lstat()
-    if not stat.S_ISDIR(info.st_mode):
-        raise ValueError(f"snapshot path is not a directory: {path}")
-    return (
-        info.st_dev,
-        info.st_ino,
-        stat.S_IMODE(info.st_mode),
-        info.st_uid,
-        info.st_gid,
-        info.st_atime_ns,
-        info.st_mtime_ns,
-    )
-
-
-def pin_directory_metadata(path: Path, offset: int) -> tuple[Any, ...]:
-    base = 1_700_000_000_000_000_000 + offset
-    os.utime(path, ns=(base, base + 123_456_789))
-    return directory_metadata_snapshot(path)
-
-
-def managed_file_identity_snapshot(manager: Any, path: Path) -> tuple[Any, ...]:
-    info = path.lstat()
-    if not stat.S_ISREG(info.st_mode):
-        raise ValueError(f"managed snapshot path is not a regular file: {path}")
-    return (
-        info.st_dev,
-        info.st_ino,
-        stat.S_IMODE(info.st_mode),
-        info.st_uid,
-        info.st_gid,
-        info.st_nlink,
-        info.st_size,
-        info.st_mtime_ns,
-        file_sha256_no_follow(path, max_bytes=manager.MANAGED_MAX_BYTES),
-    )
-
-
-def bounded_tree_names(root: Path) -> tuple[str, ...]:
-    names: list[str] = []
-    for path in root.rglob("*"):
-        names.append(path.relative_to(root).as_posix())
-        if len(names) > 512:
-            raise ValueError(f"tree snapshot is unexpectedly large: {root}")
-    return tuple(sorted(names))
-
-
-def write_stub_software(manager: Any, target: Path, binary_bytes: bytes | None = None) -> None:
-    platform_key = "linux-x64"
-    if binary_bytes is None:
-        binary_bytes = b"#!/bin/sh\nprintf 'kimi-code 0.29.2\\n'\n"
-    binary_sha = manager.sha256_bytes(binary_bytes)
-    patched_platforms = dict(manager.KIMI_BINARY_PLATFORMS)
-    patched_platforms[platform_key] = {
-        "filename": "kimi-code-public-validator-stub",
-        "checksum": binary_sha,
-    }
-    manager.KIMI_BINARY_PLATFORMS = patched_platforms
-
-    software_bin = manager.software_current(target) / "bin"
-    software_bin.mkdir(mode=0o700, parents=True)
-    manager.software_root(target).chmod(0o700)
-    manager.software_current(target).chmod(0o700)
-    software_bin.chmod(0o700)
-    current_binary = software_bin / manager.KIMI_COMMAND
-    current_binary.write_bytes(binary_bytes)
-    current_binary.chmod(0o700)
-
-    entrypoint_bin = target / "bin"
-    entrypoint_bin.mkdir(mode=0o700)
-    entrypoint_bin.chmod(0o700)
-    entrypoint = entrypoint_bin / manager.KIMI_COMMAND
-    entrypoint.write_bytes(binary_bytes)
-    entrypoint.chmod(0o700)
-
-    binary = patched_platforms[platform_key]
-    stamp = manager.software_stamp(
-        target,
-        platform_key=platform_key,
-        binary={
-            "filename": binary["filename"],
-            "url": f"{manager.KIMI_BINARY_BASE}/{manager.KIMI_PACKAGE_VERSION}/{binary['filename']}",
-            "sha256": binary["checksum"],
-        },
-        entrypoint_digest=manager.file_sha256(entrypoint, label="stub Kimi Code entrypoint"),
-        installed_tree_digest=manager.tree_sha256(manager.software_current(target)),
-        version_probe_digest=manager.sha256_bytes(b"public-validator-stub-version-probe"),
-    )
-    manager.atomic_write(manager.software_stamp_path(target), manager.canonical_json(stamp), target)
-
-
-def file_sha256_no_follow(path: Path, max_bytes: int) -> str:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(path, flags)
-    try:
-        digest = hashlib.sha256()
-        total = 0
-        while True:
-            chunk = os.read(fd, 65536)
-            if not chunk:
-                break
-            total += len(chunk)
-            if total > max_bytes:
-                raise ValueError(f"snapshot file is too large: {path}")
-            digest.update(chunk)
-        return digest.hexdigest()
-    finally:
-        os.close(fd)
-
-
-def bootstrap_tree_snapshot(manager: Any, *, system_root: Path | None = None) -> tuple[Any, ...] | None:
-    root = (system_root or manager.fixed_system_temp_root()) / manager.EXTERNAL_LOCK_ROOT_NAME
-    try:
-        info = root.lstat()
-    except FileNotFoundError:
-        return None
-    if stat.S_ISLNK(info.st_mode):
-        return (("<root-symlink>",),)
-    if not stat.S_ISDIR(info.st_mode):
-        return (("<root-non-directory>",),)
-    entries: list[tuple[Any, ...]] = [
-        (
-            "<root>",
-            info.st_dev,
-            info.st_ino,
-            stat.S_IMODE(info.st_mode),
-            info.st_uid,
-            info.st_nlink,
-        )
-    ]
-    try:
-        children = sorted(root.iterdir(), key=lambda item: item.name)
-    except OSError as exc:
-        return (*entries, (f"<unreadable:{exc.errno}>",))
-    if len(children) > 256:
-        raise ValueError("bootstrap snapshot is unexpectedly large")
-    for child in children:
-        child_info = child.lstat()
-        child_entry: tuple[Any, ...]
-        if stat.S_ISREG(child_info.st_mode):
-            child_entry = (
-                child.name,
-                "file",
-                child_info.st_dev,
-                child_info.st_ino,
-                stat.S_IMODE(child_info.st_mode),
-                child_info.st_uid,
-                child_info.st_nlink,
-                child_info.st_size,
-                file_sha256_no_follow(child, max_bytes=manager.METADATA_MAX_BYTES),
-            )
-        elif stat.S_ISDIR(child_info.st_mode):
-            child_entry = (
-                child.name,
-                "directory",
-                child_info.st_dev,
-                child_info.st_ino,
-                stat.S_IMODE(child_info.st_mode),
-                child_info.st_uid,
-                child_info.st_nlink,
-            )
-        else:
-            child_entry = (
-                child.name,
-                "other",
-                child_info.st_dev,
-                child_info.st_ino,
-                stat.S_IMODE(child_info.st_mode),
-                child_info.st_uid,
-                child_info.st_nlink,
-            )
-        entries.append(child_entry)
-    return tuple(entries)
-
-
-def run_with_injected_bootstrap_root(manager: Any, callback: Any) -> None:
-    original_resolver = manager.fixed_system_temp_root
-    before = bootstrap_tree_snapshot(manager)
-    with tempfile.TemporaryDirectory(prefix=".tmp-kimicode-bootstrap-") as temp:
-        injected_root = Path(temp) / "system-root"
-        injected_root.mkdir(mode=0o777)
-        injected_root.chmod(0o1777)
-        if ROOT in injected_root.resolve().parents:
-            raise ValueError("injected bootstrap root must be outside the source tree")
-        if stat.S_IMODE(injected_root.lstat().st_mode) != 0o1777:
-            raise ValueError("injected bootstrap system root must be sticky 01777")
-        manager.fixed_system_temp_root = lambda: injected_root
-        try:
-            if manager.fixed_system_temp_root() != injected_root:
-                raise ValueError("bootstrap root monkeypatch was not installed")
-            callback()
-        finally:
-            manager.fixed_system_temp_root = original_resolver
-    after = bootstrap_tree_snapshot(manager)
-    if after != before:
-        raise ValueError("runtime regressions created artifacts in the real system bootstrap root")
-
-
-def validate_status_launch_allowed_regression(manager: Any) -> None:
-    temp, target = make_isolated_target("status-")
-    try:
-        manager.write_setup(
-            target,
-            manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP),
-            manager.load_profile(manager.DEFAULT_PROFILE),
-        )
-        fresh_status = manager.status_payload(target)
-        if fresh_status.get("launch_allowed") is not False:
-            raise ValueError("fresh managed setup without software must not be launch_allowed")
-        if fresh_status.get("software_current") is not False:
-            raise ValueError("fresh managed setup must report software_current false")
-
-        original_platforms = manager.KIMI_BINARY_PLATFORMS
-        try:
-            write_stub_software(manager, target)
-            software = manager.software_status_payload(target)
-            if software.get("current") is not True:
-                raise ValueError(f"stub software must be current: {software.get('drift')}")
-            ready_status = manager.status_payload(target)
-            if ready_status.get("launch_allowed") is not True:
-                raise ValueError("current clean setup with current target-owned software must be launch_allowed")
-        finally:
-            manager.KIMI_BINARY_PLATFORMS = original_platforms
-    finally:
-        temp.cleanup()
-
-
-def validate_corrupt_backup_regression(manager: Any) -> None:
-    temp, target = make_isolated_target("backup-")
-    try:
-        setup = manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP)
-        manager.write_setup(target, setup, manager.load_profile(manager.DEFAULT_PROFILE))
-        manager.write_setup(target, setup, manager.load_profile("safe"), require_existing=True)
-        before = manager.status_payload(target)
-        backup_path = manager.backup_pool(target) / "0" / manager.BACKUP_NAME
-        envelope = manager.read_json_file(backup_path, max_bytes=manager.METADATA_MAX_BYTES, label=manager.BACKUP_NAME)
-        files = envelope.get("files")
-        if not isinstance(files, dict):
-            raise ValueError("backup regression could not find backup files")
-        corrupt_relative = "skills/nddev-builder/SKILL.md"
-        if corrupt_relative not in files:
-            raise ValueError("backup regression could not find routed skill payload")
-        files[corrupt_relative] = "!!!!"
-        manager.atomic_write(backup_path, manager.canonical_json(envelope), backup_path.parent)
-        try:
-            manager.restore_backup(target, 0)
-        except manager.KimicodeSetupError as exc:
-            if str(exc) != "backup file payload is invalid base64":
-                raise ValueError(f"corrupt backup returned unstable error: {exc}") from exc
-        else:
-            raise ValueError("corrupt backup restore unexpectedly succeeded")
-        after = manager.status_payload(target)
-        if after.get("permission_profile_id") != before.get("permission_profile_id") or after.get("drift"):
-            raise ValueError("corrupt backup restore did not roll back cleanly")
-    finally:
-        temp.cleanup()
-
-
-def validate_managed_object_transaction_regression(manager: Any) -> None:
-    def expect_rollback_replacement_rejected(transaction: Any, replacement_path: Path, replacement: bytes, label: str) -> None:
-        with contextlib.suppress(FileNotFoundError):
-            replacement_path.unlink()
-        replacement_path.write_bytes(replacement)
-        replacement_path.chmod(0o600)
-        try:
-            transaction.rollback()
-        except manager.KimicodeSetupError as exc:
-            if "concurrent replacement at active path" not in str(exc):
-                raise ValueError(f"{label} rollback returned unstable error: {exc}") from exc
-        else:
-            raise ValueError(f"{label} rollback unexpectedly overwrote a concurrent replacement")
-        if replacement_path.read_bytes() != replacement:
-            raise ValueError(f"{label} rollback deleted or changed the concurrent replacement")
-
-    temp, target = make_isolated_target("managed-object-")
-    try:
-        setup = manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP)
-        profile = manager.load_profile(manager.DEFAULT_PROFILE)
-        manager.write_setup(target, setup, profile)
-
-        config_path = target / "config.toml"
-        stale_transaction = manager.ManagedObjectTransaction(target, ("config.toml",))
-        concurrent_bytes = config_path.read_bytes() + b"\n# concurrent owner edit\n"
-        config_path.write_bytes(concurrent_bytes)
-        config_path.chmod(0o600)
-        try:
-            stale_transaction.write_file("config.toml", b"managed replacement\n")
-        except manager.KimicodeSetupError as exc:
-            if "changed before transition" not in str(exc):
-                raise ValueError(f"stale managed transaction returned unstable error: {exc}") from exc
-        else:
-            raise ValueError("stale managed transaction unexpectedly wrote over changed state")
-        finally:
-            stale_transaction.rollback()
-        if config_path.read_bytes() != concurrent_bytes:
-            raise ValueError("stale managed transaction mutated the concurrently changed file")
-
-        manager.write_setup(target, setup, profile, require_existing=True)
-        stable_mtime = 1_700_000_001_000_000_000
-        os.utime(config_path, ns=(stable_mtime, stable_mtime + 222_222_222))
-        before_file = managed_file_identity_snapshot(manager, config_path)
-        before_tree = bounded_tree_names(target)
-        before_parent_names = tuple(sorted(path.name for path in target.parent.iterdir()))
-        before_target = directory_metadata_snapshot(target)
-        before_parent = directory_metadata_snapshot(target.parent)
-
-        original_atomic_write = manager.atomic_write
-
-        def failing_stamp_atomic_write(path: Path, data: bytes, target_arg: Path, *, mode: int = manager.OWNER_FILE_MODE) -> None:
-            if path.name == manager.STAMP_NAME:
-                raise OSError("injected managed stamp publication failure")
-            original_atomic_write(path, data, target_arg, mode=mode)
-
-        manager.atomic_write = failing_stamp_atomic_write
-        try:
-            try:
-                manager.write_setup(target, setup, profile, require_existing=True)
-            except OSError as exc:
-                if "injected managed stamp publication failure" not in str(exc):
-                    raise ValueError(f"managed rollback smoke returned unstable error: {exc}") from exc
-            else:
-                raise ValueError("managed rollback smoke unexpectedly succeeded")
-        finally:
-            manager.atomic_write = original_atomic_write
-
-        if managed_file_identity_snapshot(manager, config_path) != before_file:
-            raise ValueError("managed rollback did not restore original file identity and metadata")
-        if directory_metadata_snapshot(target) != before_target:
-            raise ValueError("managed rollback did not restore target directory metadata")
-        if directory_metadata_snapshot(target.parent) != before_parent:
-            raise ValueError("managed rollback did not restore target parent metadata")
-        if bounded_tree_names(target) != before_tree:
-            raise ValueError("managed rollback changed target topology")
-        if tuple(sorted(path.name for path in target.parent.iterdir())) != before_parent_names:
-            raise ValueError("managed rollback left parent topology residue")
-        clean = manager.status_payload(target)
-        if clean.get("drift"):
-            raise ValueError(f"managed rollback left drift: {clean['drift']}")
-    finally:
-        temp.cleanup()
-
-    delete_temp, delete_target = make_isolated_target("managed-replacement-delete-")
-    try:
-        setup = manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP)
-        profile = manager.load_profile(manager.DEFAULT_PROFILE)
-        manager.write_setup(delete_target, setup, profile)
-        delete_path = delete_target / "mcp.json"
-        delete_transaction = manager.ManagedObjectTransaction(delete_target, ("mcp.json",))
-        delete_transaction.delete_file("mcp.json")
-        expect_rollback_replacement_rejected(
-            delete_transaction,
-            delete_path,
-            b'{"owner":"replacement-after-delete"}\n',
-            "delete-path concurrent replacement",
-        )
-        status = manager.status_payload(delete_target)
-        if "mcp.json" not in status.get("drift", []):
-            raise ValueError("delete-path concurrent replacement was reported as restored current state")
-    finally:
-        delete_temp.cleanup()
-
-    write_temp, write_target = make_isolated_target("managed-replacement-write-")
-    try:
-        setup = manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP)
-        profile = manager.load_profile(manager.DEFAULT_PROFILE)
-        manager.write_setup(write_target, setup, profile)
-        write_path = write_target / "config.toml"
-        write_transaction = manager.ManagedObjectTransaction(write_target, ("config.toml",))
-        write_transaction.write_file("config.toml", b"# transaction-created config\n")
-        expect_rollback_replacement_rejected(
-            write_transaction,
-            write_path,
-            b"# replacement-after-write\n",
-            "write-path concurrent replacement",
-        )
-        status = manager.status_payload(write_target)
-        if "config.toml" not in status.get("drift", []):
-            raise ValueError("write-path concurrent replacement was reported as restored current state")
-    finally:
-        write_temp.cleanup()
-
-
-def validate_external_lock_binding_regression(manager: Any) -> None:
-    temp, target = make_isolated_target("external-lock-binding-")
-    try:
-        setup = manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP)
-        manager.write_setup(target, setup, manager.load_profile(manager.DEFAULT_PROFILE))
-        canonical_target = manager.lock_canonical_target(target)
-        lock_path = manager.bootstrap_lock_path(target, canonical_target)
-        internal_path = manager.lock_path(target)
-        if not internal_path.is_file():
-            raise ValueError("target lifecycle lock must be persistent after normal release")
-        internal_info = internal_path.lstat()
-        valid_payload = manager.canonical_json(
-            manager.lock_payload("external-bootstrap", canonical_target, lock_path)
-        )
-
-        lock_path.write_bytes(b"")
-        lock_path.chmod(0o600)
-        try:
-            manager.write_setup(target, setup, manager.load_profile("safe"), require_existing=True)
-        except manager.KimicodeSetupError as exc:
-            if "binding is missing" not in str(exc):
-                raise ValueError(f"empty external lock binding returned unstable error: {exc}") from exc
-        else:
-            raise ValueError("empty external lock binding unexpectedly succeeded")
-        lock_path.write_bytes(valid_payload)
-        lock_path.chmod(0o600)
-        manager.write_setup(target, setup, manager.load_profile("safe"), require_existing=True)
-        if not lock_path.is_file():
-            raise ValueError("external bootstrap lock must be persistent after normal release")
-        first_info = lock_path.lstat()
-        if not internal_path.is_file():
-            raise ValueError("target lifecycle lock disappeared after normal release")
-        if (internal_info.st_dev, internal_info.st_ino) != (internal_path.lstat().st_dev, internal_path.lstat().st_ino):
-            raise ValueError("target lifecycle lock inode changed across normal release")
-
-        lock_path.write_bytes(b"not json\n")
-        lock_path.chmod(0o600)
-        try:
-            manager.write_setup(target, setup, manager.load_profile(manager.DEFAULT_PROFILE), require_existing=True)
-        except manager.KimicodeSetupError as exc:
-            if "binding is malformed" not in str(exc):
-                raise ValueError(f"malformed external lock binding returned unstable error: {exc}") from exc
-        else:
-            raise ValueError("malformed external lock binding unexpectedly succeeded")
-        lock_path.write_bytes(valid_payload)
-        lock_path.chmod(0o600)
-
-        payload = manager.lock_payload(
-            "external-bootstrap",
-            str(target.parent / "other-target"),
-            lock_path,
-        )
-        lock_path.write_bytes(manager.canonical_json(payload))
-        lock_path.chmod(0o600)
-        try:
-            manager.write_setup(target, setup, manager.load_profile(manager.DEFAULT_PROFILE), require_existing=True)
-        except manager.KimicodeSetupError as exc:
-            if "different canonical target" not in str(exc):
-                raise ValueError(f"external lock binding returned unstable error: {exc}") from exc
-        else:
-            raise ValueError("external lock binding mismatch unexpectedly succeeded")
-        lock_path.write_bytes(valid_payload)
-        lock_path.chmod(0o600)
-
-        payload = manager.lock_payload("external-bootstrap", canonical_target, target / "wrong.lock")
-        lock_path.write_bytes(manager.canonical_json(payload))
-        lock_path.chmod(0o600)
-        try:
-            manager.write_setup(target, setup, manager.load_profile(manager.DEFAULT_PROFILE), require_existing=True)
-        except manager.KimicodeSetupError as exc:
-            if "different lock path" not in str(exc):
-                raise ValueError(f"external lock path binding returned unstable error: {exc}") from exc
-        else:
-            raise ValueError("external lock path binding mismatch unexpectedly succeeded")
-
-        lock_path.write_bytes(valid_payload)
-        lock_path.chmod(0o600)
-        manager.write_setup(target, setup, manager.load_profile("safe"), require_existing=True)
-        second_info = lock_path.lstat()
-        if (first_info.st_dev, first_info.st_ino) != (second_info.st_dev, second_info.st_ino):
-            raise ValueError("external bootstrap lock inode changed across normal release")
-    finally:
-        temp.cleanup()
-
-
-def write_lock_stage_alias(
-    manager: Any,
-    path: Path,
-    *,
-    canonical_target: str,
-    kind: str,
-    pid: int,
-    nonce: int,
-    payload_override: dict[str, Any] | None = None,
-) -> Path:
-    payload = payload_override or manager.lock_payload(kind, canonical_target, path)
-    stage = path.with_name(f"{manager.lock_stage_prefix(path)}{pid}.{nonce}")
-    stage.write_bytes(manager.canonical_json(payload))
-    stage.chmod(0o600)
-    return stage
-
-
-def expect_lock_operation_rejected(manager: Any, operation: Any, expected: str) -> None:
-    try:
-        operation()
-    except manager.KimicodeSetupError as exc:
-        if expected not in str(exc):
-            raise ValueError(f"lock operation returned unstable error: {exc}") from exc
-        return
-    raise ValueError(f"lock operation unexpectedly succeeded; expected {expected}")
-
-
-def expect_operation_failed(operation: Any, label: str) -> None:
-    try:
-        operation()
-    except BaseException:
-        return
-    raise ValueError(f"{label} unexpectedly succeeded")
-
-
-def patch_fsync_to_fail_second_call(manager: Any) -> Any:
-    original_fsync = manager.os.fsync
-    calls = 0
-
-    def failing_fsync(fd: int) -> None:
-        nonlocal calls
-        calls += 1
-        if calls == 2:
-            manager.os.fsync = original_fsync
-            raise OSError("injected fsync failure")
-        original_fsync(fd)
-
-    manager.os.fsync = failing_fsync
-    return original_fsync
-
-
-def validate_unpublished_lock_creation_rollback_regression(manager: Any) -> None:
-    original_resolver = manager.fixed_system_temp_root
-    with tempfile.TemporaryDirectory(prefix=".tmp-kimicode-lock-rollback-") as temp:
-        system_root = Path(temp) / "system-root"
-        system_root.mkdir(mode=0o777)
-        system_root.chmod(0o1777)
-        manager.fixed_system_temp_root = lambda: system_root
-        try:
-            product_root = system_root / manager.EXTERNAL_LOCK_ROOT_NAME
-            before_system = pin_directory_metadata(system_root, 10)
-            original_fsync = patch_fsync_to_fail_second_call(manager)
-            try:
-                expect_operation_failed(
-                    manager.ensure_external_lock_root,
-                    "product lock root rollback smoke",
-                )
-            finally:
-                manager.os.fsync = original_fsync
-            if manager.path_exists_no_follow(product_root):
-                raise ValueError("failed product lock root publication left an unpublished root")
-            if directory_metadata_snapshot(system_root) != before_system:
-                raise ValueError("failed product lock root publication changed parent metadata")
-
-            before_system = pin_directory_metadata(system_root, 15)
-            original_stage_writer = manager.write_lock_stage_file
-
-            def failing_product_stage(path: Path, payload: bytes, label: str) -> None:
-                if label == "external product lifecycle lock staged binding":
-                    raise OSError("injected product anchor publication failure")
-                original_stage_writer(path, payload, label)
-
-            manager.write_lock_stage_file = failing_product_stage
-            try:
-                expect_operation_failed(
-                    lambda: manager.acquire_product_lock(create=True, exclusive=True),
-                    "product anchor rollback smoke",
-                )
-            finally:
-                manager.write_lock_stage_file = original_stage_writer
-            if manager.path_exists_no_follow(product_root):
-                raise ValueError("failed product anchor publication left a newly-created product root")
-            if directory_metadata_snapshot(system_root) != before_system:
-                raise ValueError("failed product anchor publication changed parent metadata")
-
-            before_system_restorable = directory_restorable_metadata_snapshot(system_root)
-            product = manager.acquire_product_lock(create=True, exclusive=True)
-            if product is None:
-                raise ValueError("product lock was not created for target-root rollback smoke")
-            if directory_restorable_metadata_snapshot(system_root) != before_system_restorable:
-                raise ValueError("successful product anchor publication did not restore parent metadata")
-            try:
-                target_root = manager.target_lock_root_path(product.root)
-                before_product = pin_directory_metadata(product.root, 20)
-                original_fsync = patch_fsync_to_fail_second_call(manager)
-                try:
-                    expect_operation_failed(
-                        lambda: manager.ensure_external_target_lock_root(product.root),
-                        "target lock root rollback smoke",
-                    )
-                finally:
-                    manager.os.fsync = original_fsync
-                if manager.path_exists_no_follow(target_root):
-                    raise ValueError("failed target lock root publication left an unpublished root")
-                if directory_metadata_snapshot(product.root) != before_product:
-                    raise ValueError("failed target lock root publication changed parent metadata")
-
-                canonical_target = str(Path(temp) / "target-anchor-failure")
-                before_product = pin_directory_metadata(product.root, 25)
-                original_stage_writer = manager.write_lock_stage_file
-
-                def failing_target_stage(path: Path, payload: bytes, label: str) -> None:
-                    if label == "external target lifecycle lock staged binding":
-                        raise OSError("injected target anchor publication failure")
-                    original_stage_writer(path, payload, label)
-
-                manager.write_lock_stage_file = failing_target_stage
-                try:
-                    expect_operation_failed(
-                        lambda: manager.acquire_external_target_lock(
-                            product.root,
-                            canonical_target,
-                            create=True,
-                            exclusive=True,
-                        ),
-                        "target anchor rollback smoke",
-                    )
-                finally:
-                    manager.write_lock_stage_file = original_stage_writer
-                if manager.path_exists_no_follow(target_root):
-                    raise ValueError("failed target anchor publication left a newly-created targets root")
-                if directory_metadata_snapshot(product.root) != before_product:
-                    raise ValueError("failed target anchor publication changed parent metadata")
-
-                before_product_restorable = directory_restorable_metadata_snapshot(product.root)
-                external = manager.acquire_external_target_lock(
-                    product.root,
-                    canonical_target,
-                    create=True,
-                    exclusive=True,
-                )
-                if external is None:
-                    raise ValueError("external target lock was not created after target-anchor rollback smoke")
-                try:
-                    if directory_restorable_metadata_snapshot(product.root) != before_product_restorable:
-                        raise ValueError("successful target anchor publication did not restore parent metadata")
-                finally:
-                    manager.release_external_target_lock(external)
-            finally:
-                manager.release_product_lock(product)
-        finally:
-            manager.fixed_system_temp_root = original_resolver
-
-    with tempfile.TemporaryDirectory(prefix=".tmp-kimicode-stage-rollback-") as temp:
-        parent = Path(temp) / "stage-parent"
-        parent.mkdir(mode=0o700)
-        parent.chmod(0o700)
-        stage = parent / ".anchor.nddev.tmp.1.1"
-        before_parent = pin_directory_metadata(parent, 30)
-        original_write_all = manager.write_all
-
-        def failing_write_all(fd: int, data: bytes) -> None:
-            original_write_all(fd, data[:1])
-            raise OSError("injected write failure")
-
-        manager.write_all = failing_write_all
-        try:
-            expect_operation_failed(
-                lambda: manager.write_lock_stage_file(stage, b'{"complete": true}\n', "stage rollback smoke"),
-                "stage rollback smoke",
-            )
-        finally:
-            manager.write_all = original_write_all
-        if manager.path_exists_no_follow(stage):
-            raise ValueError("failed staged binding creation left an unpublished stage")
-        if directory_metadata_snapshot(parent) != before_parent:
-            raise ValueError("failed staged binding creation changed parent metadata")
-
-
-def validate_lock_stage_publication_recovery_regression(manager: Any) -> None:
-    def run_killed_publication_case(case_label: str, target: Path, setup: dict[str, Any], profile: dict[str, Any], kill_label: str) -> None:
-        marker = Path(temp.name) / "stage-marker"
-        child_error = Path(temp.name) / "child-error"
-        with contextlib.suppress(FileNotFoundError):
-            marker.unlink()
-        with contextlib.suppress(FileNotFoundError):
-            child_error.unlink()
-        pid = os.fork()
-        if pid == 0:
-            try:
-                def kill_after_stage_fsync(source: Path, destination: Path, label: str) -> bool:
-                    if label == kill_label:
-                        marker.write_text(json.dumps({"source": str(source), "destination": str(destination)}), encoding="utf-8")
-                        os.kill(os.getpid(), signal.SIGKILL)
-                        raise AssertionError("SIGKILL did not terminate the staged publisher")
-                    return original_rename(source, destination, label)
-
-                original_rename = manager.rename_no_replace
-                manager.rename_no_replace = kill_after_stage_fsync
-                manager.write_setup(target, setup, profile)
-                os._exit(23)
-            except BaseException as exc:
-                child_error.write_text(repr(exc), encoding="utf-8")
-                os._exit(24)
-
-        deadline = time.monotonic() + 5.0
-        while time.monotonic() < deadline:
-            if marker.exists():
-                break
-            if child_error.exists():
-                raise ValueError(f"publisher child failed before marker: {child_error.read_text(encoding='utf-8')}")
-            waited, status = os.waitpid(pid, os.WNOHANG)
-            if waited == pid:
-                raise ValueError(f"publisher child exited before marker with status {status}")
-            time.sleep(0.05)
-        else:
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(pid, signal.SIGKILL)
-            with contextlib.suppress(ChildProcessError):
-                os.waitpid(pid, 0)
-            raise ValueError("timed out waiting for post-stage-fsync marker")
-        fork_wait_signal(pid, "post-stage-fsync publisher", signal.SIGKILL)
-        if child_error.exists():
-            raise ValueError(f"publisher child failed before SIGKILL: {child_error.read_text(encoding='utf-8')}")
-        payload = json.loads(marker.read_text(encoding="utf-8"))
-        stage = Path(payload["source"])
-        lock_path = Path(payload["destination"])
-        if lock_path.exists():
-            raise ValueError(f"{case_label} final anchor was published before the SIGKILL boundary")
-        if not stage.is_file():
-            raise ValueError(f"{case_label} post-stage-fsync SIGKILL did not leave the staged alias")
-        before_read = bootstrap_tree_snapshot(manager, system_root=manager.fixed_system_temp_root())
-        readers = (
-            ("status", lambda: manager.status_payload(target)),
-            ("plan", lambda: manager.plan_payload(target, setup, profile)),
-            ("software-status", lambda: manager.software_status_payload(target)),
-        )
-        for reader_label, reader in readers:
-            try:
-                reader()
-            except manager.KimicodeSetupError as exc:
-                message = str(exc)
-                if "incomplete staged publication" not in message and "must be empty without product anchor" not in message:
-                    raise ValueError(f"{reader_label} returned unstable staged-publication error: {exc}") from exc
-            else:
-                raise ValueError(f"{reader_label} unexpectedly repaired or ignored the staged publication")
-            after_read = bootstrap_tree_snapshot(manager, system_root=manager.fixed_system_temp_root())
-            if after_read != before_read:
-                raise ValueError(f"{reader_label} mutated the staged lock namespace")
-
-        manager.write_setup(target, setup, profile)
-        if not lock_path.is_file():
-            raise ValueError(f"exclusive mutator did not publish the recovered {case_label} final anchor")
-        if stage.exists():
-            raise ValueError(f"exclusive mutator did not drain the recovered {case_label} staged alias")
-        first_info = lock_path.lstat()
-        manager.write_setup(target, setup, profile, require_existing=True)
-        second_info = lock_path.lstat()
-        if (first_info.st_dev, first_info.st_ino, first_info.st_nlink) != (
-            second_info.st_dev,
-            second_info.st_ino,
-            second_info.st_nlink,
-        ):
-            raise ValueError(f"recovered {case_label} final anchor identity changed on the next mutator")
-
-    temp, target = make_isolated_target("lock-stage-recovery-")
-    try:
-        setup = manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP)
-        profile = manager.load_profile(manager.DEFAULT_PROFILE)
-        run_killed_publication_case("product", target, setup, profile, "external product lifecycle lock")
-        target_two = target.parent / "target-two"
-        run_killed_publication_case("target", target_two, setup, profile, "external target lifecycle lock")
-    finally:
-        temp.cleanup()
-
-
-def validate_lock_stage_adversarial_regression(manager: Any) -> None:
-    cases = ("malformed-name", "partial", "wrong-target", "symlink", "hardlink", "excessive")
-    for label in cases:
-        temp, target = make_isolated_target(f"lock-stage-{label}-")
-        try:
-            setup = manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP)
-            profile = manager.load_profile(manager.DEFAULT_PROFILE)
-            canonical_target = manager.lock_canonical_target(target)
-            product = manager.acquire_product_lock(create=True, exclusive=True)
-            if product is None:
-                raise ValueError("product lock was not created for adversarial target stage")
-            try:
-                manager.ensure_external_target_lock_root(product.root)
-                lock_path = manager.bootstrap_lock_path_for_root(product.root, canonical_target)
-            finally:
-                manager.release_product_lock(product)
-            parent = lock_path.parent
-            if label == "malformed-name":
-                stage = lock_path.with_name(f"{manager.lock_stage_prefix(lock_path)}not-a-pid.1")
-                stage.write_text("not json\n", encoding="utf-8")
-                stage.chmod(0o600)
-                expected = "staged binding alias is malformed"
-            elif label == "partial":
-                stage = lock_path.with_name(f"{manager.lock_stage_prefix(lock_path)}101.1")
-                stage.write_text("{", encoding="utf-8")
-                stage.chmod(0o600)
-                expected = "staged binding is malformed"
-            elif label == "wrong-target":
-                stage = write_lock_stage_alias(
-                    manager,
-                    lock_path,
-                    canonical_target=str(target.parent / "wrong-target"),
-                    kind="external-bootstrap",
-                    pid=102,
-                    nonce=1,
-                )
-                expected = "different canonical target"
-            elif label == "symlink":
-                stage = lock_path.with_name(f"{manager.lock_stage_prefix(lock_path)}103.1")
-                outside = Path(temp.name) / "outside-stage"
-                outside.write_text("outside\n", encoding="utf-8")
-                stage.symlink_to(outside)
-                expected = "must not be a symlink"
-            elif label == "hardlink":
-                stage = write_lock_stage_alias(
-                    manager,
-                    lock_path,
-                    canonical_target=canonical_target,
-                    kind="external-bootstrap",
-                    pid=104,
-                    nonce=1,
-                )
-                hardlink = lock_path.with_name(f"{manager.lock_stage_prefix(lock_path)}104.2")
-                os.link(stage, hardlink)
-                expected = "must not be a hardlink"
-            else:
-                stage = write_lock_stage_alias(
-                    manager,
-                    lock_path,
-                    canonical_target=canonical_target,
-                    kind="external-bootstrap",
-                    pid=105,
-                    nonce=0,
-                )
-                for index in range(1, manager.LOCK_STAGE_ALIAS_MAX + 2):
-                    write_lock_stage_alias(
-                        manager,
-                        lock_path,
-                        canonical_target=canonical_target,
-                        kind="external-bootstrap",
-                        pid=105,
-                        nonce=index,
-                    )
-                expected = "too many staged binding aliases"
-            before = bootstrap_tree_snapshot(manager, system_root=manager.fixed_system_temp_root())
-            expect_lock_operation_rejected(
-                manager,
-                lambda: manager.write_setup(target, setup, profile),
-                expected,
-            )
-            after = bootstrap_tree_snapshot(manager, system_root=manager.fixed_system_temp_root())
-            if after != before:
-                raise ValueError(f"{label} staged alias rejection mutated the lock namespace")
-            if not stage.exists() and not stage.is_symlink():
-                raise ValueError(f"{label} staged alias was removed on rejection")
-            if lock_path.exists():
-                raise ValueError(f"{label} staged alias rejection published a final anchor")
-        finally:
-            temp.cleanup()
-
-
-def fork_wait(pid: int, label: str, timeout_seconds: float = 5.0) -> None:
-    deadline = time.monotonic() + timeout_seconds
-    status_value: int | None = None
-    while time.monotonic() < deadline:
-        waited, status_value = os.waitpid(pid, os.WNOHANG)
-        if waited == pid:
-            break
-        if waited != 0:
-            raise ValueError(f"{label} waitpid returned the wrong child")
-        time.sleep(0.05)
-    else:
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(pid, 9)
-        with contextlib.suppress(ChildProcessError):
-            os.waitpid(pid, 0)
-        raise ValueError(f"{label} did not exit within {timeout_seconds:.1f}s")
-    if status_value is None:
-        raise ValueError(f"{label} waitpid did not return a status")
-    if os.WIFSIGNALED(status_value):
-        raise ValueError(f"{label} died from signal {os.WTERMSIG(status_value)}")
-    if not os.WIFEXITED(status_value) or os.WEXITSTATUS(status_value) != 0:
-        raise ValueError(f"{label} exited with status {status_value}")
-
-
-def fork_wait_signal(pid: int, label: str, expected_signal: int, timeout_seconds: float = 5.0) -> None:
-    deadline = time.monotonic() + timeout_seconds
-    status_value: int | None = None
-    while time.monotonic() < deadline:
-        waited, status_value = os.waitpid(pid, os.WNOHANG)
-        if waited == pid:
-            break
-        if waited != 0:
-            raise ValueError(f"{label} waitpid returned the wrong child")
-        time.sleep(0.05)
-    else:
-        with contextlib.suppress(ProcessLookupError):
-            os.kill(pid, signal.SIGKILL)
-        with contextlib.suppress(ChildProcessError):
-            os.waitpid(pid, 0)
-        raise ValueError(f"{label} did not exit within {timeout_seconds:.1f}s")
-    if status_value is None:
-        raise ValueError(f"{label} waitpid did not return a status")
-    if not os.WIFSIGNALED(status_value) or os.WTERMSIG(status_value) != expected_signal:
-        raise ValueError(f"{label} exited with unexpected status {status_value}")
-
-
-def wait_for_file(path: Path, label: str, timeout_seconds: float = 5.0) -> None:
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        if path.exists():
-            return
-        time.sleep(0.05)
-    raise ValueError(f"timed out waiting for {label}")
-
-
-def wait_for_file_or_error(path: Path, label: str, *error_paths: Path, timeout_seconds: float = 5.0) -> None:
-    deadline = time.monotonic() + timeout_seconds
-    while time.monotonic() < deadline:
-        if path.exists():
-            return
-        for error_path in error_paths:
-            if error_path.exists():
-                raise ValueError(f"{label} child error: {error_path.read_text(encoding='utf-8')}")
-        time.sleep(0.05)
-    raise ValueError(f"timed out waiting for {label}")
-
-
-def validate_external_lock_persistent_inode_handover_regression(manager: Any) -> None:
-    temp, target = make_isolated_target("external-lock-handover-")
-    children: list[tuple[int, str]] = []
-    parent_fd: int | None = None
-    lock_path: Path | None = None
-    b_release: Path | None = None
-    try:
-        setup = manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP)
-        manager.write_setup(target, setup, manager.load_profile(manager.DEFAULT_PROFILE))
-        canonical_target = manager.lock_canonical_target(target)
-        product = manager.acquire_product_lock(create=True, exclusive=True)
-        if product is None:
-            raise ValueError("product lock was not created for external handover")
-        external = manager.acquire_external_target_lock(
-            product.root,
-            canonical_target,
-            create=True,
-            exclusive=True,
-        )
-        if external is None:
-            raise ValueError("external target lock was not created for handover")
-        manager.release_product_lock(product)
-        lock_path = external.path
-        parent_fd = external.fd
-        initial_info = os.fstat(parent_fd)
-        control = target.parent / "handover-control"
-        control.mkdir(mode=0o700)
-        control.chmod(0o700)
-        b_acquired = control / "b-acquired"
-        b_release = control / "b-release"
-        c_acquired = control / "c-acquired"
-        c_error = control / "c-error"
-        b_error = control / "b-error"
-
-        def fork_lock_holder(name: str, acquired: Path, release: Path | None, wait_for: Path | None, error_path: Path) -> int:
-            pid = os.fork()
-            if pid != 0:
-                children.append((pid, name))
-                return pid
-            try:
-                if parent_fd is not None:
-                    with contextlib.suppress(OSError):
-                        os.close(parent_fd)
-                if wait_for is not None:
-                    wait_for_file(wait_for, f"{name} predecessor")
-                deadline = time.monotonic() + 5.0
-                child_fd: int | None = None
-                while time.monotonic() < deadline:
-                    product_handle = None
-                    try:
-                        product_handle = manager.acquire_product_lock(create=False, exclusive=False)
-                        if product_handle is None:
-                            raise ValueError("product lock disappeared during external handover")
-                        child_external = manager.acquire_external_target_lock(
-                            product_handle.root,
-                            canonical_target,
-                            create=False,
-                            exclusive=True,
-                        )
-                        if child_external is None:
-                            raise ValueError("external target lock disappeared during handover")
-                        child_fd = child_external.fd
-                        break
-                    except manager.KimicodeSetupError as exc:
-                        if "target is locked" not in str(exc):
-                            raise
-                        time.sleep(0.05)
-                    finally:
-                        manager.release_product_lock(product_handle)
-                if child_fd is None:
-                    raise ValueError(f"{name} did not acquire persistent external lock")
-                info = os.fstat(child_fd)
-                acquired.write_text(f"{info.st_dev}:{info.st_ino}\n", encoding="utf-8")
-                if release is not None:
-                    wait_for_file(release, f"{name} release")
-                manager.release_external_target_lock(
-                    manager.ExternalTargetLockHandle(fd=child_fd, path=lock_path, canonical_target=canonical_target)
-                )
-                os._exit(0)
-            except BaseException as exc:
-                with contextlib.suppress(BaseException):
-                    error_path.write_text(str(exc), encoding="utf-8")
-                os._exit(1)
-
-        fork_lock_holder("handover-b", b_acquired, b_release, None, b_error)
-        fork_lock_holder("handover-c", c_acquired, None, b_acquired, c_error)
-        time.sleep(0.2)
-        manager.release_external_target_lock(
-            manager.ExternalTargetLockHandle(fd=parent_fd, path=lock_path, canonical_target=canonical_target)
-        )
-        parent_fd = None
-        wait_for_file_or_error(b_acquired, "handover B acquire", b_error, c_error)
-        if not lock_path.is_file():
-            raise ValueError("external bootstrap lock disappeared during B handover")
-        if b_acquired.read_text(encoding="utf-8") != f"{initial_info.st_dev}:{initial_info.st_ino}\n":
-            raise ValueError("handover B acquired a different external lock inode")
-        b_release.write_text("release\n", encoding="utf-8")
-        wait_for_file_or_error(c_acquired, "handover C acquire", b_error, c_error)
-        if c_acquired.read_text(encoding="utf-8") != f"{initial_info.st_dev}:{initial_info.st_ino}\n":
-            raise ValueError("handover C acquired a different external lock inode")
-        wait_errors: list[str] = []
-        for pid, label in children:
-            try:
-                fork_wait(pid, label)
-            except ValueError as exc:
-                wait_errors.append(str(exc))
-        children.clear()
-        child_errors = "".join(
-            path.read_text(encoding="utf-8")
-            for path in (b_error, c_error)
-            if path.exists()
-        )
-        if child_errors or wait_errors:
-            raise ValueError(f"external lock handover child error: {child_errors}{'; '.join(wait_errors)}")
-        final_info = lock_path.lstat()
-        if (final_info.st_dev, final_info.st_ino) != (initial_info.st_dev, initial_info.st_ino):
-            raise ValueError("external bootstrap lock inode changed after 3-process handover")
-    finally:
-        if parent_fd is not None and lock_path is not None:
-            manager.release_external_target_lock(
-                manager.ExternalTargetLockHandle(fd=parent_fd, path=lock_path, canonical_target=canonical_target)
-            )
-        if b_release is not None:
-            with contextlib.suppress(BaseException):
-                b_release.write_text("release\n", encoding="utf-8")
-        for pid, label in children:
-            with contextlib.suppress(ChildProcessError, ValueError):
-                fork_wait(pid, label)
-        temp.cleanup()
-
-
-def acquire_external_target_for_validator(manager: Any, target: Path, *, create: bool = True) -> Any:
-    canonical_target = manager.lock_canonical_target(target)
-    product = manager.acquire_product_lock(create=create, exclusive=True)
-    if product is None:
-        raise ValueError("product lock was not available for validator target acquire")
-    try:
-        external = manager.acquire_external_target_lock(
-            product.root,
-            canonical_target,
-            create=create,
-            exclusive=True,
-        )
-        if external is None:
-            raise ValueError("external target lock was not available for validator target acquire")
-        return external
-    finally:
-        manager.release_product_lock(product)
-
-
-def validate_external_lock_different_target_overlap_regression(manager: Any) -> None:
-    temp, target_a = make_isolated_target("external-different-target-")
-    target_b = target_a.parent / "target-b"
-    child_error = target_a.parent / "different-target-error"
-    child_acquired = target_a.parent / "different-target-acquired"
-    try:
-        target_a.mkdir(mode=0o700)
-        target_a.chmod(0o700)
-        target_b.mkdir(mode=0o700)
-        target_b.chmod(0o700)
-        held = acquire_external_target_for_validator(manager, target_a, create=True)
-        pid = os.fork()
-        if pid == 0:
-            try:
-                child_lock = acquire_external_target_for_validator(manager, target_b, create=True)
-                info = os.fstat(child_lock.fd)
-                child_acquired.write_text(f"{info.st_dev}:{info.st_ino}\n", encoding="utf-8")
-                manager.release_external_target_lock(child_lock)
-                os._exit(0)
-            except BaseException as exc:
-                with contextlib.suppress(BaseException):
-                    child_error.write_text(str(exc), encoding="utf-8")
-                os._exit(1)
-        wait_for_file_or_error(child_acquired, "different-target external lock acquire", child_error)
-        fork_wait(pid, "different-target child")
-        if child_error.exists():
-            raise ValueError(f"different-target child error: {child_error.read_text(encoding='utf-8')}")
-        if not child_acquired.read_text(encoding="utf-8").strip():
-            raise ValueError("different-target child did not record its external lock inode")
-        manager.release_external_target_lock(held)
-        held = None
-    finally:
-        if "held" in locals() and held is not None:
-            manager.release_external_target_lock(held)
-        temp.cleanup()
-
-
-def validate_internal_lock_persistent_inode_handover_regression(manager: Any) -> None:
-    temp, target = make_isolated_target("internal-lock-handover-")
-    children: list[tuple[int, str]] = []
-    parent_fd: int | None = None
-    lock_path: Path | None = None
-    protected_parent: Any | None = None
-    b_release: Path | None = None
-    try:
-        setup = manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP)
-        manager.write_setup(target, setup, manager.load_profile(manager.DEFAULT_PROFILE))
-        canonical_target = manager.lock_canonical_target(target)
-        lock_path = manager.lock_path(target)
-        parent_fd = manager.acquire_lock_file(
-            lock_path,
-            "target lifecycle lock",
-            canonical_target=canonical_target,
-            kind="target-internal",
-            create=True,
-            exclusive=True,
-        )
-        initial_info = os.fstat(parent_fd)
-        protected_parent = manager.protect_internal_lock_parent(lock_path.parent)
-        if (lock_path.parent.stat().st_mode & 0o777) != 0o500:
-            raise ValueError("target lifecycle lock parent was not protected while held")
-        control = target.parent / "internal-handover-control"
-        control.mkdir(mode=0o700)
-        control.chmod(0o700)
-        b_acquired = control / "b-acquired"
-        b_release = control / "b-release"
-        c_acquired = control / "c-acquired"
-        b_error = control / "b-error"
-        c_error = control / "c-error"
-
-        def fork_internal_lock_holder(name: str, acquired: Path, release: Path | None, wait_for: Path | None, error_path: Path) -> None:
-            pid = os.fork()
-            if pid != 0:
-                children.append((pid, name))
-                return
-            try:
-                if parent_fd is not None:
-                    with contextlib.suppress(OSError):
-                        os.close(parent_fd)
-                if protected_parent is not None:
-                    with contextlib.suppress(OSError):
-                        os.close(protected_parent.fd)
-                if wait_for is not None:
-                    wait_for_file(wait_for, f"{name} predecessor")
-                deadline = time.monotonic() + 5.0
-                child_fd: int | None = None
-                while time.monotonic() < deadline:
-                    try:
-                        child_fd = manager.acquire_lock_file(
-                            lock_path,
-                            "target lifecycle lock",
-                            canonical_target=canonical_target,
-                            kind="target-internal",
-                            create=True,
-                            exclusive=True,
-                        )
-                        break
-                    except manager.KimicodeSetupError as exc:
-                        if "target is locked" not in str(exc):
-                            raise
-                        time.sleep(0.05)
-                if child_fd is None:
-                    raise ValueError(f"{name} did not acquire persistent target lock")
-                info = os.fstat(child_fd)
-                acquired.write_text(f"{info.st_dev}:{info.st_ino}\n", encoding="utf-8")
-                if release is not None:
-                    wait_for_file(release, f"{name} release")
-                manager.release_lock_file(child_fd, lock_path, remove_file=False)
-                os._exit(0)
-            except BaseException as exc:
-                with contextlib.suppress(BaseException):
-                    error_path.write_text(str(exc), encoding="utf-8")
-                os._exit(1)
-
-        fork_internal_lock_holder("internal-handover-b", b_acquired, b_release, None, b_error)
-        fork_internal_lock_holder("internal-handover-c", c_acquired, None, b_acquired, c_error)
-        time.sleep(0.2)
-        manager.release_lock_file(parent_fd, lock_path, remove_file=False)
-        parent_fd = None
-        wait_for_file(b_acquired, "internal handover B acquire")
-        if b_acquired.read_text(encoding="utf-8") != f"{initial_info.st_dev}:{initial_info.st_ino}\n":
-            raise ValueError("handover B acquired a different target lifecycle lock inode")
-        b_release.write_text("release\n", encoding="utf-8")
-        wait_for_file(c_acquired, "internal handover C acquire")
-        if c_acquired.read_text(encoding="utf-8") != f"{initial_info.st_dev}:{initial_info.st_ino}\n":
-            raise ValueError("handover C acquired a different target lifecycle lock inode")
-        for pid, label in children:
-            fork_wait(pid, label)
-        children.clear()
-        child_errors = "".join(
-            path.read_text(encoding="utf-8")
-            for path in (b_error, c_error)
-            if path.exists()
-        )
-        if child_errors:
-            raise ValueError(f"target lifecycle lock handover child error: {child_errors}")
-        final_info = lock_path.lstat()
-        if (final_info.st_dev, final_info.st_ino) != (initial_info.st_dev, initial_info.st_ino):
-            raise ValueError("target lifecycle lock inode changed after 3-process handover")
-    finally:
-        if parent_fd is not None and lock_path is not None:
-            manager.release_lock_file(parent_fd, lock_path, remove_file=False)
-        if b_release is not None:
-            with contextlib.suppress(BaseException):
-                b_release.write_text("release\n", encoding="utf-8")
-        for pid, label in children:
-            with contextlib.suppress(ChildProcessError):
-                fork_wait(pid, label)
-        if protected_parent is not None:
-            protected_parent.restore()
-        temp.cleanup()
-
-
-def validate_runtime_regressions() -> None:
+def validate_runtime_contract_sources() -> None:
     manager = load_manager()
     manager_text = (ROOT / "cli-tools" / "nddev_kimicode.py").read_text(encoding="utf-8")
+    if manager.CLEANUP_JOURNAL_MAX_BYTES != manager.METADATA_MAX_BYTES:
+        raise ValueError("cleanup journal byte bound must share the metadata size bound")
     for forbidden in (
         "NDDEV_KIMICODE_TEST",
         "ENABLE_TEST_OVERRIDES",
@@ -2062,610 +1489,328 @@ def validate_runtime_regressions() -> None:
         if forbidden in fixed_source:
             raise ValueError("manager bootstrap root must not derive from ambient runtime state")
     for required in (
+        "lock_mode: int = fcntl.LOCK_EX",
         "fcntl.flock(fd, lock_mode | fcntl.LOCK_NB)",
-        "acquire_product_lock(create=True, exclusive=True)",
-        "acquire_external_target_lock(",
-        "release_product_lock(releasing_product)",
-        "read_lifecycle_payload",
-        "read_lifecycle_coordination",
-        "kind=\"external-bootstrap\"",
-        "kind=\"external-product\"",
-        "kind=\"target-internal\"",
+        'kind="external-bootstrap"',
+        'kind="external-product"',
+        'kind="target-internal"',
         "EXTERNAL_LOCK_NAMESPACE",
+        "EXTERNAL_PRODUCT_ANCHOR_NAME",
+        "RENAME_EXCL_DARWIN",
+        "RENAME_NOREPLACE_LINUX",
         "ensure_external_lock_root()",
+        "external_product_anchor_path(external_lock_root)",
+        "acquire_product_coordination_lock(",
+        "release_product_coordination_lock(releasing_product_fd)",
+        "acquire_existing_lock_file(",
+        "publish_missing_lock_file(",
+        "rename_no_replace(stage, path, label)",
+        "published = True",
+        "if info.st_nlink != 1",
         "protect_internal_lock_parent(lock_parent)",
         "validate_lock_binding",
         "binding is malformed",
         "current.st_dev != info.st_dev or current.st_ino != info.st_ino",
-        "bootstrap_lock_path_for_root(product_root, canonical_target)",
-        "release_external_target_lock(releasing_external)",
+        "external_lock_root=external_lock_root",
+        "canonicalize_target_under_product_lock(target)",
+        "release_lock_file(releasing_bootstrap_fd, bootstrap_path, remove_file=False)",
         "release_lock_file(releasing_internal_fd, internal_path, remove_file=False)",
         "os.fchmod(fd, 0o500)",
         "lock_path(target).parent",
         "with protected_launch_path(invocation.target):",
-        "resolve_launch_workspace",
-        "cwd=str(invocation.workspace)",
-        "launch_parser.add_argument(\"--workspace\")",
         "expected_digest=invocation.expected_entrypoint_digest",
+        "host_platform_key = require_supported_product_host().vendor_platform_key",
+        "launch requires current target-owned Kimi Code binary: host platform",
         "is_current_owner(opened)",
         "opened.st_dev != info.st_dev or opened.st_ino != info.st_ino",
         "target-owned Kimi Code entrypoint digest does not match pinned binary",
     ):
         if required not in manager_text:
             raise ValueError(f"manager is missing launch hardening fragment: {required}")
+    for forbidden in (
+        "os.link(",
+        "publish_lock_payload",
+        "os.ftruncate(fd, 0)",
+    ):
+        if (
+            forbidden
+            in manager_text[
+                manager_text.index("def validate_lock_info") : manager_text.index(
+                    "def protect_internal_lock_parent"
+                )
+            ]
+        ):
+            raise ValueError(
+                f"manager must not use unsafe external anchor publication: {forbidden}"
+            )
+    cleanup_start = manager_text.index("def cleanup_journal_dir")
+    cleanup_end = manager_text.index("def require_tree_entry_identity")
+    cleanup_source = manager_text[cleanup_start:cleanup_end]
+    for required in (
+        "CLEANUP_JOURNAL_MAX_BYTES = METADATA_MAX_BYTES",
+        "CLEANUP_INTENT_MAX_BYTES",
+        "class CleanupSourceAdmission",
+        "def cleanup_operation_kind_for_source",
+        "def cleanup_source_admission",
+        "def validate_cleanup_source_binding",
+        "def cleanup_parent_binding",
+        'validate_cleanup_parent_binding(target, intent.get("cleanup_parent"))',
+        '"operation_kind"',
+        '"parent_st_dev"',
+        '"parent_st_ino"',
+        "cleanup source is not a declared machine-generated object",
+        "def serialized_cleanup_journal_bytes",
+        "def serialized_cleanup_intent_bytes",
+        "def build_cleanup_journal_for_entries",
+        "def build_cleanup_intent",
+        "def recover_cleanup_intent_for_mutation",
+        "len(data) > CLEANUP_JOURNAL_MAX_BYTES",
+        "len(serialized_journal) > CLEANUP_JOURNAL_MAX_BYTES",
+    ):
+        if required not in manager_text:
+            raise ValueError(
+                f"cleanup journal implementation is missing bound fragment: {required}"
+            )
+    for required in (
+        "relative_name",
+        "cleanup_journal_stage_alias_pattern",
+        "read_final_cleanup_journal_json(target)",
+        "stat.S_IMODE(info.st_mode) != OWNER_FILE_MODE",
+        "info.st_nlink != 1",
+        "opened.st_nlink != 1",
+        "recover_cleanup_journal_publication_alias_for_mutation(target)",
+        "read_cleanup_journal_with_publication_alias",
+        "rename_no_replace(stage, journal_path, CLEANUP_JOURNAL_NAME)",
+        "CleanupJournalPublishResult(published=True, cleanup_pending=True)",
+        "unknown_entries = set(entries) - {CLEANUP_JOURNAL_NAME} - seen",
+        "cleanup_pending_metadata",
+        "journal: dict[str, Any]",
+        "serialized_journal: bytes",
+        "intent: dict[str, Any]",
+        "serialized_intent: bytes",
+        "write_cleanup_journal_stage(stage, serialized_journal)",
+        "publish_cleanup_intent(target, intent, serialized_intent)",
+        "remove_cleanup_intent_file(target)",
+    ):
+        if required not in cleanup_source:
+            raise ValueError(f"cleanup journal implementation is missing {required}")
+    for forbidden in (
+        '"path": str(',
+        '"absolute_path"',
+        "os.replace(stage, journal_path)",
+        "atomic_write(journal_path",
+        "fragment in path.name",
+    ):
+        if forbidden in cleanup_source:
+            raise ValueError(f"cleanup journal must not publish unsafe path state: {forbidden}")
+    write_stage_source = manager_text[
+        manager_text.index("def write_cleanup_journal_stage") : manager_text.index(
+            "def publish_cleanup_journal"
+        )
+    ]
+    if "canonical_json(" in write_stage_source:
+        raise ValueError("cleanup journal stage writer must use prebuilt bounded bytes")
+    finish_source = manager_text[
+        manager_text.index("def finish_cleanup_journal") : manager_text.index(
+            "def require_tree_entry_identity"
+        )
+    ]
+    if (
+        "promotion.journal" not in finish_source
+        or "promotion.serialized_journal" not in finish_source
+        or "remove_cleanup_intent_file(target)" not in finish_source
+    ):
+        raise ValueError("cleanup journal publication must use the prebuilt bounded payload")
+    write_setup_source = manager_text[
+        manager_text.index("def write_setup") : manager_text.index("def restore_backup")
+    ]
+    update_setup_source = manager_text[
+        manager_text.index("def update_setup") : manager_text.index("def _plan_payload_locked")
+    ]
+    for label, source in (
+        ("write_setup", write_setup_source),
+        ("update_setup", update_setup_source),
+    ):
+        if "backup_cleanup_sources = backup_result.cleanup_sources" not in source:
+            raise ValueError(f"{label} must defer backup retirement cleanup")
+        if source.index("file_transaction.commit()") > source.index(
+            "finish_cleanup_journal(target, list(backup_cleanup_sources))"
+        ):
+            raise ValueError(f"{label} must commit file transaction before backup cleanup")
+    readonly_status_source = manager_text[
+        manager_text.index("def _status_payload_locked") : manager_text.index("def status_payload")
+    ]
+    if "cleanup_pending_metadata(target)" not in readonly_status_source:
+        raise ValueError("status must report cleanup_pending without draining")
+    if 'software["current"] and not cleanup_metadata' not in readonly_status_source:
+        raise ValueError("status launch_allowed must be false while cleanup is pending")
+    readonly_software_source = manager_text[
+        manager_text.index("def _software_status_payload_locked") : manager_text.index(
+            "def software_status_payload"
+        )
+    ]
+    if "cleanup_pending_metadata(target)" not in readonly_software_source:
+        raise ValueError("software-status must report cleanup_pending without draining")
     protected_start = manager_text.index("def protected_launch_path")
     protected_end = manager_text.index("def revalidate_launch_executable")
     protected_source = manager_text[protected_start:protected_end]
     if "        target,\n" in protected_source:
         raise ValueError("launch protection must not chmod the managed target root")
-    lock_source = manager_text[manager_text.index("def open_lock_file") : manager_text.index("def release_lock_file")]
-    if "os.ftruncate" in lock_source:
-        raise ValueError("lifecycle lock final anchors must not be truncated or rebound")
-    if "O_CREAT | os.O_EXCL" in lock_source:
-        raise ValueError("lifecycle lock final anchors must not be created empty")
-    for required in (
-        "def rename_no_replace",
-        "RENAME_EXCL_DARWIN",
-        "RENAME_NOREPLACE_LINUX",
-        "publish_missing_lock_file",
-        "write_lock_stage_file",
-        "lock_stage_aliases",
-        "promote_lock_stage_alias",
-        "drain_lock_stage_aliases_after_lock",
-        "bounded_directory_entries",
-        "rollback_unpublished_path",
-        "restore_directory_metadata_fd(parent_fd",
-        "fsync_directory(parent)",
-    ):
-        if required not in manager_text:
-            raise ValueError(f"manager is missing atomic lock publication fragment: {required}")
-    atomic_source = manager_text[manager_text.index("def atomic_write") : manager_text.index("def managed_file_state")]
-    for required in (
-        "write_all(fd, data)",
-        "os.fchmod(fd, mode)",
-        "os.fsync(fd)",
-        "os.replace(temporary, path)",
-        "fsync_directory(path.parent)",
-        "atomic write content postcondition failed",
-    ):
-        if required not in atomic_source:
-            raise ValueError(f"manager atomic_write durability is missing {required}")
-
-    def run_isolated_runtime_regressions() -> None:
-        validate_unpublished_lock_creation_rollback_regression(manager)
-        validate_lock_stage_publication_recovery_regression(manager)
-        validate_status_launch_allowed_regression(manager)
-        validate_managed_object_transaction_regression(manager)
-        validate_corrupt_backup_regression(manager)
-        validate_external_lock_binding_regression(manager)
-        validate_external_lock_persistent_inode_handover_regression(manager)
-        validate_external_lock_different_target_overlap_regression(manager)
-        validate_internal_lock_persistent_inode_handover_regression(manager)
-        validate_launch_lock_concurrency_regression(manager)
-        validate_launch_external_lock_survives_internal_parent_rename_regression(manager)
-        validate_launch_pre_handoff_swap_regression(manager)
-        validate_launch_protected_verified_path_regression(manager)
-        validate_launch_executable_error_regression(manager)
-        validate_launch_boundary_regression(manager)
-        validate_launch_workspace_scope_regression(manager)
-        validate_lock_stage_adversarial_regression(manager)
-
-    run_with_injected_bootstrap_root(manager, run_isolated_runtime_regressions)
-
-
-def validate_launch_lock_concurrency_regression(manager: Any) -> None:
-    temp, target = make_isolated_target("launch-lock-")
-    try:
-        manager.write_setup(
-            target,
-            manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP),
-            manager.load_profile(manager.DEFAULT_PROFILE),
-        )
-        original_platforms = manager.KIMI_BINARY_PLATFORMS
-        original_run = manager.subprocess.run
-        try:
-            write_stub_software(manager, target)
-            lock = manager.lock_path(target)
-
-            workspace = target.parent / "workspace"
-            workspace.mkdir(mode=0o700)
-
-            def fake_run(command: list[str], *, env: dict[str, str], cwd: str, check: bool) -> SimpleNamespace:
-                if not lock.is_file():
-                    raise ValueError("launch lifecycle lock was not held during child execution")
-                if command[0] != str(target / "bin" / manager.KIMI_COMMAND):
-                    raise ValueError("launch did not hand off to the target-owned executable")
-                if cwd != str(workspace.resolve()):
-                    raise ValueError("launch did not hand off the explicit workspace as child cwd")
-                if env.get("KIMI_CODE_HOME") != str(target.resolve()):
-                    raise ValueError("launch child environment is not target-scoped")
-                if (target.stat().st_mode & 0o777) != 0o700:
-                    raise ValueError("launch must not protect the managed target root")
-                if (lock.parent.stat().st_mode & 0o777) != 0o500:
-                    raise ValueError("launch did not protect the dedicated lifecycle lock parent")
-                writable_probe = target / "launch-runtime-state"
-                writable_probe.write_text("target-writable\n", encoding="utf-8")
-                Path(env["HOME"], "home-state").write_text("home-writable\n", encoding="utf-8")
-                Path(env["TMPDIR"], "tmp-state").write_text("tmp-writable\n", encoding="utf-8")
-                try:
-                    lock.unlink()
-                except PermissionError:
-                    pass
-                else:
-                    raise ValueError("launch lifecycle lock was removable by the child")
-                replacement = target.parent / "replacement-kimi"
-                replacement.write_bytes(b"#!/bin/sh\nexit 99\n")
-                replacement.chmod(0o700)
-                try:
-                    os.replace(replacement, target / "bin" / manager.KIMI_COMMAND)
-                except PermissionError:
-                    pass
-                else:
-                    raise ValueError("launch protected path allowed ordinary os.replace")
-                finally:
-                    if replacement.exists():
-                        try:
-                            replacement.unlink()
-                        except OSError:
-                            pass
-                probe = original_run(
-                    [
-                        sys.executable,
-                        "-c",
-                        (
-                            "import errno, fcntl, os, sys\n"
-                            "fd = os.open(sys.argv[1], os.O_RDWR | getattr(os, 'O_NOFOLLOW', 0))\n"
-                            "try:\n"
-                            "    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)\n"
-                            "except OSError as exc:\n"
-                            "    if exc.errno in {errno.EACCES, errno.EAGAIN}:\n"
-                            "        print('locked')\n"
-                            "        raise SystemExit(0)\n"
-                            "    raise\n"
-                            "raise SystemExit('flock unexpectedly acquired')\n"
-                        ),
-                        str(lock),
-                    ],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    text=True,
-                    check=False,
-                )
-                if probe.returncode != 0 or probe.stdout.strip() != "locked":
-                    raise ValueError(f"target lifecycle flock was not held by the launcher: {probe.stderr.strip()}")
-                try:
-                    manager.write_setup(
-                        target,
-                        manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP),
-                        manager.load_profile("safe"),
-                        require_existing=True,
-                    )
-                except manager.KimicodeSetupError as exc:
-                    if "target is locked" not in str(exc) and "target must be private" not in str(exc):
-                        raise ValueError(f"concurrent lifecycle mutation returned unstable error: {exc}") from exc
-                else:
-                    raise ValueError("lifecycle mutation succeeded while launch child was running")
-                return SimpleNamespace(returncode=23)
-
-            manager.subprocess.run = fake_run
-            exit_code = manager.launch(target, ["--version"], workspace=str(workspace))
-            if exit_code != 23:
-                raise ValueError("launch did not forward child exit code under lifecycle lock")
-            if not lock.is_file():
-                raise ValueError("launch lifecycle lock was not persistent after child completion")
-            if (lock.stat().st_mode & 0o777) != 0o600:
-                raise ValueError("launch lifecycle lock mode changed after child completion")
-            if (lock.parent.stat().st_mode & 0o777) != 0o700:
-                raise ValueError("launch lifecycle lock parent was not restored after child completion")
-        finally:
-            manager.subprocess.run = original_run
-            manager.KIMI_BINARY_PLATFORMS = original_platforms
-    finally:
-        temp.cleanup()
-
-
-def validate_launch_external_lock_survives_internal_parent_rename_regression(manager: Any) -> None:
-    temp, target = make_isolated_target("launch-external-lock-")
-    result: dict[str, Any] = {}
-    thread: threading.Thread | None = None
-    release: Path | None = None
-    try:
-        manager.write_setup(
-            target,
-            manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP),
-            manager.load_profile(manager.DEFAULT_PROFILE),
-        )
-        original_platforms = manager.KIMI_BINARY_PLATFORMS
-        try:
-            stub = (
-                b"#!/bin/sh\n"
-                b"if mv \"$KIMI_CODE_HOME/.nddev-kimicode-lock\" \"$KIMI_CODE_HOME/.nddev-kimicode-lock.renamed\" 2>/dev/null; then\n"
-                b"  printf 'renamed\\n' > \"$1\"\n"
-                b"else\n"
-                b"  printf 'rename-failed\\n' > \"$1\"\n"
-                b"fi\n"
-                b"while [ ! -f \"$2\" ]; do sleep 0.05; done\n"
-                b"exit 37\n"
-            )
-            write_stub_software(manager, target, stub)
-            runtime_tmp = target / ".nddev-kimicode-runtime" / "tmp"
-            marker = runtime_tmp / "internal-lock-renamed"
-            release = runtime_tmp / "release-child"
-
-            def run_launch() -> None:
-                try:
-                    result["exit_code"] = manager.launch(target, [str(marker), str(release)])
-                except BaseException as exc:
-                    result["error"] = exc
-
-            thread = threading.Thread(target=run_launch)
-            thread.start()
-            wait_for_file(marker, "internal lock parent rename")
-            if marker.read_text(encoding="utf-8") != "renamed\n":
-                raise ValueError("launch child did not rename the internal lock parent")
-            if (target.stat().st_mode & 0o777) != 0o700:
-                raise ValueError("launch must keep managed target root writable during internal lock parent rename")
-
-            mutation_cases = (
-                (
-                    "switch-profile",
-                    lambda: manager.write_setup(
-                        target,
-                        manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP),
-                        manager.load_profile("safe"),
-                        require_existing=True,
-                    ),
-                ),
-                ("remove", lambda: manager.remove_setup(target)),
-                (
-                    "install",
-                    lambda: manager.write_setup(
-                        target,
-                        manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP),
-                        manager.load_profile(manager.DEFAULT_PROFILE),
-                        require_existing=False,
-                    ),
-                ),
-            )
-            for label, operation in mutation_cases:
-                try:
-                    operation()
-                except manager.KimicodeSetupError as exc:
-                    if "target is locked" not in str(exc):
-                        raise ValueError(f"{label} returned unstable error under external lock: {exc}") from exc
-                else:
-                    raise ValueError(f"{label} succeeded after child renamed the internal lock parent")
-            release.write_text("release\n", encoding="utf-8")
-            thread.join(timeout=5)
-            if thread.is_alive():
-                raise ValueError("launch child did not exit after release marker")
-            if "error" in result:
-                raise ValueError(f"launch failed after internal lock parent rename: {result['error']}")
-            if result.get("exit_code") != 37:
-                raise ValueError("launch did not forward child exit code after internal lock parent rename")
-            renamed_lock_parent = target / ".nddev-kimicode-lock.renamed"
-            if not renamed_lock_parent.is_dir() or (renamed_lock_parent.stat().st_mode & 0o777) != 0o700:
-                raise ValueError("renamed internal lock parent was not restored for cleanup")
-        finally:
-            if release is not None:
-                with contextlib.suppress(BaseException):
-                    release.write_text("release\n", encoding="utf-8")
-            if thread is not None and thread.is_alive():
-                thread.join(timeout=5)
-            manager.KIMI_BINARY_PLATFORMS = original_platforms
-    finally:
-        temp.cleanup()
-
-
-def validate_launch_pre_handoff_swap_regression(manager: Any) -> None:
-    temp, target = make_isolated_target("launch-swap-")
-    try:
-        manager.write_setup(
-            target,
-            manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP),
-            manager.load_profile(manager.DEFAULT_PROFILE),
-        )
-        original_platforms = manager.KIMI_BINARY_PLATFORMS
-        original_prepare = manager.prepare_launch_invocation_locked
-        original_run = manager.subprocess.run
-        try:
-            write_stub_software(manager, target)
-            entrypoint = target / "bin" / manager.KIMI_COMMAND
-            swapped = False
-
-            def wrapped_prepare(status_target: Path, child_args: list[str], workspace: Path) -> Any:
-                nonlocal swapped
-                result = original_prepare(status_target, child_args, workspace)
-                entrypoint.write_bytes(b"#!/bin/sh\nprintf 'swapped\\n'\n")
-                entrypoint.chmod(0o700)
-                swapped = True
-                return result
-
-            def fake_run(*_args: Any, **_kwargs: Any) -> SimpleNamespace:
-                raise ValueError("launch spawned a swapped target-owned executable")
-
-            manager.prepare_launch_invocation_locked = wrapped_prepare
-            manager.subprocess.run = fake_run
-            try:
-                manager.launch(target, ["--version"])
-            except manager.KimicodeSetupError as exc:
-                if "pinned binary" not in str(exc):
-                    raise ValueError(f"swapped executable returned unstable error: {exc}") from exc
-            else:
-                raise ValueError("swapped executable launch unexpectedly succeeded")
-            if not swapped:
-                raise ValueError("pre-handoff executable swap regression was not exercised")
-        finally:
-            manager.subprocess.run = original_run
-            manager.prepare_launch_invocation_locked = original_prepare
-            manager.KIMI_BINARY_PLATFORMS = original_platforms
-    finally:
-        temp.cleanup()
-
-
-def validate_launch_protected_verified_path_regression(manager: Any) -> None:
-    temp, target = make_isolated_target("launch-protected-")
-    try:
-        manager.write_setup(
-            target,
-            manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP),
-            manager.load_profile(manager.DEFAULT_PROFILE),
-        )
-        original_platforms = manager.KIMI_BINARY_PLATFORMS
-        try:
-            stub = (
-                b"#!/bin/sh\n"
-                b"if printf 'target-state\\n' > \"$KIMI_CODE_HOME/session-state\"; then\n"
-                b"  printf 'target-write-ok\\n' >> \"$2\"\n"
-                b"else\n"
-                b"  printf 'target-write-failed\\n' >> \"$2\"\n"
-                b"fi\n"
-                b"if printf 'home-state\\n' > \"$HOME/home-state\"; then\n"
-                b"  printf 'home-write-ok\\n' >> \"$2\"\n"
-                b"else\n"
-                b"  printf 'home-write-failed\\n' >> \"$2\"\n"
-                b"fi\n"
-                b"if printf 'tmp-state\\n' > \"$TMPDIR/tmp-state\"; then\n"
-                b"  printf 'tmp-write-ok\\n' >> \"$2\"\n"
-                b"else\n"
-                b"  printf 'tmp-write-failed\\n' >> \"$2\"\n"
-                b"fi\n"
-                b"if rm -f \"$KIMI_CODE_HOME/bin/kimi\" 2>/dev/null; then\n"
-                b"  printf 'executable-unlink-allowed\\n' >> \"$2\"\n"
-                b"else\n"
-                b"  printf 'executable-unlink-denied\\n' >> \"$2\"\n"
-                b"fi\n"
-                b"if mv \"$KIMI_CODE_HOME/bin/kimi\" \"$KIMI_CODE_HOME/bin/kimi.swapped\" 2>/dev/null; then\n"
-                b"  printf 'executable-rename-allowed\\n' >> \"$2\"\n"
-                b"else\n"
-                b"  printf 'executable-rename-denied\\n' >> \"$2\"\n"
-                b"fi\n"
-                b"if rm -f \"$KIMI_CODE_HOME/.nddev-kimicode-lock/lifecycle.lock\" 2>/dev/null; then\n"
-                b"  printf 'lock-unlink-allowed\\n' >> \"$2\"\n"
-                b"else\n"
-                b"  printf 'lock-unlink-denied\\n' >> \"$2\"\n"
-                b"fi\n"
-                b"printf 'replacement-lock\\n' > \"$KIMI_CODE_HOME/replacement-lock\"\n"
-                b"if mv \"$KIMI_CODE_HOME/replacement-lock\" \"$KIMI_CODE_HOME/.nddev-kimicode-lock/lifecycle.lock\" 2>/dev/null; then\n"
-                b"  printf 'lock-replace-allowed\\n' >> \"$2\"\n"
-                b"else\n"
-                b"  printf 'lock-replace-denied\\n' >> \"$2\"\n"
-                b"  rm -f \"$KIMI_CODE_HOME/replacement-lock\"\n"
-                b"fi\n"
-                b"printf 'verified-bytes\\n' > \"$1\"\n"
-                b"exit 31\n"
-            )
-            write_stub_software(manager, target, stub)
-            marker = target / ".nddev-kimicode-runtime" / "tmp" / "verified-marker"
-            report = target / ".nddev-kimicode-runtime" / "tmp" / "swap-report"
-            exit_code = manager.launch(target, [str(marker), str(report)])
-            if exit_code != 31:
-                raise ValueError("protected launch did not forward real child exit code")
-            if marker.read_text(encoding="utf-8") != "verified-bytes\n":
-                raise ValueError("protected launch did not execute the verified stub bytes")
-            report_lines = set(report.read_text(encoding="utf-8").splitlines())
-            expected_denials = {
-                "executable-unlink-denied",
-                "executable-rename-denied",
-                "lock-unlink-denied",
-                "lock-replace-denied",
-            }
-            expected_writes = {
-                "target-write-ok",
-                "home-write-ok",
-                "tmp-write-ok",
-            }
-            if not expected_denials <= report_lines:
-                raise ValueError(f"protected launch did not deny ordinary swaps: {sorted(report_lines)}")
-            if not expected_writes <= report_lines:
-                raise ValueError(f"protected launch blocked expected runtime writes: {sorted(report_lines)}")
-            if (target / "session-state").read_text(encoding="utf-8") != "target-state\n":
-                raise ValueError("protected launch did not preserve KIMI_CODE_HOME write access")
-            if (target / ".nddev-kimicode-runtime" / "home" / "home-state").read_text(encoding="utf-8") != "home-state\n":
-                raise ValueError("protected launch did not preserve HOME write access")
-            if (target / ".nddev-kimicode-runtime" / "tmp" / "tmp-state").read_text(encoding="utf-8") != "tmp-state\n":
-                raise ValueError("protected launch did not preserve TMPDIR write access")
-            entrypoint = target / "bin" / manager.KIMI_COMMAND
-            if not entrypoint.is_file() or manager.file_sha256(entrypoint, label="post-launch stub") != manager.sha256_bytes(stub):
-                raise ValueError("protected launch did not preserve the verified executable path")
-            if (target.stat().st_mode & 0o777) != 0o700:
-                raise ValueError("protected launch did not restore target mode")
-            if not manager.lock_path(target).is_file():
-                raise ValueError("protected launch did not preserve target lifecycle lock")
-            if (manager.lock_path(target).parent.stat().st_mode & 0o777) != 0o700:
-                raise ValueError("protected launch did not restore target lifecycle lock parent")
-        finally:
-            manager.KIMI_BINARY_PLATFORMS = original_platforms
-    finally:
-        temp.cleanup()
-
-
-def expect_revalidation_rejected(manager: Any, target: Path, expected: str) -> None:
-    try:
-        executable = manager.revalidate_launch_executable(target)
-    except manager.KimicodeSetupError as exc:
-        if expected not in str(exc):
-            raise ValueError(f"launch executable revalidation returned unstable error: {exc}") from exc
-        return
-    else:
-        executable.close()
-    raise ValueError(f"launch executable revalidation unexpectedly allowed {expected}")
-
-
-def validate_launch_executable_error_regression(manager: Any) -> None:
-    cases = (
-        ("mode", lambda path: path.chmod(0o600), "mode must be 0700"),
-        (
-            "digest",
-            lambda path: (path.write_bytes(b"#!/bin/sh\nprintf 'wrong\\n'\n"), path.chmod(0o700)),
-            "digest does not match pinned binary",
-        ),
-        ("symlink", None, "must not be a symlink"),
+    canonical_start = manager_text.index("def lock_canonical_target")
+    canonical_end = manager_text.index("def canonicalize_target_under_product_lock")
+    canonical_source = manager_text[canonical_start:canonical_end]
+    for forbidden in ("resolve(", "stat_existing(", "reject_symlink_ancestors("):
+        if forbidden in canonical_source:
+            raise ValueError("lock canonical target must remain lexical before external locking")
+    external_start = manager_text.index("def external_lifecycle_lock")
+    external_end = manager_text.index("def target_lock")
+    external_source = manager_text[external_start:external_end]
+    product_index = external_source.index("product_fd = acquire_product_coordination_lock(")
+    canonicalize_index = external_source.index(
+        "canonical_target_path = canonicalize_target_under_product_lock(target)"
     )
-    for label, mutation, expected in cases:
-        temp, target = make_isolated_target(f"launch-{label}-")
-        try:
-            manager.write_setup(
-                target,
-                manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP),
-                manager.load_profile(manager.DEFAULT_PROFILE),
-            )
-            original_platforms = manager.KIMI_BINARY_PLATFORMS
-            try:
-                write_stub_software(manager, target)
-                entrypoint = target / "bin" / manager.KIMI_COMMAND
-                if label == "symlink":
-                    replacement = target.parent / f"{target.name}-outside-kimi"
-                    replacement.write_bytes(b"#!/bin/sh\nprintf 'outside\\n'\n")
-                    replacement.chmod(0o700)
-                    entrypoint.unlink()
-                    entrypoint.symlink_to(replacement)
-                elif mutation is not None:
-                    mutation(entrypoint)
-                expect_revalidation_rejected(manager, target, expected)
-            finally:
-                manager.KIMI_BINARY_PLATFORMS = original_platforms
-        finally:
-            temp.cleanup()
-
-
-def expect_launch_rejected(manager: Any, argv: list[str], expected: str) -> None:
-    try:
-        manager.reject_managed_launch_overrides(argv)
-    except manager.KimicodeSetupError as exc:
-        if str(exc) != expected:
-            raise ValueError(f"launch boundary error changed for {argv}: {exc}") from exc
-        return
-    raise ValueError(f"launch boundary allowed managed parser case: {argv}")
-
-
-def validate_launch_boundary_regression(manager: Any) -> None:
-    for flag in ("--config", "--profile", "--settings", "-C"):
-        if flag in manager.FORBIDDEN_LAUNCH_FLAGS or flag in manager.FORBIDDEN_LAUNCH_VALUE_FLAGS:
-            raise ValueError(f"launch boundary must not invent unsupported upstream flag: {flag}")
-        manager.reject_managed_launch_overrides([flag])
-    manager.reject_managed_launch_overrides(["-Cexample"])
-    if manager.FORBIDDEN_LAUNCH_SHORT_VALUE_FLAGS != {"-S", "-m", "-p", "-r"}:
-        raise ValueError("launch boundary native short value flags are out of sync")
-    for command in (
-        "__plugin_run_node",
-        "acp",
-        "doctor",
-        "export",
-        "login",
-        "migrate",
-        "provider",
-        "update",
-        "upgrade",
-        "vis",
-        "web",
-    ):
-        expect_launch_rejected(manager, [command], f"launch argument is managed by nddev-kimicode-app: {command}")
-    expect_launch_rejected(manager, ["--add-dir", "/tmp/project"], "launch flag is managed by nddev-kimicode-app: --add-dir")
-    expect_launch_rejected(manager, ["--add-dir=/tmp/project"], "launch flag is managed by nddev-kimicode-app: --add-dir")
-    expect_launch_rejected(manager, ["--session=01HZ"], "launch flag is managed by nddev-kimicode-app: --session")
-    expect_launch_rejected(manager, ["--resume=01HZ"], "launch flag is managed by nddev-kimicode-app: --resume")
-    expect_launch_rejected(manager, ["-S01HZ"], "launch flag is managed by nddev-kimicode-app: -S")
-    expect_launch_rejected(manager, ["-mmoonshot"], "launch flag is managed by nddev-kimicode-app: -m")
-    expect_launch_rejected(manager, ["-phello"], "launch flag is managed by nddev-kimicode-app: -p")
-    expect_launch_rejected(manager, ["-r01HZ"], "launch flag is managed by nddev-kimicode-app: -r")
-    expect_launch_rejected(manager, ["-c"], "launch flag is managed by nddev-kimicode-app: -c")
-    expect_launch_rejected(manager, ["-y"], "launch flag is managed by nddev-kimicode-app: -y")
-    manager.reject_managed_launch_overrides(["-cnot-an-upstream-attached-value"])
-    manager.reject_managed_launch_overrides(["-ynot-an-upstream-attached-value"])
-    expect_launch_rejected(
-        manager,
-        ["--version", "--add-dir", "/tmp/project"],
-        "launch flag is managed by nddev-kimicode-app: --add-dir",
-    )
-
-
-def validate_launch_workspace_scope_regression(manager: Any) -> None:
-    temp, target = make_isolated_target("launch-workspace-")
-    original_cwd = Path.cwd()
-    try:
-        manager.write_setup(
-            target,
-            manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP),
-            manager.load_profile(manager.DEFAULT_PROFILE),
+    bootstrap_index = external_source.index("bootstrap_fd = acquire_lock_file(")
+    if not product_index < canonicalize_index < bootstrap_index:
+        raise ValueError(
+            "external lifecycle lock must product-coordinate before canonical target locking"
         )
-        original_platforms = manager.KIMI_BINARY_PLATFORMS
-        original_run = manager.subprocess.run
-        try:
-            write_stub_software(manager, target)
-            explicit_workspace = Path(temp.name) / "explicit-workspace"
-            default_workspace = Path(temp.name) / "default-workspace"
-            explicit_workspace.mkdir(mode=0o700)
-            default_workspace.mkdir(mode=0o700)
-            seen_cwds: list[str] = []
+    readonly_source = manager_text[
+        manager_text.index("def readonly_external_lifecycle_lock") : manager_text.index(
+            "def target_lock"
+        )
+    ]
+    for required in (
+        "publish_missing=False",
+        "lock_mode=fcntl.LOCK_SH",
+        "RetryReadOnlyLifecycle",
+        "cold_empty_external_namespace_signature(external_lock_root)",
+        "external lifecycle namespace changed during read",
+        "stat_existing(\n                external_product_anchor_path(external_lock_root)",
+    ):
+        if required not in readonly_source:
+            raise ValueError(f"read-only lifecycle path is missing {required}")
+    cold_namespace_source = manager_text[
+        manager_text.index("def cold_external_namespace_entry_error") : manager_text.index(
+            "def write_lock_stage_file"
+        )
+    ]
+    for required in (
+        "EXTERNAL_LOCK_NAMESPACE_MAX_ENTRIES",
+        "external lifecycle lock root contains too many entries",
+        "external product lifecycle anchor appeared during read",
+        "external target lifecycle anchor is orphaned",
+        "external lifecycle namespace contains unknown entry",
+    ):
+        if required not in cold_namespace_source:
+            raise ValueError(f"cold read-only namespace validation is missing {required}")
+    target_lock_start = manager_text.index("def target_lock")
+    target_lock_end = manager_text.index("def safe_target_path")
+    target_lock_source = manager_text[target_lock_start:target_lock_end]
+    if "with external_lifecycle_lock(target)" not in target_lock_source:
+        raise ValueError("target lock must acquire external lifecycle coordination first")
+    external_index = target_lock_source.index("with external_lifecycle_lock(target)")
+    for fragment in (
+        "target = Path(canonical_target)",
+        'stat_existing(target.parent, "target parent")',
+        'stat_existing(target, "target")',
+        "snapshot_tree(\n                    lock_parent_path(target)",
+    ):
+        if fragment not in target_lock_source:
+            raise ValueError(f"target lock is missing ordered fragment: {fragment}")
+        if target_lock_source.index(fragment) < external_index:
+            raise ValueError("target filesystem inspection precedes external lifecycle lock")
+    status_start = manager_text.index("def status_payload")
+    status_end = manager_text.index("def stamp_managed_paths")
+    status_source = manager_text[status_start:status_end]
+    if "run_under_readonly_external_lifecycle(target, _status_payload_locked)" not in status_source:
+        raise ValueError("status must read target state under external lifecycle coordination")
+    software_start = manager_text.index("def software_status_payload")
+    software_end = manager_text.index("def parse_os_release")
+    software_source = manager_text[software_start:software_end]
+    if (
+        "run_under_readonly_external_lifecycle(target, _software_status_payload_locked)"
+        not in software_source
+    ):
+        raise ValueError(
+            "software-status must read target state under external lifecycle coordination"
+        )
+    plan_start = manager_text.index("def plan_payload")
+    plan_end = manager_text.index("def software_root")
+    plan_source = manager_text[plan_start:plan_end]
+    if "run_under_readonly_external_lifecycle(" not in plan_source:
+        raise ValueError("plan must read target state under external lifecycle coordination")
+    install_start = manager_text.index("def install_or_update_software")
+    install_end = manager_text.index("def verify_removed_software_postcondition")
+    install_source = manager_text[install_start:install_end]
+    if "path_exists_no_follow(target)" in install_source:
+        raise ValueError("software install/update must not inspect target before target_lock")
+    if install_source.index("with target_lock(target") > install_source.index(
+        "_software_status_payload_locked(target)"
+    ):
+        raise ValueError("software install/update status must run after target_lock acquisition")
+    software_commit_start = manager_text.index("def commit_software_transactions")
+    software_commit_end = manager_text.index("def rollback_software_transactions")
+    software_commit_source = manager_text[software_commit_start:software_commit_end]
+    for required in (
+        "software_cleanup_tombstones(",
+        "stage_root=stage_root",
+        "return finish_cleanup_journal(",
+    ):
+        if required not in software_commit_source:
+            raise ValueError(f"software cleanup commit is missing {required}")
+    if "commit_software_transactions(" not in install_source:
+        raise ValueError("software install/update must use coordinated cleanup commit")
+    if install_source.index("verify_installed_software_postcondition(") > install_source.index(
+        "commit_software_transactions("
+    ):
+        raise ValueError("software cleanup commit must follow installed-state postcondition")
+    remove_start = manager_text.index("def remove_software")
+    remove_end = manager_text.index("def reject_managed_launch_overrides")
+    remove_source = manager_text[remove_start:remove_end]
+    if remove_source.index("with target_lock(target") > remove_source.index(
+        "_software_status_payload_locked(target)"
+    ):
+        raise ValueError("remove-cli status must run after target_lock acquisition")
+    if "commit_software_transactions(" not in remove_source:
+        raise ValueError("remove-cli must use coordinated cleanup commit")
+    if remove_source.index("verify_removed_software_postcondition(target)") > remove_source.index(
+        "commit_software_transactions("
+    ):
+        raise ValueError("remove-cli cleanup commit must follow removed-state postcondition")
+    dispatch_start = manager_text.index("def dispatch")
+    dispatch_end = manager_text.index("def main")
+    dispatch_source = manager_text[dispatch_start:dispatch_end]
+    switch_source = dispatch_source[
+        dispatch_source.index('if args.command == "switch-profile"') : dispatch_source.index(
+            'if args.command == "migrate"'
+        )
+    ]
+    if "read_stamp(target)" in switch_source:
+        raise ValueError("switch-profile dispatch must not read target state before lifecycle lock")
+    prepare_start = manager_text.index("def prepare_launch_invocation(")
+    prepare_end = manager_text.index("def launch(")
+    prepare_source = manager_text[prepare_start:prepare_end]
+    if prepare_source.index(
+        "host_platform_key = require_supported_product_host().vendor_platform_key"
+    ) > prepare_source.index("with target_lock(target):"):
+        raise ValueError(
+            "prepare launch must reject unsupported hosts before acquiring lifecycle locks"
+        )
+    launch_start = manager_text.index("def launch(")
+    launch_end = manager_text.index("def parse_args")
+    launch_source = manager_text[launch_start:launch_end]
+    if launch_source.index(
+        "host_platform_key = require_supported_product_host().vendor_platform_key"
+    ) > launch_source.index("with target_lock(target):"):
+        raise ValueError("launch must reject unsupported hosts before acquiring lifecycle locks")
+    for label, source in (("prepare launch", prepare_source), ("launch", launch_source)):
+        if "drain_cleanup_journal(target)" not in source:
+            raise ValueError(f"{label} must drain cleanup before persistent launch state")
+        if source.index("drain_cleanup_journal(target)") > source.index(
+            "prepare_launch_invocation_locked("
+        ):
+            raise ValueError(f"{label} must drain cleanup before launch preparation")
 
-            def fake_run(command: list[str], *, env: dict[str, str], cwd: str, check: bool) -> SimpleNamespace:
-                if command[0] != str(target / "bin" / manager.KIMI_COMMAND):
-                    raise ValueError("launch workspace regression did not hand off to target-owned executable")
-                if env.get("KIMI_CODE_HOME") != str(target.resolve()):
-                    raise ValueError("launch workspace regression lost target-scoped environment")
-                seen_cwds.append(cwd)
-                return SimpleNamespace(returncode=19)
-
-            manager.subprocess.run = fake_run
-            if manager.launch(target, ["--version"], workspace=str(explicit_workspace)) != 19:
-                raise ValueError("explicit workspace launch did not forward child exit code")
-            os.chdir(default_workspace)
-            try:
-                if manager.launch(target, ["--version"]) != 19:
-                    raise ValueError("default workspace launch did not forward child exit code")
-            finally:
-                os.chdir(original_cwd)
-            expected_cwds = [str(explicit_workspace.resolve()), str(default_workspace.resolve())]
-            if seen_cwds != expected_cwds:
-                raise ValueError(f"launch workspace cwd handoff changed: {seen_cwds}")
-
-            relative = "relative-workspace"
-            missing = Path(temp.name) / "missing-workspace"
-            file_workspace = Path(temp.name) / "not-a-directory"
-            file_workspace.write_text("not a directory\n", encoding="utf-8")
-            symlink_workspace = Path(temp.name) / "workspace-link"
-            symlink_workspace.symlink_to(explicit_workspace)
-            invalid_cases = (
-                (relative, "must be an absolute path"),
-                (str(missing), "is missing"),
-                (str(file_workspace), "must be a directory"),
-                (str(symlink_workspace), "must not be a symlink"),
-            )
-            for raw_workspace, expected in invalid_cases:
-                try:
-                    manager.resolve_launch_workspace(raw_workspace)
-                except manager.KimicodeSetupError as exc:
-                    if expected not in str(exc):
-                        raise ValueError(f"launch workspace error changed for {raw_workspace}: {exc}") from exc
-                else:
-                    raise ValueError(f"launch workspace unexpectedly accepted {raw_workspace}")
-        finally:
-            manager.subprocess.run = original_run
-            manager.KIMI_BINARY_PLATFORMS = original_platforms
-            os.chdir(original_cwd)
-    finally:
-        temp.cleanup()
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2673,7 +1818,10 @@ def main(argv: list[str] | None = None) -> int:
     validate_catalog()
     validate_metadata()
     validate_builder_toolkit()
-    validate_runtime_regressions()
+    validate_public_validation_docs()
+    validate_system_python_compatibility()
+    validate_archive_public_commands_cache_free()
+    validate_runtime_contract_sources()
     validate_workflows()
     validate_claude_bridge_structural_regression()
     print("validate_public_contracts.py: PASS")
