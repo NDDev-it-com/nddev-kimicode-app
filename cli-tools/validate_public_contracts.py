@@ -818,6 +818,7 @@ def directory_metadata_snapshot(path: Path) -> tuple[Any, ...]:
         info.st_ino,
         stat.S_IMODE(info.st_mode),
         info.st_uid,
+        info.st_gid,
         info.st_nlink,
         info.st_size,
         info.st_atime_ns,
@@ -834,6 +835,7 @@ def directory_restorable_metadata_snapshot(path: Path) -> tuple[Any, ...]:
         info.st_ino,
         stat.S_IMODE(info.st_mode),
         info.st_uid,
+        info.st_gid,
         info.st_atime_ns,
         info.st_mtime_ns,
     )
@@ -843,6 +845,32 @@ def pin_directory_metadata(path: Path, offset: int) -> tuple[Any, ...]:
     base = 1_700_000_000_000_000_000 + offset
     os.utime(path, ns=(base, base + 123_456_789))
     return directory_metadata_snapshot(path)
+
+
+def managed_file_identity_snapshot(manager: Any, path: Path) -> tuple[Any, ...]:
+    info = path.lstat()
+    if not stat.S_ISREG(info.st_mode):
+        raise ValueError(f"managed snapshot path is not a regular file: {path}")
+    return (
+        info.st_dev,
+        info.st_ino,
+        stat.S_IMODE(info.st_mode),
+        info.st_uid,
+        info.st_gid,
+        info.st_nlink,
+        info.st_size,
+        info.st_mtime_ns,
+        file_sha256_no_follow(path, max_bytes=manager.MANAGED_MAX_BYTES),
+    )
+
+
+def bounded_tree_names(root: Path) -> tuple[str, ...]:
+    names: list[str] = []
+    for path in root.rglob("*"):
+        names.append(path.relative_to(root).as_posix())
+        if len(names) > 512:
+            raise ValueError(f"tree snapshot is unexpectedly large: {root}")
+    return tuple(sorted(names))
 
 
 def write_stub_software(manager: Any, target: Path, binary_bytes: bytes | None = None) -> None:
@@ -1054,6 +1082,130 @@ def validate_corrupt_backup_regression(manager: Any) -> None:
             raise ValueError("corrupt backup restore did not roll back cleanly")
     finally:
         temp.cleanup()
+
+
+def validate_managed_object_transaction_regression(manager: Any) -> None:
+    def expect_rollback_replacement_rejected(transaction: Any, replacement_path: Path, replacement: bytes, label: str) -> None:
+        with contextlib.suppress(FileNotFoundError):
+            replacement_path.unlink()
+        replacement_path.write_bytes(replacement)
+        replacement_path.chmod(0o600)
+        try:
+            transaction.rollback()
+        except manager.KimicodeSetupError as exc:
+            if "concurrent replacement at active path" not in str(exc):
+                raise ValueError(f"{label} rollback returned unstable error: {exc}") from exc
+        else:
+            raise ValueError(f"{label} rollback unexpectedly overwrote a concurrent replacement")
+        if replacement_path.read_bytes() != replacement:
+            raise ValueError(f"{label} rollback deleted or changed the concurrent replacement")
+
+    temp, target = make_isolated_target("managed-object-")
+    try:
+        setup = manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP)
+        profile = manager.load_profile(manager.DEFAULT_PROFILE)
+        manager.write_setup(target, setup, profile)
+
+        config_path = target / "config.toml"
+        stale_transaction = manager.ManagedObjectTransaction(target, ("config.toml",))
+        concurrent_bytes = config_path.read_bytes() + b"\n# concurrent owner edit\n"
+        config_path.write_bytes(concurrent_bytes)
+        config_path.chmod(0o600)
+        try:
+            stale_transaction.write_file("config.toml", b"managed replacement\n")
+        except manager.KimicodeSetupError as exc:
+            if "changed before transition" not in str(exc):
+                raise ValueError(f"stale managed transaction returned unstable error: {exc}") from exc
+        else:
+            raise ValueError("stale managed transaction unexpectedly wrote over changed state")
+        finally:
+            stale_transaction.rollback()
+        if config_path.read_bytes() != concurrent_bytes:
+            raise ValueError("stale managed transaction mutated the concurrently changed file")
+
+        manager.write_setup(target, setup, profile, require_existing=True)
+        stable_mtime = 1_700_000_001_000_000_000
+        os.utime(config_path, ns=(stable_mtime, stable_mtime + 222_222_222))
+        before_file = managed_file_identity_snapshot(manager, config_path)
+        before_tree = bounded_tree_names(target)
+        before_parent_names = tuple(sorted(path.name for path in target.parent.iterdir()))
+        before_target = directory_metadata_snapshot(target)
+        before_parent = directory_metadata_snapshot(target.parent)
+
+        original_atomic_write = manager.atomic_write
+
+        def failing_stamp_atomic_write(path: Path, data: bytes, target_arg: Path, *, mode: int = manager.OWNER_FILE_MODE) -> None:
+            if path.name == manager.STAMP_NAME:
+                raise OSError("injected managed stamp publication failure")
+            original_atomic_write(path, data, target_arg, mode=mode)
+
+        manager.atomic_write = failing_stamp_atomic_write
+        try:
+            try:
+                manager.write_setup(target, setup, profile, require_existing=True)
+            except OSError as exc:
+                if "injected managed stamp publication failure" not in str(exc):
+                    raise ValueError(f"managed rollback smoke returned unstable error: {exc}") from exc
+            else:
+                raise ValueError("managed rollback smoke unexpectedly succeeded")
+        finally:
+            manager.atomic_write = original_atomic_write
+
+        if managed_file_identity_snapshot(manager, config_path) != before_file:
+            raise ValueError("managed rollback did not restore original file identity and metadata")
+        if directory_metadata_snapshot(target) != before_target:
+            raise ValueError("managed rollback did not restore target directory metadata")
+        if directory_metadata_snapshot(target.parent) != before_parent:
+            raise ValueError("managed rollback did not restore target parent metadata")
+        if bounded_tree_names(target) != before_tree:
+            raise ValueError("managed rollback changed target topology")
+        if tuple(sorted(path.name for path in target.parent.iterdir())) != before_parent_names:
+            raise ValueError("managed rollback left parent topology residue")
+        clean = manager.status_payload(target)
+        if clean.get("drift"):
+            raise ValueError(f"managed rollback left drift: {clean['drift']}")
+    finally:
+        temp.cleanup()
+
+    delete_temp, delete_target = make_isolated_target("managed-replacement-delete-")
+    try:
+        setup = manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP)
+        profile = manager.load_profile(manager.DEFAULT_PROFILE)
+        manager.write_setup(delete_target, setup, profile)
+        delete_path = delete_target / "mcp.json"
+        delete_transaction = manager.ManagedObjectTransaction(delete_target, ("mcp.json",))
+        delete_transaction.delete_file("mcp.json")
+        expect_rollback_replacement_rejected(
+            delete_transaction,
+            delete_path,
+            b'{"owner":"replacement-after-delete"}\n',
+            "delete-path concurrent replacement",
+        )
+        status = manager.status_payload(delete_target)
+        if "mcp.json" not in status.get("drift", []):
+            raise ValueError("delete-path concurrent replacement was reported as restored current state")
+    finally:
+        delete_temp.cleanup()
+
+    write_temp, write_target = make_isolated_target("managed-replacement-write-")
+    try:
+        setup = manager.load_content_setup(manager.DEFAULT_CONTENT_SETUP)
+        profile = manager.load_profile(manager.DEFAULT_PROFILE)
+        manager.write_setup(write_target, setup, profile)
+        write_path = write_target / "config.toml"
+        write_transaction = manager.ManagedObjectTransaction(write_target, ("config.toml",))
+        write_transaction.write_file("config.toml", b"# transaction-created config\n")
+        expect_rollback_replacement_rejected(
+            write_transaction,
+            write_path,
+            b"# replacement-after-write\n",
+            "write-path concurrent replacement",
+        )
+        status = manager.status_payload(write_target)
+        if "config.toml" not in status.get("drift", []):
+            raise ValueError("write-path concurrent replacement was reported as restored current state")
+    finally:
+        write_temp.cleanup()
 
 
 def validate_external_lock_binding_regression(manager: Any) -> None:
@@ -1967,11 +2119,23 @@ def validate_runtime_regressions() -> None:
     ):
         if required not in manager_text:
             raise ValueError(f"manager is missing atomic lock publication fragment: {required}")
+    atomic_source = manager_text[manager_text.index("def atomic_write") : manager_text.index("def managed_file_state")]
+    for required in (
+        "write_all(fd, data)",
+        "os.fchmod(fd, mode)",
+        "os.fsync(fd)",
+        "os.replace(temporary, path)",
+        "fsync_directory(path.parent)",
+        "atomic write content postcondition failed",
+    ):
+        if required not in atomic_source:
+            raise ValueError(f"manager atomic_write durability is missing {required}")
 
     def run_isolated_runtime_regressions() -> None:
         validate_unpublished_lock_creation_rollback_regression(manager)
         validate_lock_stage_publication_recovery_regression(manager)
         validate_status_launch_allowed_regression(manager)
+        validate_managed_object_transaction_regression(manager)
         validate_corrupt_backup_regression(manager)
         validate_external_lock_binding_regression(manager)
         validate_external_lock_persistent_inode_handover_regression(manager)

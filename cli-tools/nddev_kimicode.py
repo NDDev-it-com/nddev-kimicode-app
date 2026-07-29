@@ -263,6 +263,35 @@ class ProtectedDirectory:
             os.close(self.fd)
 
 
+@dataclass(frozen=True)
+class ManagedFileState:
+    relative: str
+    exists: bool
+    st_dev: int | None = None
+    st_ino: int | None = None
+    st_mode: int | None = None
+    st_uid: int | None = None
+    st_gid: int | None = None
+    st_nlink: int | None = None
+    st_size: int | None = None
+    st_mtime_ns: int | None = None
+    digest: str | None = None
+
+
+@dataclass(frozen=True)
+class ManagedDirectoryState:
+    path: Path
+    st_dev: int
+    st_ino: int
+    st_uid: int
+    st_gid: int
+    mode: int
+    st_nlink: int
+    st_size: int
+    atime_ns: int
+    mtime_ns: int
+
+
 def fail(message: str) -> NoReturn:
     raise KimicodeSetupError(message)
 
@@ -1726,16 +1755,329 @@ def atomic_write(path: Path, data: bytes, target: Path, *, mode: int = OWNER_FIL
     ensure_real_parent(path, target)
     require_existing_managed_file(path, str(path), max_bytes=max(MANAGED_MAX_BYTES, SOFTWARE_MAX_BYTES))
     temporary = path.with_name(f".{path.name}.nddev.tmp.{os.getpid()}.{time.time_ns()}")
-    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(temporary, flags, mode)
     try:
-        with os.fdopen(fd, "wb") as handle:
-            handle.write(data)
+        try:
+            write_all(fd, data)
+            os.fchmod(fd, mode)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
         os.replace(temporary, path)
-        path.chmod(mode)
+        fsync_directory(path.parent)
+        info = require_existing_managed_file(path, str(path), max_bytes=max(MANAGED_MAX_BYTES, SOFTWARE_MAX_BYTES))
+        if info is None:
+            fail(f"{path} atomic write postcondition is missing")
+        if stat.S_IMODE(info.st_mode) != mode:
+            fail(f"{path} atomic write mode postcondition failed")
+        written = read_existing_file(path, max_bytes=max(MANAGED_MAX_BYTES, SOFTWARE_MAX_BYTES), label=str(path))
+        if written != data:
+            fail(f"{path} atomic write content postcondition failed")
     except BaseException:
         with contextlib.suppress(FileNotFoundError):
             temporary.unlink()
+        with contextlib.suppress(OSError):
+            fsync_directory(path.parent)
         raise
+
+
+def managed_file_state(target: Path, relative: str) -> ManagedFileState:
+    path = safe_target_path(target, relative)
+    info = stat_existing(path, relative)
+    if info is None:
+        return ManagedFileState(relative=relative, exists=False)
+    if not stat.S_ISREG(info.st_mode):
+        fail(f"{relative} must be a regular file")
+    if not is_current_owner(info):
+        fail(f"{relative} must be owned by the current user")
+    if info.st_nlink != 1:
+        fail(f"{relative} must not be a hardlink")
+    if info.st_size > MANAGED_MAX_BYTES:
+        fail(f"{relative} is too large")
+    data = read_existing_file(path, max_bytes=MANAGED_MAX_BYTES, label=relative)
+    if data is None:
+        fail(f"{relative} changed while snapshotting")
+    return ManagedFileState(
+        relative=relative,
+        exists=True,
+        st_dev=info.st_dev,
+        st_ino=info.st_ino,
+        st_mode=stat.S_IMODE(info.st_mode),
+        st_uid=info.st_uid,
+        st_gid=info.st_gid,
+        st_nlink=info.st_nlink,
+        st_size=info.st_size,
+        st_mtime_ns=info.st_mtime_ns,
+        digest=sha256_bytes(data),
+    )
+
+
+def snapshot_directory_state(path: Path, label: str) -> ManagedDirectoryState:
+    info = require_real_directory(path, label)
+    if not is_current_owner(info):
+        fail(f"{label} must be owned by the current user")
+    return ManagedDirectoryState(
+        path=path,
+        st_dev=info.st_dev,
+        st_ino=info.st_ino,
+        st_uid=info.st_uid,
+        st_gid=info.st_gid,
+        mode=stat.S_IMODE(info.st_mode),
+        st_nlink=info.st_nlink,
+        st_size=info.st_size,
+        atime_ns=info.st_atime_ns,
+        mtime_ns=info.st_mtime_ns,
+    )
+
+
+def restore_managed_directory_state(state: ManagedDirectoryState, *, strict_topology: bool) -> None:
+    fd = open_directory_fd(state.path, str(state.path))
+    try:
+        current = os.fstat(fd)
+        if current.st_dev != state.st_dev or current.st_ino != state.st_ino:
+            fail(f"managed directory changed before metadata restore: {state.path}")
+        if not stat.S_ISDIR(current.st_mode):
+            fail(f"managed directory is not a directory: {state.path}")
+        if current.st_uid != state.st_uid or current.st_gid != state.st_gid:
+            fail(f"managed directory ownership changed before metadata restore: {state.path}")
+        if strict_topology and (current.st_nlink != state.st_nlink or current.st_size != state.st_size):
+            fail(f"managed directory topology changed before metadata restore: {state.path}")
+        if stat.S_IMODE(current.st_mode) != state.mode:
+            os.fchmod(fd, state.mode)
+        os.utime(fd, ns=(state.atime_ns, state.mtime_ns))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+class ManagedObjectTransaction:
+    def __init__(self, target: Path, relatives: tuple[str, ...]):
+        self.target = target
+        self.relatives = tuple(dict.fromkeys(relatives))
+        self.states = {relative: managed_file_state(target, relative) for relative in self.relatives}
+        self.held: dict[str, Path] = {}
+        self.active_states: dict[str, ManagedFileState] = {}
+        self.touched: set[str] = set()
+        self.created_dirs: set[Path] = set()
+        self.directory_states: dict[Path, ManagedDirectoryState] = {}
+        self.closed = False
+        require_owner_private_directory(target.parent, "managed rollback parent")
+        self.parent_state = snapshot_directory_state(target.parent, "managed rollback parent")
+        self.hold_root = target.parent / f".{target.name}.nddev-kimicode-managed-rollback.{os.getpid()}.{time.time_ns()}"
+        self.hold_root.mkdir(mode=OWNER_DIRECTORY_MODE)
+        self.hold_root.chmod(OWNER_DIRECTORY_MODE)
+        fsync_directory(target.parent)
+        self.capture_existing_directory(target)
+        for relative in self.relatives:
+            path = safe_target_path(target, relative)
+            current = path.parent
+            chain: list[Path] = []
+            while current != target and target in current.parents:
+                chain.append(current)
+                current = current.parent
+            for directory in reversed(chain):
+                self.capture_existing_directory(directory)
+
+    def capture_existing_directory(self, path: Path) -> None:
+        info = stat_existing(path, str(path))
+        if info is None:
+            return
+        if not stat.S_ISDIR(info.st_mode):
+            fail(f"managed path parent must be a directory: {path}")
+        if path not in self.directory_states:
+            self.directory_states[path] = snapshot_directory_state(path, str(path))
+
+    def hold_path(self, relative: str) -> Path:
+        digest = sha256_bytes(relative.encode("utf-8"))
+        return self.hold_root / f"{digest}.held"
+
+    def revalidate_expected(self, relative: str) -> None:
+        state = self.states.get(relative)
+        if state is None:
+            state = managed_file_state(self.target, relative)
+            self.states[relative] = state
+        path = safe_target_path(self.target, relative)
+        info = stat_existing(path, relative)
+        if not state.exists:
+            if info is not None:
+                fail(f"managed path changed before transition: {relative}")
+            return
+        if info is None:
+            fail(f"managed path disappeared before transition: {relative}")
+        if not stat.S_ISREG(info.st_mode):
+            fail(f"managed path changed kind before transition: {relative}")
+        if (
+            info.st_dev != state.st_dev
+            or info.st_ino != state.st_ino
+            or stat.S_IMODE(info.st_mode) != state.st_mode
+            or info.st_uid != state.st_uid
+            or info.st_gid != state.st_gid
+            or info.st_nlink != state.st_nlink
+            or info.st_size != state.st_size
+            or info.st_mtime_ns != state.st_mtime_ns
+        ):
+            fail(f"managed path changed before transition: {relative}")
+        data = read_existing_file(path, max_bytes=MANAGED_MAX_BYTES, label=relative)
+        if data is None or sha256_bytes(data) != state.digest:
+            fail(f"managed path content changed before transition: {relative}")
+
+    def ensure_parent(self, path: Path) -> None:
+        relative_parent = path.relative_to(self.target).parent
+        current = self.target
+        for part in relative_parent.parts:
+            current = current / part
+            info = stat_existing(current, f"managed directory {current}")
+            if info is None:
+                parent = current.parent
+                require_owner_private_directory(parent, f"managed parent {parent}")
+                current.mkdir(mode=OWNER_DIRECTORY_MODE)
+                current.chmod(OWNER_DIRECTORY_MODE)
+                self.created_dirs.add(current)
+                fsync_directory(parent)
+                continue
+            if not stat.S_ISDIR(info.st_mode):
+                fail(f"managed parent is not a directory: {current}")
+            if not is_owner_private_directory(info):
+                fail(f"managed parent must be private and owned by the current user: {current}")
+            self.capture_existing_directory(current)
+
+    def stage_original(self, relative: str) -> None:
+        if relative in self.held:
+            return
+        self.revalidate_expected(relative)
+        state = self.states[relative]
+        self.touched.add(relative)
+        if not state.exists:
+            return
+        path = safe_target_path(self.target, relative)
+        hold = self.hold_path(relative)
+        path.rename(hold)
+        self.held[relative] = hold
+        fsync_directory(path.parent)
+        fsync_directory(self.hold_root)
+
+    def write_file(self, relative: str, data: bytes, *, mode: int = OWNER_FILE_MODE) -> None:
+        path = safe_target_path(self.target, relative)
+        self.stage_original(relative)
+        self.ensure_parent(path)
+        atomic_write(path, data, self.target, mode=mode)
+        self.active_states[relative] = managed_file_state(self.target, relative)
+        self.touched.add(relative)
+
+    def delete_file(self, relative: str) -> None:
+        self.stage_original(relative)
+        self.active_states.pop(relative, None)
+        self.touched.add(relative)
+
+    def remove_managed_block(self, relative: str) -> None:
+        self.revalidate_expected(relative)
+        state = self.states[relative]
+        if not state.exists:
+            return
+        path = safe_target_path(self.target, relative)
+        data = read_existing_file(path, max_bytes=MANAGED_MAX_BYTES, label=relative)
+        if data is None:
+            fail(f"managed path disappeared before transition: {relative}")
+        text = data.decode("utf-8")
+        block = extract_managed_block(relative, text)
+        if block is None:
+            return
+        updated = text.replace(block, "").encode("utf-8")
+        if updated.strip():
+            self.write_file(relative, updated)
+        else:
+            self.delete_file(relative)
+
+    def validate_active_file_for_rollback(self, relative: str) -> None:
+        path = safe_target_path(self.target, relative)
+        info = stat_existing(path, relative)
+        if info is None:
+            return
+        active = self.active_states.get(relative)
+        if active is None:
+            fail(f"managed rollback refuses concurrent replacement at active path: {relative}")
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_dev != active.st_dev
+            or info.st_ino != active.st_ino
+            or stat.S_IMODE(info.st_mode) != active.st_mode
+            or info.st_uid != active.st_uid
+            or info.st_gid != active.st_gid
+            or info.st_nlink != active.st_nlink
+            or info.st_size != active.st_size
+            or info.st_mtime_ns != active.st_mtime_ns
+        ):
+            fail(f"managed rollback refuses concurrent replacement at active path: {relative}")
+        data = read_existing_file(path, max_bytes=MANAGED_MAX_BYTES, label=relative)
+        if data is None or sha256_bytes(data) != active.digest:
+            fail(f"managed rollback refuses concurrent replacement at active path: {relative}")
+
+    def remove_active_file_if_present(self, relative: str) -> None:
+        path = safe_target_path(self.target, relative)
+        info = stat_existing(path, relative)
+        if info is None:
+            return
+        self.validate_active_file_for_rollback(relative)
+        path.unlink()
+        fsync_directory(path.parent)
+
+    def prune_created_dirs(self) -> None:
+        for directory in sorted(self.created_dirs, key=lambda item: len(item.parts), reverse=True):
+            with contextlib.suppress(OSError):
+                directory.rmdir()
+                fsync_directory(directory.parent)
+
+    def restore_directory_metadata(self, *, strict_topology: bool) -> None:
+        for path in sorted(self.directory_states, key=lambda item: len(item.parts), reverse=True):
+            if path_exists_no_follow(path):
+                restore_managed_directory_state(self.directory_states[path], strict_topology=strict_topology)
+        if path_exists_no_follow(self.parent_state.path):
+            restore_managed_directory_state(self.parent_state, strict_topology=strict_topology)
+
+    def rollback(self) -> None:
+        if self.closed:
+            return
+        try:
+            for relative in sorted(self.touched):
+                self.validate_active_file_for_rollback(relative)
+            for relative in sorted(self.touched):
+                self.remove_active_file_if_present(relative)
+            for relative, hold in self.held.items():
+                path = safe_target_path(self.target, relative)
+                parent = path.parent
+                if not path_exists_no_follow(parent):
+                    fail(f"managed rollback parent is missing: {parent}")
+                hold.rename(path)
+                fsync_directory(parent)
+            self.prune_created_dirs()
+            self.cleanup_hold_root()
+            self.restore_directory_metadata(strict_topology=True)
+        finally:
+            self.closed = True
+
+    def commit(self) -> None:
+        if self.closed:
+            return
+        try:
+            self.cleanup_hold_root()
+            self.restore_directory_metadata(strict_topology=False)
+        finally:
+            self.closed = True
+
+    def cleanup_hold_root(self) -> None:
+        if not path_exists_no_follow(self.hold_root):
+            return
+        for child in sorted(self.hold_root.iterdir(), key=lambda item: item.name):
+            info = child.lstat()
+            if stat.S_ISREG(info.st_mode) and is_current_owner(info) and info.st_nlink == 1:
+                child.unlink()
+            else:
+                fail(f"managed rollback hold contains unexpected path: {child.name}")
+        self.hold_root.rmdir()
+        fsync_directory(self.hold_root.parent)
 
 
 def read_json_file(path: Path, *, max_bytes: int, label: str) -> dict[str, Any]:
@@ -2231,24 +2573,6 @@ def stamp_managed_paths(stamp: dict[str, Any] | None) -> tuple[str, ...]:
     return tuple(str(path) for path in managed)
 
 
-def snapshot_files(target: Path, extra_paths: tuple[str, ...] = ()) -> dict[str, bytes | None]:
-    snapshot: dict[str, bytes | None] = {}
-    for relative in (*content_managed_paths(), *extra_paths, STAMP_NAME):
-        snapshot[relative] = read_existing_file(safe_target_path(target, relative), max_bytes=MANAGED_MAX_BYTES, label=relative)
-    return snapshot
-
-
-def restore_snapshot(target: Path, snapshot: dict[str, bytes | None]) -> None:
-    for relative, data in snapshot.items():
-        path = safe_target_path(target, relative)
-        if data is None:
-            with contextlib.suppress(FileNotFoundError):
-                path.unlink()
-            continue
-        atomic_write(path, data, target)
-    prune_empty_managed_dirs(target, tuple(snapshot))
-
-
 def choose_backup_slot(pool: Path) -> int:
     ensure_private_directory(pool, "backup pool")
     for slot in range(10):
@@ -2364,21 +2688,22 @@ def write_setup(
         stale_paths = ()
         if current is not None:
             stale_paths = tuple(path for path in stamp_managed_paths(current) if path not in files)
-        snapshot = snapshot_files(target, stale_paths)
+        managed_transaction = ManagedObjectTransaction(
+            target,
+            tuple(dict.fromkeys((*content_managed_paths(), *stale_paths, STAMP_NAME))),
+        )
         try:
             for relative in stale_paths:
-                path = safe_target_path(target, relative)
                 if relative in MERGED_MARKER_PATHS:
-                    remove_managed_block_from_target(target, relative)
+                    managed_transaction.remove_managed_block(relative)
                 else:
-                    with contextlib.suppress(FileNotFoundError):
-                        path.unlink()
+                    managed_transaction.delete_file(relative)
             for relative, data in files.items():
-                atomic_write(safe_target_path(target, relative), data, target)
-            atomic_write(stamp_path(target), canonical_json(desired_stamp), target)
-            prune_empty_managed_dirs(target, stale_paths)
+                managed_transaction.write_file(relative, data)
+            managed_transaction.write_file(STAMP_NAME, canonical_json(desired_stamp))
+            managed_transaction.commit()
         except BaseException:
-            restore_snapshot(target, snapshot)
+            managed_transaction.rollback()
             raise
         return {
             "content_setup_id": setup["id"],
@@ -2403,25 +2728,28 @@ def restore_backup(target: Path, slot: int) -> dict[str, Any]:
         files = envelope.get("files")
         if not isinstance(files, dict):
             fail("backup files are invalid")
-        snapshot = snapshot_files(target, tuple(files))
+        decoded_files: dict[str, bytes | None] = {}
+        for relative in (*files.keys(),):
+            encoded = files.get(relative)
+            if encoded is None:
+                decoded_files[relative] = None
+                continue
+            if not isinstance(encoded, str):
+                fail("backup file payload is invalid")
+            try:
+                decoded_files[relative] = base64.b64decode(encoded.encode("ascii"), validate=True)
+            except (binascii.Error, ValueError):
+                fail("backup file payload is invalid base64")
+        managed_transaction = ManagedObjectTransaction(target, tuple(decoded_files))
         try:
-            for relative in (*files.keys(),):
-                encoded = files.get(relative)
-                path = safe_target_path(target, relative)
-                if encoded is None:
-                    with contextlib.suppress(FileNotFoundError):
-                        path.unlink()
-                    continue
-                if not isinstance(encoded, str):
-                    fail("backup file payload is invalid")
-                try:
-                    decoded = base64.b64decode(encoded.encode("ascii"), validate=True)
-                except (binascii.Error, ValueError):
-                    fail("backup file payload is invalid base64")
-                atomic_write(path, decoded, target)
-            prune_empty_managed_dirs(target, tuple(files))
+            for relative, decoded in decoded_files.items():
+                if decoded is None:
+                    managed_transaction.delete_file(relative)
+                else:
+                    managed_transaction.write_file(relative, decoded)
+            managed_transaction.commit()
         except BaseException:
-            restore_snapshot(target, snapshot)
+            managed_transaction.rollback()
             raise
         restored_stamp = read_stamp(target)
         descriptor = stamp_descriptor(restored_stamp)
@@ -2435,19 +2763,13 @@ def restore_backup(target: Path, slot: int) -> dict[str, Any]:
 
 
 def remove_managed_block_from_target(target: Path, relative: str) -> None:
-    path = safe_target_path(target, relative)
-    data = read_existing_file(path, max_bytes=MANAGED_MAX_BYTES, label=relative)
-    if data is None:
-        return
-    text = data.decode("utf-8")
-    block = extract_managed_block(relative, text)
-    if block is None:
-        return
-    updated = text.replace(block, "")
-    if updated.strip():
-        atomic_write(path, updated.encode("utf-8"), target)
-    else:
-        path.unlink()
+    transaction = ManagedObjectTransaction(target, (relative,))
+    try:
+        transaction.remove_managed_block(relative)
+        transaction.commit()
+    except BaseException:
+        transaction.rollback()
+        raise
 
 
 def prune_empty_managed_dirs(target: Path, extra_paths: tuple[str, ...] = ()) -> None:
@@ -2474,20 +2796,17 @@ def remove_setup(target: Path) -> dict[str, Any]:
             fail(f"managed target has drift: {', '.join(drift)}")
         descriptor = stamp_descriptor(stamp)
         remove_paths = tuple(dict.fromkeys((*content_managed_paths(), *stamp_managed_paths(stamp))))
-        snapshot = snapshot_files(target, remove_paths)
+        managed_transaction = ManagedObjectTransaction(target, tuple(dict.fromkeys((*remove_paths, STAMP_NAME))))
         try:
             for relative in remove_paths:
-                path = safe_target_path(target, relative)
                 if relative in MERGED_MARKER_PATHS:
-                    remove_managed_block_from_target(target, relative)
+                    managed_transaction.remove_managed_block(relative)
                 else:
-                    with contextlib.suppress(FileNotFoundError):
-                        path.unlink()
-            with contextlib.suppress(FileNotFoundError):
-                stamp_path(target).unlink()
-            prune_empty_managed_dirs(target, remove_paths)
+                    managed_transaction.delete_file(relative)
+            managed_transaction.delete_file(STAMP_NAME)
+            managed_transaction.commit()
         except BaseException:
-            restore_snapshot(target, snapshot)
+            managed_transaction.rollback()
             raise
         return {"removed": descriptor, "target": str(validate_target(target, create=False))}
 
