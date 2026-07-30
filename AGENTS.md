@@ -1,32 +1,60 @@
-# nddev-kimicode-app
+<!--
+GENERATED FILE - DO NOT EDIT DIRECTLY
+generator: gds
+bundle: 0.1.0-dev
+source-commit: 97e8bbaa3a0734b156b03bad704503bc46d7575b
+input-digest: sha256:25f57057aa13e29c8fb05ecbbcadafad774f6faad06b4bc22fc03d2f8d20897f
+output-digest: sha256:39cc16486e7a8f34b808cd06a0ce96e48ceebf176dcbc17789048f99ddeb37be
+edit-source:
+  - .gds/repository.yaml
+  - policies/base/repository-default.yaml
+  - policies/owners/organization-default.yaml
+  - policies/roles/public-module.yaml
+  - templates/agents/repository.md.tmpl
+  - templates/github-actions/go.yml.tmpl
+  - templates/harnesses/claude.md.tmpl
+-->
+# GDS repository contract
 
-This public repository owns the Kimi Code setup manager, public contracts,
-release metadata, documentation, and the public nddev-builder toolkit.
+## Scope
 
-Private harness tests, benchmarks, root registry pins, durable memories, and
-operational skills live outside this repository.
+- Repository ID: `repo_01KYFBZ4572MR6XMX5T1AJPW7M`.
+- Roles: `module`.
+- Canonical repository facts: `.gds/repository.yaml`.
+- Applied bundle: `.gds/bundle.lock.yaml` (`0.1.0-dev`).
+- Compiled policy: `.gds/compiled-policy.json`.
 
 ## Boundaries
 
-- Keep public runtime implementation in `cli-tools/`.
-- Keep public content setup sources in `setups/`, `profiles/`, and
-  `builder/nddev-builder/`.
-- Keep public contract facts in `config/`, `build/`, and `references/`.
-- Do not add private QA, generated evidence, live credentials, logs, caches, or
-  root registry changes.
+- This Git repository is one independent mutation boundary.
+- Preserve unrelated branches, worktrees, submodules, and dirty changes.
+- Resolve cross-repository work with `gds context --json` before acting.
+- Generated files are projections; change their canonical inputs and regenerate.
 
-## Kimi Facts
+## Safety
 
-Do not copy volatile release pins or checksum lists into prose. Use these owners:
+- External writes require explicit approval: `true`.
+- Generated projection edits: `forbidden`.
+- Private parent context persistence: `forbidden`.
+- Visibility contract: `public`; data classification: `public`.
 
-- `references/kimi-code-baseline.json`
-- `build/manifest.json`
-- `build/version.json`
-- `config/nddev-contract.json`
-- `cli-tools/nddev_kimicode.py`
+## Development
 
-## Public Checks
+- Test: `python3 -m json.tool config/nddev-contract.json`.
 
-`cli-tools/validate_public_contracts.py` owns the public validation contract and
-its cache-free command regression. Do not duplicate the current check list in
-documentation.
+## Agent routing
+
+- Start here: run `gds-orient` (or `gds context --json`) to resolve scope before
+  any cross-repository work. It is the orientation entry point.
+- Active skill profiles: `core, module`. Five profiles exist in total
+  (`core`, `estate-admin`, `module`, `device`, `portfolio`); only the listed ones
+  are active for this repository. The catalog is `skills/registry.yaml`, and each
+  skill lives under `skills/canonical/<name>/SKILL.md`.
+- Use on-demand skills for procedures; do not duplicate them here.
+- Treat docs and memories as derived evidence, not mutation authority.
+
+## Done
+
+- Required verification is complete or explicitly `NOT_PROVEN`.
+- Git state and every affected repository boundary are classified.
+- No private data, secret, or unapproved generated drift is introduced.
