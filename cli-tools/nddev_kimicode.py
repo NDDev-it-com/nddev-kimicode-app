@@ -91,38 +91,38 @@ CONTENT_MANAGED_BASE_PATHS = (
 MERGED_MARKER_PATHS = {"config.toml", "tui.toml", "AGENTS.md"}
 ID_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 
-KIMI_PACKAGE_VERSION = "0.30.0"
+KIMI_PACKAGE_VERSION = "0.31.0"
 KIMI_COMMAND = "kimi"
 KIMI_BINARY_BASE = "https://code.kimi.com/kimi-code/binaries"
 KIMI_BINARY_MANIFEST_URL = f"{KIMI_BINARY_BASE}/{KIMI_PACKAGE_VERSION}/manifest.json"
-KIMI_BINARY_MANIFEST_SHA256 = "7fbb2d9f2d39e45bb7fb48007ed6e70eeeea2f3c87cbc3cfe6230a4d1c9aade8"
+KIMI_BINARY_MANIFEST_SHA256 = "516495624fda9f80039718224081834616245c80c7725376798dbf4e806c71c2"
 KIMI_BINARY_ARTIFACTS = {
     "darwin-arm64": {
         "filename": "kimi-code-darwin-arm64",
         "url": f"{KIMI_BINARY_BASE}/{KIMI_PACKAGE_VERSION}/kimi-code-darwin-arm64",
-        "size_bytes": 150706240,
-        "sha256": "65bb24c863c63707c1de6fafce9516ddb2ef9b90243426e2c92bb5287b342302",
+        "size_bytes": 150821824,
+        "sha256": "58e2a8e05eaf7f34c095998e2c95ec79322bb428773280f2ca78c48d04149f70",
         "supported_product_hosts": ["macos-arm64"],
     },
     "darwin-x64": {
         "filename": "kimi-code-darwin-x64",
         "url": f"{KIMI_BINARY_BASE}/{KIMI_PACKAGE_VERSION}/kimi-code-darwin-x64",
-        "size_bytes": 153056320,
-        "sha256": "4b214d0bde6e8ef5b48c6a075bb02831c4369ef9a3de6839cd37f19d7cdc6de3",
+        "size_bytes": 153159520,
+        "sha256": "1ba078f837ba8171d1c2abc14d097f3e966fd6f1c06e46b1dbf157c2b6685d55",
         "supported_product_hosts": ["macos-x64"],
     },
     "linux-arm64": {
         "filename": "kimi-code-linux-arm64",
         "url": f"{KIMI_BINARY_BASE}/{KIMI_PACKAGE_VERSION}/kimi-code-linux-arm64",
-        "size_bytes": 151260288,
-        "sha256": "beccea1fc4c04dd016d17e51c6a166d8c0451b2a327dcf7cbab2fbda06d8c19a",
+        "size_bytes": 151391360,
+        "sha256": "5a5f26a146d09e123323d601f00a58b23fd497ec7949d281be0fed832966d5f2",
         "supported_product_hosts": ["ubuntu-glibc-arm64"],
     },
     "linux-x64": {
         "filename": "kimi-code-linux-x64",
         "url": f"{KIMI_BINARY_BASE}/{KIMI_PACKAGE_VERSION}/kimi-code-linux-x64",
-        "size_bytes": 153619648,
-        "sha256": "e6f1f31b70f36d917b8630ba0e8779aace209592e846971f58e4e24c4d929745",
+        "size_bytes": 153685184,
+        "sha256": "5d0b48f1994959ff620834ab3aae54a01aa5ab0e68cd1e03c857c928414b8916",
         "supported_product_hosts": ["ubuntu-glibc-x64"],
     },
 }
@@ -169,10 +169,7 @@ CURRENT_SOFTWARE_SCHEMA = 2
 LEGACY_SOFTWARE_SCHEMA = 1
 SOFTWARE_MAX_BYTES = 160 * 1024 * 1024
 SOFTWARE_MAX_PATHS = 128
-DOWNLOAD_MAX_BYTES = max(
-    int(artifact["size_bytes"])
-    for artifact in KIMI_BINARY_ARTIFACTS.values()
-)
+DOWNLOAD_MAX_BYTES = max(int(artifact["size_bytes"]) for artifact in KIMI_BINARY_ARTIFACTS.values())
 PROCESS_OUTPUT_MAX_BYTES = 64 * 1024
 PROCESS_TIMEOUT_SECONDS = 120
 SOFTWARE_STAMP_KEYS_V2 = {
@@ -1343,9 +1340,7 @@ def readonly_external_lifecycle_lock(target: Path):
             )
             is None
         ):
-            empty_namespace_signature = cold_empty_external_namespace_signature(
-                external_lock_root
-            )
+            empty_namespace_signature = cold_empty_external_namespace_signature(external_lock_root)
             canonical_target_path = canonicalize_target_under_product_lock(target)
             canonical_target = str(canonical_target_path)
             try:
@@ -1365,9 +1360,7 @@ def readonly_external_lifecycle_lock(target: Path):
                     cold_empty_external_namespace_signature(external_lock_root)
                     != empty_namespace_signature
                 ):
-                    raise RetryReadOnlyLifecycle(
-                        "external lifecycle namespace changed during read"
-                    )
+                    raise RetryReadOnlyLifecycle("external lifecycle namespace changed during read")
             return
         product_fd = acquire_product_coordination_lock(
             external_lock_root,

@@ -74,6 +74,57 @@ def require_file(relative: str) -> Path:
     return path
 
 
+def static_expression(node: ast.expr, bindings: dict[str, Any]) -> Any:
+    """Evaluate the manager's data-only constant expressions without executing it."""
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, (str, int, float, bool, bytes, type(None))):
+            return node.value
+        raise ValueError("unsupported constant value")
+    if isinstance(node, ast.Name):
+        if node.id not in bindings:
+            raise ValueError(f"unbound static name: {node.id}")
+        return bindings[node.id]
+    if isinstance(node, ast.List):
+        return [static_expression(element, bindings) for element in node.elts]
+    if isinstance(node, ast.Tuple):
+        return tuple(static_expression(element, bindings) for element in node.elts)
+    if isinstance(node, ast.Set):
+        return {static_expression(element, bindings) for element in node.elts}
+    if isinstance(node, ast.Dict):
+        if any(key is None for key in node.keys):
+            raise ValueError("dictionary unpacking is not a static binding")
+        return {
+            static_expression(key, bindings): static_expression(value, bindings)
+            for key, value in zip(node.keys, node.values)
+        }
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = static_expression(node.left, bindings)
+        right = static_expression(node.right, bindings)
+        if isinstance(left, str) and isinstance(right, str):
+            return left + right
+        if isinstance(left, tuple) and isinstance(right, tuple):
+            return left + right
+        raise ValueError("static addition requires matching strings or tuples")
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        for value in node.values:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                parts.append(value.value)
+                continue
+            if (
+                isinstance(value, ast.FormattedValue)
+                and value.conversion == -1
+                and value.format_spec is None
+            ):
+                rendered = static_expression(value.value, bindings)
+                if isinstance(rendered, (str, int, float)):
+                    parts.append(str(rendered))
+                    continue
+            raise ValueError("unsupported formatted value in static binding")
+        return "".join(parts)
+    raise ValueError(f"unsupported static expression: {type(node).__name__}")
+
+
 def manager_constants() -> dict[str, Any]:
     source = require_file("cli-tools/nddev_kimicode.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -91,8 +142,8 @@ def manager_constants() -> dict[str, Any]:
             and isinstance(node.targets[0], ast.Name)
         ):
             try:
-                constants[node.targets[0].id] = ast.literal_eval(node.value)
-            except (ValueError, TypeError):
+                constants[node.targets[0].id] = static_expression(node.value, constants)
+            except (TypeError, ValueError):
                 continue
     return constants
 
@@ -171,6 +222,7 @@ def validate_integrity_metadata() -> None:
     contract = load_json("config/nddev-contract.json")
     manager_source = require_file("cli-tools/nddev_kimicode.py").read_text(encoding="utf-8")
     manager_tree = ast.parse(manager_source)
+    constants = manager_constants()
     manager_assignments = {
         target.id
         for node in manager_tree.body
@@ -339,6 +391,11 @@ def validate_integrity_metadata() -> None:
     }
     if len(manifest_identity) != 1:
         raise ValueError("official binary manifest pins drifted")
+    if (
+        constants.get("KIMI_BINARY_MANIFEST_URL"),
+        constants.get("KIMI_BINARY_MANIFEST_SHA256"),
+    ) not in manifest_identity:
+        raise ValueError("manager official binary manifest pins drifted")
 
     artifacts = official_install.get("platforms", {})
     if not isinstance(artifacts, dict) or set(artifacts) != {
@@ -365,6 +422,18 @@ def validate_integrity_metadata() -> None:
     contract_artifacts = contract_runtime.get("supported_binary_artifacts")
     if artifact_projection != manifest_artifacts or artifact_projection != contract_artifacts:
         raise ValueError("official binary platform pins drifted")
+    manager_artifacts = constants.get("KIMI_BINARY_ARTIFACTS")
+    if not isinstance(manager_artifacts, dict) or set(manager_artifacts) != set(
+        artifact_projection
+    ):
+        raise ValueError("manager official binary artifact catalog drifted")
+    manager_artifact_projection = {
+        platform: {field: artifact.get(field) for field in artifact_fields}
+        for platform, artifact in manager_artifacts.items()
+        if isinstance(artifact, dict)
+    }
+    if manager_artifact_projection != artifact_projection:
+        raise ValueError("manager official binary platform pins drifted")
     supported_platforms = list(artifacts)
     if (
         official_install.get("supported_vendor_platforms") != supported_platforms
