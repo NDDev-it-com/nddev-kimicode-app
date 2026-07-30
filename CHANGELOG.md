@@ -9,6 +9,13 @@
 - Non-runtime vendor distribution observations are no longer part of public
   manager stamps, baselines, manifests, or contracts.
 
+## 0.3.0 - 2026-07-30
+
+### Changed
+
+- Advance all public release and nddev-builder projection version owners to
+  0.3.0 without changing the established metadata schemas.
+
 ## 0.2.0 - 2026-07-27
 
 ### Added
