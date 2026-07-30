@@ -152,18 +152,59 @@ def validate_integrity_metadata() -> None:
     baseline = load_json("references/kimi-code-baseline.json")
     manifest = load_json("build/manifest.json")
     contract = load_json("config/nddev-contract.json")
-    observations = baseline.get("vendor_distribution_observations")
-    if not isinstance(observations, dict):
-        raise ValueError("vendor distribution observations are missing")
-    if observations != manifest.get("software_install", {}).get(
-        "vendor_distribution_observations"
-    ):
-        raise ValueError("manifest vendor observations drifted")
-    if observations != contract.get("runtime_compatibility", {}).get(
-        "vendor_distribution_observations"
-    ):
-        raise ValueError("contract vendor observations drifted")
-    artifacts = baseline.get("official_binary_install", {}).get("platforms", {})
+    manager_source = require_file("cli-tools/nddev_kimicode.py").read_text(encoding="utf-8")
+    manager_tree = ast.parse(manager_source)
+    manager_assignments = {
+        target.id
+        for node in manager_tree.body
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+    forbidden_constants = {
+        "KIMI_GITHUB_RELEASE_ASSETS",
+        "KIMI_VENDOR_DISTRIBUTION_OBSERVATIONS",
+    }
+    present_constants = sorted(forbidden_constants & manager_assignments)
+    if present_constants:
+        raise ValueError(f"manager exposes raw vendor observations: {present_constants}")
+
+    raw_field = "vendor_distribution_observations"
+    if f'"{raw_field}"' in manager_source or f"'{raw_field}'" in manager_source:
+        raise ValueError(f"manager must not publish {raw_field}")
+    public_owners = {
+        "baseline": baseline,
+        "manifest": manifest.get("software_install", {}),
+        "contract": contract.get("runtime_compatibility", {}),
+    }
+    for owner, value in public_owners.items():
+        if not isinstance(value, dict):
+            raise ValueError(f"{owner} integrity metadata must be an object")
+        if raw_field in value:
+            raise ValueError(f"{owner} must not publish {raw_field}")
+
+    official_install = baseline.get("official_binary_install", {})
+    manifest_install = manifest.get("software_install", {})
+    contract_lifecycle = contract.get("software_lifecycle", {})
+    pin_owners = {
+        "baseline official install": official_install,
+        "manifest software install": manifest_install,
+        "contract software lifecycle": contract_lifecycle,
+    }
+    for owner, value in pin_owners.items():
+        if not isinstance(value, dict):
+            raise ValueError(f"{owner} must be an object")
+    manifest_identity = {
+        (
+            owner.get("manifest_url"),
+            owner.get("manifest_sha256"),
+        )
+        for owner in pin_owners.values()
+    }
+    if len(manifest_identity) != 1:
+        raise ValueError("official binary manifest pins drifted")
+
+    artifacts = official_install.get("platforms", {})
     if not isinstance(artifacts, dict) or set(artifacts) != {
         "darwin-arm64",
         "darwin-x64",
@@ -173,6 +214,26 @@ def validate_integrity_metadata() -> None:
         "win32-x64",
     }:
         raise ValueError("official binary artifact catalog is incomplete")
+    artifact_fields = (
+        "filename",
+        "url",
+        "size_bytes",
+        "sha256",
+        "supported_product_hosts",
+    )
+    artifact_projection = {
+        platform: {field: artifact.get(field) for field in artifact_fields}
+        for platform, artifact in artifacts.items()
+        if isinstance(artifact, dict)
+    }
+    manifest_artifacts = manifest.get("software_runtime", {}).get(
+        "observed_vendor_artifacts"
+    )
+    contract_artifacts = contract.get("runtime_compatibility", {}).get(
+        "observed_vendor_artifacts"
+    )
+    if artifact_projection != manifest_artifacts or artifact_projection != contract_artifacts:
+        raise ValueError("official binary platform pins drifted")
     for platform, artifact in artifacts.items():
         if not isinstance(artifact, dict):
             raise ValueError(f"{platform} artifact must be an object")

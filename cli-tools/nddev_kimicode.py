@@ -105,86 +105,6 @@ KIMI_GITHUB_RELEASE_ID = 361494495
 KIMI_GIT_TAG = "@moonshot-ai/kimi-code@0.30.0"
 KIMI_GIT_TAG_OBJECT = "ba037d3e56babf682144e4614e29844d83420de7"
 KIMI_GIT_COMMIT = "16c7189bd54a42fae65b1bbafd0843420523f797"
-KIMI_GITHUB_RELEASE_ASSETS = {
-    "kimi-code-darwin-arm64.zip": {
-        "kind": "platform-zip",
-        "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.30.0/kimi-code-darwin-arm64.zip",
-        "size_bytes": 49067062,
-        "sha256": "56ecba2e4213e8d7ff060a0a5202068ab9630eba29c6da6f472fe1e57766c08c",
-    },
-    "kimi-code-darwin-arm64.zip.sha256": {
-        "kind": "sha256-sidecar",
-        "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.30.0/kimi-code-darwin-arm64.zip.sha256",
-        "size_bytes": 93,
-        "sha256": "bf796336566fd22175b1e85dc0e5b5f6da22968b4efa5d8483b90aeed8fd28b0",
-    },
-    "kimi-code-darwin-x64.zip": {
-        "kind": "platform-zip",
-        "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.30.0/kimi-code-darwin-x64.zip",
-        "size_bytes": 50085426,
-        "sha256": "6875fcd226b7d7032b846b5faf2c21bbaeb90a7bfe81837c40b2ee97002d5a97",
-    },
-    "kimi-code-darwin-x64.zip.sha256": {
-        "kind": "sha256-sidecar",
-        "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.30.0/kimi-code-darwin-x64.zip.sha256",
-        "size_bytes": 91,
-        "sha256": "dadac3d898a66b264238c66439bbc9fddb9fbeaadeaebde7f038b7e9b79ca3fc",
-    },
-    "kimi-code-linux-arm64.zip": {
-        "kind": "platform-zip",
-        "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.30.0/kimi-code-linux-arm64.zip",
-        "size_bytes": 52670087,
-        "sha256": "09f71f0ad4005de9092ff3a4bc742fedc2f180197445608357f793e656ece523",
-    },
-    "kimi-code-linux-arm64.zip.sha256": {
-        "kind": "sha256-sidecar",
-        "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.30.0/kimi-code-linux-arm64.zip.sha256",
-        "size_bytes": 92,
-        "sha256": "aef522de45aeddc80362601582848afb40160587e41a8d034dee90f30c57dc94",
-    },
-    "kimi-code-linux-x64.zip": {
-        "kind": "platform-zip",
-        "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.30.0/kimi-code-linux-x64.zip",
-        "size_bytes": 52701556,
-        "sha256": "a74abe505d09bba493f2c15cbc5eb8de9938d5c17d83cc8b0fb469e8778296a4",
-    },
-    "kimi-code-linux-x64.zip.sha256": {
-        "kind": "sha256-sidecar",
-        "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.30.0/kimi-code-linux-x64.zip.sha256",
-        "size_bytes": 90,
-        "sha256": "d27ee26f1f91d135b8adf4b357f3a867b0931b4ab74a621cb98a2b828810c658",
-    },
-    "kimi-code-win32-arm64.zip": {
-        "kind": "platform-zip",
-        "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.30.0/kimi-code-win32-arm64.zip",
-        "size_bytes": 40287927,
-        "sha256": "7f42a3714e1de478222af882833d3efef4b836ed03cf85fd27a201842f1f812c",
-    },
-    "kimi-code-win32-arm64.zip.sha256": {
-        "kind": "sha256-sidecar",
-        "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.30.0/kimi-code-win32-arm64.zip.sha256",
-        "size_bytes": 92,
-        "sha256": "bda90235a5dcfd89908ab4a43aeeb9b4f9ca9155c119ab51ea768bd3cd4887bc",
-    },
-    "kimi-code-win32-x64.zip": {
-        "kind": "platform-zip",
-        "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.30.0/kimi-code-win32-x64.zip",
-        "size_bytes": 44099043,
-        "sha256": "b6d20ea17334f10e652c9432276877845a811fdc92f3950910804f9e96726035",
-    },
-    "kimi-code-win32-x64.zip.sha256": {
-        "kind": "sha256-sidecar",
-        "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.30.0/kimi-code-win32-x64.zip.sha256",
-        "size_bytes": 90,
-        "sha256": "052abe3db9664215679d9019361ac88c0b475fb6dcaebb4dd1d5c4b1f1f870d4",
-    },
-    "manifest.json": {
-        "kind": "manifest",
-        "url": "https://github.com/MoonshotAI/kimi-code/releases/download/%40moonshot-ai/kimi-code%400.30.0/manifest.json",
-        "size_bytes": 1041,
-        "sha256": "0281e99f0b375d613e58714a049b1089f1b6c66deb7428c0c72eafce712e1c9c",
-    },
-}
 KIMI_NPM_INTEGRITY = "sha512-NmID/2+rCbZXvnQIBZxZlLzeUjETjb1BPzfkUoVs6AhQv9xuGKLzQvcUJB+yksRZnWE+ikLMWyIn75rVfMMP4w=="
 KIMI_NPM_SHASUM = "865fdaff69425882645d6ae2f74a08dea0e0efe3"
 KIMI_NPM_METADATA_SHA256 = "4a341a6ff5cd5879f744db563e6c52bf5528b6253766bbf4c7651d32c62f5d4a"
@@ -285,38 +205,6 @@ KIMI_VENDOR_PLATFORM_TO_PRODUCT_HOST = {
     for product_host, vendor_platform in KIMI_PRODUCT_HOST_TO_VENDOR_PLATFORM.items()
 }
 KIMI_UBUNTU_GLIBC_VERSION_FLOOR: str | None = None
-KIMI_VENDOR_DISTRIBUTION_OBSERVATIONS = {
-    "github_release_assets": {
-        "source_family": "github-release-assets",
-        "release_url": KIMI_GITHUB_RELEASE_URL,
-        "api_url": KIMI_GITHUB_RELEASE_API_URL,
-        "release_id": KIMI_GITHUB_RELEASE_ID,
-        "tag": KIMI_GIT_TAG,
-        "asset_count": 13,
-        "platform_zip_count": 6,
-        "sha256_sidecar_count": 6,
-        "manifest_count": 1,
-        "assets": KIMI_GITHUB_RELEASE_ASSETS,
-    },
-    "code_kimi_binary_manifest": {
-        "source_family": "code.kimi.com-binary-manifest",
-        "manifest_url": KIMI_BINARY_MANIFEST_URL,
-        "manifest_sha256": KIMI_BINARY_MANIFEST_SHA256,
-        "manifest_size_bytes": 929,
-        "version": KIMI_PACKAGE_VERSION,
-        "tag": KIMI_GIT_TAG,
-        "platform_count": 6,
-        "observed_vendor_platforms": list(KIMI_OBSERVED_VENDOR_PLATFORMS),
-        "platforms": KIMI_OBSERVED_BINARY_PLATFORMS,
-    },
-    "product_selections": {
-        "supported_hosts": list(KIMI_SUPPORTED_PRODUCT_HOSTS),
-        "host_to_vendor_platform": KIMI_PRODUCT_HOST_TO_VENDOR_PLATFORM,
-        "unsupported_host_categories": list(KIMI_UNSUPPORTED_HOST_CATEGORIES),
-        "ubuntu_glibc_version_floor": KIMI_UBUNTU_GLIBC_VERSION_FLOOR,
-        "ubuntu_glibc_version_floor_source": "no-official-floor",
-    },
-}
 LINUX_OS_RELEASE_PATHS = (Path("/etc/os-release"), Path("/usr/lib/os-release"))
 LINUX_MUSL_MARKER_PATHS = (
     Path("/lib/libc.musl-x86_64.so.1"),
@@ -6405,7 +6293,6 @@ def software_source_contract() -> dict[str, Any]:
         "npm_package": KIMI_PACKAGE_NAME,
         "npm_integrity": KIMI_NPM_INTEGRITY,
         "npm_shasum": KIMI_NPM_SHASUM,
-        "vendor_distribution_observations": KIMI_VENDOR_DISTRIBUTION_OBSERVATIONS,
     }
 
 
