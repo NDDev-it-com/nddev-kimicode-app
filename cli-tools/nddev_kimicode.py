@@ -91,50 +91,12 @@ CONTENT_MANAGED_BASE_PATHS = (
 MERGED_MARKER_PATHS = {"config.toml", "tui.toml", "AGENTS.md"}
 ID_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 
-KIMI_PACKAGE_NAME = "@moonshot-ai/kimi-code"
 KIMI_PACKAGE_VERSION = "0.30.0"
 KIMI_COMMAND = "kimi"
-KIMI_GITHUB_RELEASE_URL = (
-    "https://github.com/MoonshotAI/kimi-code/releases/tag/%40moonshot-ai/kimi-code%400.30.0"
-)
-KIMI_GITHUB_RELEASE_API_URL = (
-    "https://api.github.com/repos/MoonshotAI/kimi-code/releases/tags/"
-    "%40moonshot-ai%2Fkimi-code%400.30.0"
-)
-KIMI_GITHUB_RELEASE_ID = 361494495
-KIMI_GIT_TAG = "@moonshot-ai/kimi-code@0.30.0"
-KIMI_GIT_TAG_OBJECT = "ba037d3e56babf682144e4614e29844d83420de7"
-KIMI_GIT_COMMIT = "16c7189bd54a42fae65b1bbafd0843420523f797"
-KIMI_NPM_INTEGRITY = "sha512-NmID/2+rCbZXvnQIBZxZlLzeUjETjb1BPzfkUoVs6AhQv9xuGKLzQvcUJB+yksRZnWE+ikLMWyIn75rVfMMP4w=="
-KIMI_NPM_SHASUM = "865fdaff69425882645d6ae2f74a08dea0e0efe3"
-KIMI_NPM_METADATA_SHA256 = "4a341a6ff5cd5879f744db563e6c52bf5528b6253766bbf4c7651d32c62f5d4a"
-KIMI_NPM_UNPACKED_SIZE = 29218405
-KIMI_NPM_FILE_COUNT = 214
-KIMI_INSTALL_SCRIPT_URL = "https://code.kimi.com/kimi-code/install.sh"
-KIMI_INSTALL_SCRIPT_SHA256 = "638927825e96825edbb563de5e0cb06f8a0551c53e026ade8b717b0f25cb83d2"
-KIMI_LATEST_URL = "https://code.kimi.com/kimi-code/latest"
 KIMI_BINARY_BASE = "https://code.kimi.com/kimi-code/binaries"
 KIMI_BINARY_MANIFEST_URL = f"{KIMI_BINARY_BASE}/{KIMI_PACKAGE_VERSION}/manifest.json"
 KIMI_BINARY_MANIFEST_SHA256 = "7fbb2d9f2d39e45bb7fb48007ed6e70eeeea2f3c87cbc3cfe6230a4d1c9aade8"
-KIMI_BINARY_PLATFORMS = {
-    "darwin-arm64": {
-        "filename": "kimi-code-darwin-arm64",
-        "checksum": "65bb24c863c63707c1de6fafce9516ddb2ef9b90243426e2c92bb5287b342302",
-    },
-    "darwin-x64": {
-        "filename": "kimi-code-darwin-x64",
-        "checksum": "4b214d0bde6e8ef5b48c6a075bb02831c4369ef9a3de6839cd37f19d7cdc6de3",
-    },
-    "linux-arm64": {
-        "filename": "kimi-code-linux-arm64",
-        "checksum": "beccea1fc4c04dd016d17e51c6a166d8c0451b2a327dcf7cbab2fbda06d8c19a",
-    },
-    "linux-x64": {
-        "filename": "kimi-code-linux-x64",
-        "checksum": "e6f1f31b70f36d917b8630ba0e8779aace209592e846971f58e4e24c4d929745",
-    },
-}
-KIMI_OBSERVED_BINARY_PLATFORMS = {
+KIMI_BINARY_ARTIFACTS = {
     "darwin-arm64": {
         "filename": "kimi-code-darwin-arm64",
         "url": f"{KIMI_BINARY_BASE}/{KIMI_PACKAGE_VERSION}/kimi-code-darwin-arm64",
@@ -163,25 +125,14 @@ KIMI_OBSERVED_BINARY_PLATFORMS = {
         "sha256": "e6f1f31b70f36d917b8630ba0e8779aace209592e846971f58e4e24c4d929745",
         "supported_product_hosts": ["ubuntu-glibc-x64"],
     },
-    "win32-arm64": {
-        "filename": "kimi-code-win32-arm64.exe",
-        "url": f"{KIMI_BINARY_BASE}/{KIMI_PACKAGE_VERSION}/kimi-code-win32-arm64.exe",
-        "size_bytes": 110994432,
-        "sha256": "5f3692db5b54df4fb1874725223511834b5af8b2dbf2b9b343e05ada0754bd45",
-        "supported_product_hosts": [],
-    },
-    "win32-x64": {
-        "filename": "kimi-code-win32-x64.exe",
-        "url": f"{KIMI_BINARY_BASE}/{KIMI_PACKAGE_VERSION}/kimi-code-win32-x64.exe",
-        "size_bytes": 122427392,
-        "sha256": "04e31ace0d7f8ca1bc69397ff5e95a4edeeed9813ea6028facf7d5277ded7c3f",
-        "supported_product_hosts": [],
-    },
 }
-KIMI_OBSERVED_VENDOR_PLATFORMS = tuple(KIMI_OBSERVED_BINARY_PLATFORMS)
-KIMI_INSTALL_POWERSHELL_URL = "https://code.kimi.com/kimi-code/install.ps1"
-KIMI_INSTALL_POWERSHELL_SHA256 = "28a0473a7c56d41eae52cb4dbd3232f87a9133dd7af416a6a04dfbf7856fa9fc"
-KIMI_INSTALL_POWERSHELL_SIZE_BYTES = 15891
+KIMI_BINARY_PLATFORMS = {
+    platform: {
+        "filename": artifact["filename"],
+        "checksum": artifact["sha256"],
+    }
+    for platform, artifact in KIMI_BINARY_ARTIFACTS.items()
+}
 KIMI_SUPPORTED_PRODUCT_HOSTS = (
     "macos-arm64",
     "macos-x64",
@@ -204,7 +155,6 @@ KIMI_VENDOR_PLATFORM_TO_PRODUCT_HOST = {
     vendor_platform: product_host
     for product_host, vendor_platform in KIMI_PRODUCT_HOST_TO_VENDOR_PLATFORM.items()
 }
-KIMI_UBUNTU_GLIBC_VERSION_FLOOR: str | None = None
 LINUX_OS_RELEASE_PATHS = (Path("/etc/os-release"), Path("/usr/lib/os-release"))
 LINUX_MUSL_MARKER_PATHS = (
     Path("/lib/libc.musl-x86_64.so.1"),
@@ -221,8 +171,7 @@ SOFTWARE_MAX_BYTES = 160 * 1024 * 1024
 SOFTWARE_MAX_PATHS = 128
 DOWNLOAD_MAX_BYTES = max(
     int(artifact["size_bytes"])
-    for artifact in KIMI_OBSERVED_BINARY_PLATFORMS.values()
-    if artifact.get("supported_product_hosts")
+    for artifact in KIMI_BINARY_ARTIFACTS.values()
 )
 PROCESS_OUTPUT_MAX_BYTES = 64 * 1024
 PROCESS_TIMEOUT_SECONDS = 120
@@ -6170,7 +6119,7 @@ def install_official_binary(stage_current: Path, platform_key: str) -> dict[str,
         fail(f"Kimi Code binary manifest is invalid JSON: {exc}")
     if not isinstance(manifest, dict):
         fail("Kimi Code binary manifest must be a JSON object")
-    if manifest.get("version") != KIMI_PACKAGE_VERSION or manifest.get("tag") != KIMI_GIT_TAG:
+    if manifest.get("version") != KIMI_PACKAGE_VERSION:
         fail("Kimi Code binary manifest version does not match the pinned baseline")
     platforms = manifest.get("platforms")
     if (
@@ -6180,10 +6129,10 @@ def install_official_binary(stage_current: Path, platform_key: str) -> dict[str,
         fail("Kimi Code binary manifest platform entry does not match the pinned baseline")
     binary = KIMI_BINARY_PLATFORMS[platform_key]
     url = f"{KIMI_BINARY_BASE}/{KIMI_PACKAGE_VERSION}/{binary['filename']}"
-    observed_binary = KIMI_OBSERVED_BINARY_PLATFORMS.get(platform_key)
-    if not isinstance(observed_binary, dict):
+    artifact = KIMI_BINARY_ARTIFACTS.get(platform_key)
+    if not isinstance(artifact, dict):
         fail("Kimi Code binary size baseline is missing")
-    expected_size = observed_binary.get("size_bytes")
+    expected_size = artifact.get("size_bytes")
     if not isinstance(expected_size, int):
         fail("Kimi Code binary size baseline is invalid")
     binary_bytes = fetch_url_bytes(
@@ -6275,24 +6224,8 @@ def run_stage_version_probe(stage_current: Path, stage_workspace: Path) -> str:
 def software_source_contract() -> dict[str, Any]:
     return {
         "channel": "official-binary",
-        "install_script_url": KIMI_INSTALL_SCRIPT_URL,
-        "install_script_sha256": KIMI_INSTALL_SCRIPT_SHA256,
-        "install_powershell_url": KIMI_INSTALL_POWERSHELL_URL,
-        "install_powershell_sha256": KIMI_INSTALL_POWERSHELL_SHA256,
-        "install_powershell_size_bytes": KIMI_INSTALL_POWERSHELL_SIZE_BYTES,
-        "install_powershell_product_supported": False,
-        "latest_url": KIMI_LATEST_URL,
         "manifest_url": KIMI_BINARY_MANIFEST_URL,
         "manifest_sha256": KIMI_BINARY_MANIFEST_SHA256,
-        "github_release_url": KIMI_GITHUB_RELEASE_URL,
-        "github_release_api_url": KIMI_GITHUB_RELEASE_API_URL,
-        "github_release_id": KIMI_GITHUB_RELEASE_ID,
-        "git_tag": KIMI_GIT_TAG,
-        "git_tag_object": KIMI_GIT_TAG_OBJECT,
-        "git_commit": KIMI_GIT_COMMIT,
-        "npm_package": KIMI_PACKAGE_NAME,
-        "npm_integrity": KIMI_NPM_INTEGRITY,
-        "npm_shasum": KIMI_NPM_SHASUM,
     }
 
 

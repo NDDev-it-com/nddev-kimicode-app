@@ -1,5 +1,5 @@
 {
-  "contract_version": 3,
+  "contract_version": 4,
   "product_name": "nddev-kimicode-app",
   "github_repository": "NDDev-it-com/nddev-kimicode-app",
   "license": "AGPL-3.0-or-later",
@@ -83,10 +83,8 @@
   "runtime_compatibility": {
     "baseline_ref": "references/kimi-code-baseline.json",
     "command": "kimi",
-    "npm_package": "@moonshot-ai/kimi-code",
     "tested_release": "0.30.0",
     "official_install_channel": "official-binary",
-    "npm_alternative_recorded": true,
     "supported_hosts": [
       "macos-arm64",
       "macos-x64",
@@ -105,80 +103,44 @@
       "ubuntu-glibc-arm64": "linux-arm64",
       "ubuntu-glibc-x64": "linux-x64"
     },
-    "observed_vendor_platforms": [
-      "darwin-arm64",
-      "darwin-x64",
-      "linux-arm64",
-      "linux-x64",
-      "win32-arm64",
-      "win32-x64"
-    ],
-    "observed_vendor_artifacts": {
-      "darwin-arm64": {
-        "filename": "kimi-code-darwin-arm64",
-        "url": "https://code.kimi.com/kimi-code/binaries/0.30.0/kimi-code-darwin-arm64",
-        "size_bytes": 150706240,
-        "sha256": "65bb24c863c63707c1de6fafce9516ddb2ef9b90243426e2c92bb5287b342302",
-        "supported_product_hosts": [
-          "macos-arm64"
-        ]
-      },
-      "darwin-x64": {
-        "filename": "kimi-code-darwin-x64",
-        "url": "https://code.kimi.com/kimi-code/binaries/0.30.0/kimi-code-darwin-x64",
-        "size_bytes": 153056320,
-        "sha256": "4b214d0bde6e8ef5b48c6a075bb02831c4369ef9a3de6839cd37f19d7cdc6de3",
-        "supported_product_hosts": [
-          "macos-x64"
-        ]
-      },
-      "linux-arm64": {
-        "filename": "kimi-code-linux-arm64",
-        "url": "https://code.kimi.com/kimi-code/binaries/0.30.0/kimi-code-linux-arm64",
-        "size_bytes": 151260288,
-        "sha256": "beccea1fc4c04dd016d17e51c6a166d8c0451b2a327dcf7cbab2fbda06d8c19a",
-        "supported_product_hosts": [
-          "ubuntu-glibc-arm64"
-        ]
-      },
-      "linux-x64": {
-        "filename": "kimi-code-linux-x64",
-        "url": "https://code.kimi.com/kimi-code/binaries/0.30.0/kimi-code-linux-x64",
-        "size_bytes": 153619648,
-        "sha256": "e6f1f31b70f36d917b8630ba0e8779aace209592e846971f58e4e24c4d929745",
-        "supported_product_hosts": [
-          "ubuntu-glibc-x64"
-        ]
-      },
-      "win32-arm64": {
-        "filename": "kimi-code-win32-arm64.exe",
-        "url": "https://code.kimi.com/kimi-code/binaries/0.30.0/kimi-code-win32-arm64.exe",
-        "size_bytes": 110994432,
-        "sha256": "5f3692db5b54df4fb1874725223511834b5af8b2dbf2b9b343e05ada0754bd45",
-        "supported_product_hosts": []
-      },
-      "win32-x64": {
-        "filename": "kimi-code-win32-x64.exe",
-        "url": "https://code.kimi.com/kimi-code/binaries/0.30.0/kimi-code-win32-x64.exe",
-        "size_bytes": 122427392,
-        "sha256": "04e31ace0d7f8ca1bc69397ff5e95a4edeeed9813ea6028facf7d5277ded7c3f",
-        "supported_product_hosts": []
-      }
-    },
-    "official_windows_install_surface": {
-      "powershell_script_url": "https://code.kimi.com/kimi-code/install.ps1",
-      "powershell_script_sha256": "28a0473a7c56d41eae52cb4dbd3232f87a9133dd7af416a6a04dfbf7856fa9fc",
-      "powershell_script_size_bytes": 15891,
-      "product_supported": false
-    },
-    "ubuntu_glibc_version_floor": null,
-    "ubuntu_glibc_version_floor_source": "no-official-floor",
     "windows_supported": false,
     "macos_supported": true,
     "ubuntu_linux_glibc_supported": true,
     "generic_linux_supported": false,
     "non_ubuntu_linux_supported": false,
-    "linux_musl_supported": false
+    "linux_musl_supported": false,
+    "supported_vendor_platforms": [
+      "darwin-arm64",
+      "darwin-x64",
+      "linux-arm64",
+      "linux-x64"
+    ],
+    "supported_binary_artifacts": {
+      "darwin-arm64": {
+        "filename": "kimi-code-darwin-arm64",
+        "url": "https://code.kimi.com/kimi-code/binaries/0.30.0/kimi-code-darwin-arm64",
+        "size_bytes": 150706240,
+        "sha256": "65bb24c863c63707c1de6fafce9516ddb2ef9b90243426e2c92bb5287b342302"
+      },
+      "darwin-x64": {
+        "filename": "kimi-code-darwin-x64",
+        "url": "https://code.kimi.com/kimi-code/binaries/0.30.0/kimi-code-darwin-x64",
+        "size_bytes": 153056320,
+        "sha256": "4b214d0bde6e8ef5b48c6a075bb02831c4369ef9a3de6839cd37f19d7cdc6de3"
+      },
+      "linux-arm64": {
+        "filename": "kimi-code-linux-arm64",
+        "url": "https://code.kimi.com/kimi-code/binaries/0.30.0/kimi-code-linux-arm64",
+        "size_bytes": 151260288,
+        "sha256": "beccea1fc4c04dd016d17e51c6a166d8c0451b2a327dcf7cbab2fbda06d8c19a"
+      },
+      "linux-x64": {
+        "filename": "kimi-code-linux-x64",
+        "url": "https://code.kimi.com/kimi-code/binaries/0.30.0/kimi-code-linux-x64",
+        "size_bytes": 153619648,
+        "sha256": "e6f1f31b70f36d917b8630ba0e8779aace209592e846971f58e4e24c4d929745"
+      }
+    }
   },
   "software_lifecycle": {
     "stamp_file": "NDDEV-KIMICODE-SOFTWARE.json",

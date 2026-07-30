@@ -40,11 +40,10 @@ is absent.
 Legacy Bun state may be read for status, migrated, restored, or removed. It must
 never launch.
 
-Release versions, URLs, manifest hashes, upstream platform assets, product host
-mapping, and the no-official-floor Ubuntu/glibc observation are owned by
-`references/kimi-code-baseline.json` and `config/nddev-contract.json`. Windows
-artifacts and the official PowerShell installer are recorded as upstream
-observations only and remain product-unsupported.
+Runtime versions, official manifest pins, supported macOS/Ubuntu binary pins,
+and product host mapping are owned by `references/kimi-code-baseline.json` and
+`config/nddev-contract.json`. Windows remains an explicitly unsupported host
+category.
 
 ## Launch Isolation
 

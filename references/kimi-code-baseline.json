@@ -1,60 +1,27 @@
 {
-  "schema_version": 2,
-  "observed_at": "2026-07-29",
+  "schema_version": 3,
   "product": {
     "vendor": "Moonshot AI",
     "name": "Kimi Code CLI",
     "official_site": "https://www.kimi.com/code/"
   },
   "release": {
-    "npm_package": "@moonshot-ai/kimi-code",
-    "npm_version": "0.30.0",
-    "published_at": "2026-07-29T06:31:21.638Z",
-    "repository": "https://github.com/MoonshotAI/kimi-code",
-    "repository_directory": "apps/kimi-code",
-    "github_release_url": "https://github.com/MoonshotAI/kimi-code/releases/tag/%40moonshot-ai/kimi-code%400.30.0",
-    "github_release_id": 361494495,
-    "git_tag": "@moonshot-ai/kimi-code@0.30.0",
-    "git_tag_object": "ba037d3e56babf682144e4614e29844d83420de7",
-    "git_commit": "16c7189bd54a42fae65b1bbafd0843420523f797",
-    "node_engine": ">=22.19.0",
-    "tarball": "https://registry.npmjs.org/@moonshot-ai/kimi-code/-/kimi-code-0.30.0.tgz",
-    "integrity": "sha512-YhUXhduLxfdEFLtetQpkDIRYs290MlF7QuoH2XQJb6g6pEtYkr1jzam1kUUAqm58kQfetxw781u4qude3k2qPg==",
-    "shasum": "865fdaff69425882645d6ae2f74a08dea0e0efe3",
-    "npm_metadata_sha256": "4a341a6ff5cd5879f744db563e6c52bf5528b6253766bbf4c7651d32c62f5d4a",
-    "file_count": 214,
-    "unpacked_size": 29218405,
-    "bin": {
-      "kimi": "dist/main.mjs"
-    },
-    "scripts": {
-      "postinstall": "node scripts/postinstall.mjs"
-    },
-    "github_release_api_url": "https://api.github.com/repos/MoonshotAI/kimi-code/releases/tags/%40moonshot-ai%2Fkimi-code%400.30.0"
+    "version": "0.30.0"
   },
   "official_binary_install": {
-    "install_script_url": "https://code.kimi.com/kimi-code/install.sh",
-    "install_script_sha256": "638927825e96825edbb563de5e0cb06f8a0551c53e026ade8b717b0f25cb83d2",
-    "install_powershell_url": "https://code.kimi.com/kimi-code/install.ps1",
-    "install_powershell_sha256": "28a0473a7c56d41eae52cb4dbd3232f87a9133dd7af416a6a04dfbf7856fa9fc",
-    "install_powershell_size_bytes": 15891,
-    "install_powershell_product_supported": false,
-    "latest_url": "https://code.kimi.com/kimi-code/latest",
     "manifest_url": "https://code.kimi.com/kimi-code/binaries/0.30.0/manifest.json",
     "manifest_sha256": "7fbb2d9f2d39e45bb7fb48007ed6e70eeeea2f3c87cbc3cfe6230a4d1c9aade8",
-    "observed_vendor_platforms": [
-      "darwin-arm64",
-      "darwin-x64",
-      "linux-arm64",
-      "linux-x64",
-      "win32-arm64",
-      "win32-x64"
-    ],
-    "production_supported_hosts": [
+    "supported_hosts": [
       "macos-arm64",
       "macos-x64",
       "ubuntu-glibc-arm64",
       "ubuntu-glibc-x64"
+    ],
+    "supported_vendor_platforms": [
+      "darwin-arm64",
+      "darwin-x64",
+      "linux-arm64",
+      "linux-x64"
     ],
     "host_to_vendor_platform": {
       "macos-arm64": "darwin-arm64",
@@ -62,68 +29,32 @@
       "ubuntu-glibc-arm64": "linux-arm64",
       "ubuntu-glibc-x64": "linux-x64"
     },
-    "ubuntu_glibc_version_floor": null,
-    "ubuntu_glibc_version_floor_source": "no-official-floor",
     "platforms": {
       "darwin-arm64": {
         "filename": "kimi-code-darwin-arm64",
         "url": "https://code.kimi.com/kimi-code/binaries/0.30.0/kimi-code-darwin-arm64",
         "size_bytes": 150706240,
-        "sha256": "65bb24c863c63707c1de6fafce9516ddb2ef9b90243426e2c92bb5287b342302",
-        "checksum": "65bb24c863c63707c1de6fafce9516ddb2ef9b90243426e2c92bb5287b342302",
-        "supported_product_hosts": [
-          "macos-arm64"
-        ]
+        "sha256": "65bb24c863c63707c1de6fafce9516ddb2ef9b90243426e2c92bb5287b342302"
       },
       "darwin-x64": {
         "filename": "kimi-code-darwin-x64",
         "url": "https://code.kimi.com/kimi-code/binaries/0.30.0/kimi-code-darwin-x64",
         "size_bytes": 153056320,
-        "sha256": "4b214d0bde6e8ef5b48c6a075bb02831c4369ef9a3de6839cd37f19d7cdc6de3",
-        "checksum": "4b214d0bde6e8ef5b48c6a075bb02831c4369ef9a3de6839cd37f19d7cdc6de3",
-        "supported_product_hosts": [
-          "macos-x64"
-        ]
+        "sha256": "4b214d0bde6e8ef5b48c6a075bb02831c4369ef9a3de6839cd37f19d7cdc6de3"
       },
       "linux-arm64": {
         "filename": "kimi-code-linux-arm64",
         "url": "https://code.kimi.com/kimi-code/binaries/0.30.0/kimi-code-linux-arm64",
         "size_bytes": 151260288,
-        "sha256": "beccea1fc4c04dd016d17e51c6a166d8c0451b2a327dcf7cbab2fbda06d8c19a",
-        "checksum": "beccea1fc4c04dd016d17e51c6a166d8c0451b2a327dcf7cbab2fbda06d8c19a",
-        "supported_product_hosts": [
-          "ubuntu-glibc-arm64"
-        ]
+        "sha256": "beccea1fc4c04dd016d17e51c6a166d8c0451b2a327dcf7cbab2fbda06d8c19a"
       },
       "linux-x64": {
         "filename": "kimi-code-linux-x64",
         "url": "https://code.kimi.com/kimi-code/binaries/0.30.0/kimi-code-linux-x64",
         "size_bytes": 153619648,
-        "sha256": "e6f1f31b70f36d917b8630ba0e8779aace209592e846971f58e4e24c4d929745",
-        "checksum": "e6f1f31b70f36d917b8630ba0e8779aace209592e846971f58e4e24c4d929745",
-        "supported_product_hosts": [
-          "ubuntu-glibc-x64"
-        ]
-      },
-      "win32-arm64": {
-        "filename": "kimi-code-win32-arm64.exe",
-        "url": "https://code.kimi.com/kimi-code/binaries/0.30.0/kimi-code-win32-arm64.exe",
-        "size_bytes": 110994432,
-        "sha256": "5f3692db5b54df4fb1874725223511834b5af8b2dbf2b9b343e05ada0754bd45",
-        "checksum": "5f3692db5b54df4fb1874725223511834b5af8b2dbf2b9b343e05ada0754bd45",
-        "supported_product_hosts": []
-      },
-      "win32-x64": {
-        "filename": "kimi-code-win32-x64.exe",
-        "url": "https://code.kimi.com/kimi-code/binaries/0.30.0/kimi-code-win32-x64.exe",
-        "size_bytes": 122427392,
-        "sha256": "04e31ace0d7f8ca1bc69397ff5e95a4edeeed9813ea6028facf7d5277ded7c3f",
-        "checksum": "04e31ace0d7f8ca1bc69397ff5e95a4edeeed9813ea6028facf7d5277ded7c3f",
-        "supported_product_hosts": []
+        "sha256": "e6f1f31b70f36d917b8630ba0e8779aace209592e846971f58e4e24c4d929745"
       }
-    },
-    "source_family": "code.kimi.com-binary-manifest",
-    "manifest_size_bytes": 929
+    }
   },
   "runtime": {
     "command": "kimi",
@@ -140,12 +71,7 @@
     "credentials": "$KIMI_CODE_HOME/credentials/",
     "sessions": "$KIMI_CODE_HOME/sessions/",
     "logs": "$KIMI_CODE_HOME/logs/",
-    "updates": "$KIMI_CODE_HOME/updates/",
-    "cli_parser": {
-      "source_path": "apps/kimi-code/src/cli/commands.ts",
-      "git_commit": "16c7189bd54a42fae65b1bbafd0843420523f797",
-      "source_url": "https://github.com/MoonshotAI/kimi-code/blob/16c7189bd54a42fae65b1bbafd0843420523f797/apps/kimi-code/src/cli/commands.ts"
-    }
+    "updates": "$KIMI_CODE_HOME/updates/"
   },
   "permission_model": {
     "safe": "manual with plan mode enabled",
@@ -161,25 +87,6 @@
     "plugins": "source only unless Kimi native plugin management installs it",
     "direct_plugin_install_state_write": false
   },
-  "sources": [
-    "https://www.kimi.com/code/",
-    "https://moonshotai.github.io/kimi-code/en/guides/getting-started",
-    "https://www.kimi.com/code/docs/en/kimi-code-cli/reference/kimi-command.html",
-    "https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/config-files.html",
-    "https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/data-locations.html",
-    "https://www.kimi.com/code/docs/en/kimi-code-cli/configuration/env-vars.html",
-    "https://www.kimi.com/code/docs/en/kimi-code-cli/customization/skills.html",
-    "https://www.kimi.com/code/docs/en/kimi-code-cli/customization/agents.html",
-    "https://www.kimi.com/code/docs/en/kimi-code-cli/customization/mcp.html",
-    "https://www.kimi.com/code/docs/en/kimi-code-cli/customization/hooks.html",
-    "https://www.kimi.com/code/docs/en/kimi-code-cli/customization/plugins.html",
-    "https://www.kimi.com/code/docs/en/kimi-code-cli/release-notes/changelog.html",
-    "https://registry.npmjs.org/@moonshot-ai%2fkimi-code/latest",
-    "https://api.github.com/repos/MoonshotAI/kimi-code/releases/latest",
-    "https://code.kimi.com/kimi-code/latest",
-    "https://code.kimi.com/kimi-code/binaries/0.30.0/manifest.json",
-    "https://api.github.com/repos/MoonshotAI/kimi-code/releases/tags/%40moonshot-ai%2Fkimi-code%400.30.0"
-  ],
   "unsupported": {
     "windows": true,
     "non_ubuntu_linux": true,

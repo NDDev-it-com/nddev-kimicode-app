@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- Public runtime metadata now contains only the official manifest and supported
+  macOS/Ubuntu binary pins consumed by the setup manager.
+- Non-runtime vendor distribution observations are no longer part of public
+  manager stamps, baselines, manifests, or contracts.
+
 ## 0.2.0 - 2026-07-27
 
 ### Added

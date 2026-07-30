@@ -31,19 +31,17 @@ identity from the current public catalog.
 
 ## Runtime Baseline
 
-The current Kimi release, official binary manifest, upstream platform assets,
-npm metadata, and source URLs are owned by
-`references/kimi-code-baseline.json`. Supported product hosts and their mapping
-to upstream asset keys are owned by `config/nddev-contract.json`; command
-behavior is owned by `cli-tools/nddev_kimicode.py`.
+The current Kimi runtime version, official binary manifest, and supported
+macOS/Ubuntu binary pins are owned by `references/kimi-code-baseline.json`.
+Supported product hosts and their mapping to upstream asset keys are owned by
+`config/nddev-contract.json`; command behavior is owned by
+`cli-tools/nddev_kimicode.py`.
 
 `software-status` is structural and does not execute `kimi`. `install-cli`,
 `update-cli`, `migrate-cli`, and `remove-cli` own the target-owned Kimi software
 lifecycle. `remove-cli` is a deterministic no-op when target-owned software
 presence is absent. Ubuntu desktop and server share the same `ID=ubuntu` glibc
-host check; upstream publishes no official Ubuntu/glibc version floor. Windows
-artifacts and the official PowerShell installer are recorded as upstream
-observations only and remain product-unsupported.
+host check. Windows remains an explicitly unsupported host category.
 
 `launch` holds the managed lifecycle boundary until the child process exits, so
 setup, profile, software, restore, and remove mutations fail while the managed

@@ -109,11 +109,27 @@ def validate_metadata() -> None:
     full_auto = load_json("profiles/full-auto/profile.json")
     constants = manager_constants()
 
-    if {version, build.get("build_version"), manifest.get("build_version"), plugin.get("version")} != {
-        version
+    schemas = {
+        "build/version.json": build.get("schema_version"),
+        "build/manifest.json": manifest.get("schema_version"),
+        "config/nddev-contract.json": contract.get("contract_version"),
+        "references/kimi-code-baseline.json": baseline.get("schema_version"),
+    }
+    if schemas != {
+        "build/version.json": 4,
+        "build/manifest.json": 3,
+        "config/nddev-contract.json": 4,
+        "references/kimi-code-baseline.json": 3,
     }:
+        raise ValueError(f"public metadata schema versions are not synchronized: {schemas}")
+    if {
+        version,
+        build.get("build_version"),
+        manifest.get("build_version"),
+        plugin.get("version"),
+    } != {version}:
         raise ValueError("public build versions are not synchronized")
-    runtime = baseline.get("release", {}).get("npm_version")
+    runtime = baseline.get("release", {}).get("version")
     if {
         runtime,
         build.get("kimi_code_cli_tested"),
@@ -149,6 +165,7 @@ def validate_metadata() -> None:
 
 
 def validate_integrity_metadata() -> None:
+    build = load_json("build/version.json")
     baseline = load_json("references/kimi-code-baseline.json")
     manifest = load_json("build/manifest.json")
     contract = load_json("config/nddev-contract.json")
@@ -163,15 +180,136 @@ def validate_integrity_metadata() -> None:
     }
     forbidden_constants = {
         "KIMI_GITHUB_RELEASE_ASSETS",
+        "KIMI_GITHUB_RELEASE_API_URL",
+        "KIMI_GITHUB_RELEASE_ID",
+        "KIMI_GITHUB_RELEASE_URL",
+        "KIMI_GIT_COMMIT",
+        "KIMI_GIT_TAG",
+        "KIMI_GIT_TAG_OBJECT",
+        "KIMI_INSTALL_POWERSHELL_SHA256",
+        "KIMI_INSTALL_POWERSHELL_SIZE_BYTES",
+        "KIMI_INSTALL_POWERSHELL_URL",
+        "KIMI_INSTALL_SCRIPT_SHA256",
+        "KIMI_INSTALL_SCRIPT_URL",
+        "KIMI_LATEST_URL",
+        "KIMI_NPM_FILE_COUNT",
+        "KIMI_NPM_INTEGRITY",
+        "KIMI_NPM_METADATA_SHA256",
+        "KIMI_NPM_SHASUM",
+        "KIMI_NPM_UNPACKED_SIZE",
+        "KIMI_OBSERVED_BINARY_PLATFORMS",
+        "KIMI_OBSERVED_VENDOR_PLATFORMS",
+        "KIMI_PACKAGE_NAME",
+        "KIMI_UBUNTU_GLIBC_VERSION_FLOOR",
         "KIMI_VENDOR_DISTRIBUTION_OBSERVATIONS",
     }
     present_constants = sorted(forbidden_constants & manager_assignments)
     if present_constants:
         raise ValueError(f"manager exposes raw vendor observations: {present_constants}")
 
-    raw_field = "vendor_distribution_observations"
-    if f'"{raw_field}"' in manager_source or f"'{raw_field}'" in manager_source:
-        raise ValueError(f"manager must not publish {raw_field}")
+    source_contract_keys: set[str] | None = None
+    for node in manager_tree.body:
+        if isinstance(node, ast.FunctionDef) and node.name == "software_source_contract":
+            returns = [
+                candidate
+                for candidate in ast.walk(node)
+                if isinstance(candidate, ast.Return) and isinstance(candidate.value, ast.Dict)
+            ]
+            if len(returns) == 1:
+                keys = returns[0].value.keys
+                if all(
+                    isinstance(key, ast.Constant) and isinstance(key.value, str) for key in keys
+                ):
+                    source_contract_keys = {str(key.value) for key in keys}
+            break
+    if source_contract_keys != {"channel", "manifest_url", "manifest_sha256"}:
+        raise ValueError(
+            f"manager source contract exposes non-runtime keys: {source_contract_keys}"
+        )
+
+    forbidden_keys = {
+        "checksum",
+        "file_count",
+        "git_commit",
+        "git_tag",
+        "git_tag_object",
+        "github_release_api_url",
+        "github_release_id",
+        "github_release_url",
+        "install_powershell_product_supported",
+        "install_powershell_sha256",
+        "install_powershell_size_bytes",
+        "install_powershell_url",
+        "install_script_sha256",
+        "install_script_url",
+        "integrity",
+        "kimi_code_cli_package",
+        "latest_url",
+        "manifest_size_bytes",
+        "node_engine",
+        "npm_alternative_recorded",
+        "npm_metadata_sha256",
+        "npm_package",
+        "observed_at",
+        "observed_vendor_artifacts",
+        "observed_vendor_platforms",
+        "official_windows_install_surface",
+        "published_at",
+        "shasum",
+        "source_family",
+        "source_path",
+        "source_url",
+        "supported_product_hosts",
+        "tarball",
+        "ubuntu_glibc_version_floor",
+        "ubuntu_glibc_version_floor_source",
+        "unpacked_size",
+        "vendor_distribution_observations",
+    }
+
+    def find_forbidden_keys(value: object, path: str) -> list[str]:
+        findings: list[str] = []
+        if isinstance(value, dict):
+            for key, child in value.items():
+                child_path = f"{path}.{key}"
+                if key in forbidden_keys:
+                    findings.append(child_path)
+                findings.extend(find_forbidden_keys(child, child_path))
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                findings.extend(find_forbidden_keys(child, f"{path}[{index}]"))
+        return findings
+
+    public_documents = {
+        "build/version.json": build,
+        "baseline": baseline,
+        "manifest": manifest,
+        "contract": contract,
+    }
+    raw_key_paths = sorted(
+        path
+        for owner, value in public_documents.items()
+        for path in find_forbidden_keys(value, owner)
+    )
+    if raw_key_paths:
+        raise ValueError(f"public metadata exposes raw vendor keys: {raw_key_paths}")
+
+    observation_text = manager_source + json.dumps(public_documents, sort_keys=True)
+    forbidden_endpoints = {
+        "@moonshot-ai/kimi-code",
+        "https://api.github.com/repos/MoonshotAI/kimi-code",
+        "https://code.kimi.com/kimi-code/install.",
+        "https://code.kimi.com/kimi-code/latest",
+        "https://github.com/MoonshotAI/kimi-code",
+        "https://registry.npmjs.org/@moonshot-ai",
+        "win32-",
+    }
+    present_endpoints = sorted(
+        endpoint for endpoint in forbidden_endpoints if endpoint in observation_text
+    )
+    if present_endpoints:
+        raise ValueError(f"public metadata exposes raw vendor endpoints: {present_endpoints}")
+
     public_owners = {
         "baseline": baseline,
         "manifest": manifest.get("software_install", {}),
@@ -180,8 +318,6 @@ def validate_integrity_metadata() -> None:
     for owner, value in public_owners.items():
         if not isinstance(value, dict):
             raise ValueError(f"{owner} integrity metadata must be an object")
-        if raw_field in value:
-            raise ValueError(f"{owner} must not publish {raw_field}")
 
     official_install = baseline.get("official_binary_install", {})
     manifest_install = manifest.get("software_install", {})
@@ -210,33 +346,43 @@ def validate_integrity_metadata() -> None:
         "darwin-x64",
         "linux-arm64",
         "linux-x64",
-        "win32-arm64",
-        "win32-x64",
     }:
-        raise ValueError("official binary artifact catalog is incomplete")
+        raise ValueError("supported official binary artifact catalog is invalid")
     artifact_fields = (
         "filename",
         "url",
         "size_bytes",
         "sha256",
-        "supported_product_hosts",
     )
     artifact_projection = {
         platform: {field: artifact.get(field) for field in artifact_fields}
         for platform, artifact in artifacts.items()
         if isinstance(artifact, dict)
     }
-    manifest_artifacts = manifest.get("software_runtime", {}).get(
-        "observed_vendor_artifacts"
-    )
-    contract_artifacts = contract.get("runtime_compatibility", {}).get(
-        "observed_vendor_artifacts"
-    )
+    manifest_runtime = manifest.get("software_runtime", {})
+    contract_runtime = contract.get("runtime_compatibility", {})
+    manifest_artifacts = manifest_runtime.get("supported_binary_artifacts")
+    contract_artifacts = contract_runtime.get("supported_binary_artifacts")
     if artifact_projection != manifest_artifacts or artifact_projection != contract_artifacts:
         raise ValueError("official binary platform pins drifted")
+    supported_platforms = list(artifacts)
+    if (
+        official_install.get("supported_vendor_platforms") != supported_platforms
+        or manifest_runtime.get("supported_vendor_platforms") != supported_platforms
+        or contract_runtime.get("supported_vendor_platforms") != supported_platforms
+    ):
+        raise ValueError("supported vendor platform catalogs drifted")
     for platform, artifact in artifacts.items():
         if not isinstance(artifact, dict):
             raise ValueError(f"{platform} artifact must be an object")
+        if set(artifact) != set(artifact_fields):
+            raise ValueError(f"{platform} artifact keys are invalid")
+        expected_url = (
+            f"https://code.kimi.com/kimi-code/binaries/"
+            f"{baseline.get('release', {}).get('version')}/{artifact.get('filename')}"
+        )
+        if artifact.get("url") != expected_url:
+            raise ValueError(f"{platform} artifact URL is invalid")
         if not re.fullmatch(r"[0-9a-f]{64}", str(artifact.get("sha256"))):
             raise ValueError(f"{platform} artifact sha256 is invalid")
         if not isinstance(artifact.get("size_bytes"), int) or artifact["size_bytes"] <= 0:
@@ -261,7 +407,14 @@ def validate_builder_tree() -> None:
 def validate_release_and_workflows() -> None:
     for workflow in WORKFLOWS:
         text = require_file(f".github/workflows/{workflow}").read_text(encoding="utf-8")
-        if workflow in {"actionlint.yml", "codeql.yml", "dependency-review.yml", "scorecard.yml", "secret-scan.yml", "zizmor.yml"}:
+        if workflow in {
+            "actionlint.yml",
+            "codeql.yml",
+            "dependency-review.yml",
+            "scorecard.yml",
+            "secret-scan.yml",
+            "zizmor.yml",
+        }:
             if SHARED_WORKFLOW_PIN not in text:
                 raise ValueError(f"{workflow}: shared workflow pin mismatch")
     release = require_file(".github/workflows/release.yml").read_text(encoding="utf-8")
