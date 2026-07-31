@@ -6,7 +6,7 @@
 
 - Advance the public build and native nddev-builder projection to `0.3.1`.
 - Pin the official Kimi Code runtime, raw binary manifest, URLs, sizes, and
-  SHA-256 digests to `0.31.0`.
+  SHA-256 digests to `0.31.1`.
 - Public runtime metadata now contains only the official manifest and supported
   macOS/Ubuntu binary pins consumed by the setup manager.
 - Non-runtime vendor distribution observations are no longer part of public
