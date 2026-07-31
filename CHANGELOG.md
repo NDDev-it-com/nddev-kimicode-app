@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## [0.3.1]
+
 ### Changed
 
 - Advance the public build and native nddev-builder projection to `0.3.1`.
