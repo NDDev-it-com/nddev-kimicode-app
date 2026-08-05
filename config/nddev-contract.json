@@ -83,7 +83,7 @@
   "runtime_compatibility": {
     "baseline_ref": "references/kimi-code-baseline.json",
     "command": "kimi",
-    "tested_release": "0.31.1",
+    "tested_release": "0.32.0",
     "official_install_channel": "official-binary",
     "supported_hosts": [
       "macos-arm64",
@@ -118,27 +118,27 @@
     "supported_binary_artifacts": {
       "darwin-arm64": {
         "filename": "kimi-code-darwin-arm64",
-        "url": "https://code.kimi.com/kimi-code/binaries/0.31.1/kimi-code-darwin-arm64",
-        "size_bytes": 161389504,
-        "sha256": "8f2403eddc82229d4593e0e9baa2ef9e51390221ebfe82eaa757521f29c454fc"
+        "url": "https://code.kimi.com/kimi-code/binaries/0.32.0/kimi-code-darwin-arm64",
+        "size_bytes": 163519552,
+        "sha256": "c3009019e0f8f0e6c30550643b78ebd0c91815423b915352fcd0914945950a42"
       },
       "darwin-x64": {
         "filename": "kimi-code-darwin-x64",
-        "url": "https://code.kimi.com/kimi-code/binaries/0.31.1/kimi-code-darwin-x64",
-        "size_bytes": 163735456,
-        "sha256": "cffc0e3bd4a5957248456bbfeea3ee0aeb5490b1f16b40a5459f49b38c9afeaa"
+        "url": "https://code.kimi.com/kimi-code/binaries/0.32.0/kimi-code-darwin-x64",
+        "size_bytes": 165853120,
+        "sha256": "cc5a0c113d59dd5cfd68c2a2c40e5a892cdec87f58ce7cea8e14d4b7379cd587"
       },
       "linux-arm64": {
         "filename": "kimi-code-linux-arm64",
-        "url": "https://code.kimi.com/kimi-code/binaries/0.31.1/kimi-code-linux-arm64",
-        "size_bytes": 161877120,
-        "sha256": "40bde006af29c5597a98457edb5f25000e78a8fe33a75ab19e724c1092cccca0"
+        "url": "https://code.kimi.com/kimi-code/binaries/0.32.0/kimi-code-linux-arm64",
+        "size_bytes": 163974272,
+        "sha256": "59b7134d93ebc46c31194753ae5bf610dde9531f2290345915913525af6ad30d"
       },
       "linux-x64": {
         "filename": "kimi-code-linux-x64",
-        "url": "https://code.kimi.com/kimi-code/binaries/0.31.1/kimi-code-linux-x64",
-        "size_bytes": 164236480,
-        "sha256": "a6928c6a08a4beabeeca1a43985cec5c1a5fbe893b8f8ed427c7dd8e67e63850"
+        "url": "https://code.kimi.com/kimi-code/binaries/0.32.0/kimi-code-linux-x64",
+        "size_bytes": 166333632,
+        "sha256": "8f6b024adc26c8634cf742e625aa8fa77e3bcade26e293eaba03683acccaca6b"
       }
     }
   },
@@ -158,8 +158,8 @@
     "remove_precondition": "remove-cli is a deterministic no-op when target-owned software presence is absent and otherwise removes only target-owned software paths",
     "remove_absent_noop": true,
     "channel": "official-binary",
-    "manifest_url": "https://code.kimi.com/kimi-code/binaries/0.31.1/manifest.json",
-    "manifest_sha256": "41dec9f3fc3566c25fe46111f38bfc9337a1cf7a2ba04f6d9fcf7fa19f9e7c99",
+    "manifest_url": "https://code.kimi.com/kimi-code/binaries/0.32.0/manifest.json",
+    "manifest_sha256": "8084e851c478425af583b6b85f717abce03f07295507ff21b368eadc07b18a03",
     "target_owned": true,
     "software_root": ".nddev-kimicode-software/current",
     "entrypoint": "bin/kimi",
@@ -183,7 +183,7 @@
       "/absolute/target/bin/kimi"
     ],
     "manager_command": "python3 cli-tools/nddev_kimicode.py launch --target /absolute/target --",
-    "required_version": "0.31.1",
+    "required_version": "0.32.0",
     "environment_variable": "NDDEV_KIMICODE_TARGET",
     "forwards_arguments": true,
     "forwards_child_exit_code": true,

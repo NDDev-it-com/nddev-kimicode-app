@@ -91,38 +91,38 @@ CONTENT_MANAGED_BASE_PATHS = (
 MERGED_MARKER_PATHS = {"config.toml", "tui.toml", "AGENTS.md"}
 ID_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 
-KIMI_PACKAGE_VERSION = "0.31.1"
+KIMI_PACKAGE_VERSION = "0.32.0"
 KIMI_COMMAND = "kimi"
 KIMI_BINARY_BASE = "https://code.kimi.com/kimi-code/binaries"
 KIMI_BINARY_MANIFEST_URL = f"{KIMI_BINARY_BASE}/{KIMI_PACKAGE_VERSION}/manifest.json"
-KIMI_BINARY_MANIFEST_SHA256 = "41dec9f3fc3566c25fe46111f38bfc9337a1cf7a2ba04f6d9fcf7fa19f9e7c99"
+KIMI_BINARY_MANIFEST_SHA256 = "8084e851c478425af583b6b85f717abce03f07295507ff21b368eadc07b18a03"
 KIMI_BINARY_ARTIFACTS = {
     "darwin-arm64": {
         "filename": "kimi-code-darwin-arm64",
         "url": f"{KIMI_BINARY_BASE}/{KIMI_PACKAGE_VERSION}/kimi-code-darwin-arm64",
-        "size_bytes": 161389504,
-        "sha256": "8f2403eddc82229d4593e0e9baa2ef9e51390221ebfe82eaa757521f29c454fc",
+        "size_bytes": 163519552,
+        "sha256": "c3009019e0f8f0e6c30550643b78ebd0c91815423b915352fcd0914945950a42",
         "supported_product_hosts": ["macos-arm64"],
     },
     "darwin-x64": {
         "filename": "kimi-code-darwin-x64",
         "url": f"{KIMI_BINARY_BASE}/{KIMI_PACKAGE_VERSION}/kimi-code-darwin-x64",
-        "size_bytes": 163735456,
-        "sha256": "cffc0e3bd4a5957248456bbfeea3ee0aeb5490b1f16b40a5459f49b38c9afeaa",
+        "size_bytes": 165853120,
+        "sha256": "cc5a0c113d59dd5cfd68c2a2c40e5a892cdec87f58ce7cea8e14d4b7379cd587",
         "supported_product_hosts": ["macos-x64"],
     },
     "linux-arm64": {
         "filename": "kimi-code-linux-arm64",
         "url": f"{KIMI_BINARY_BASE}/{KIMI_PACKAGE_VERSION}/kimi-code-linux-arm64",
-        "size_bytes": 161877120,
-        "sha256": "40bde006af29c5597a98457edb5f25000e78a8fe33a75ab19e724c1092cccca0",
+        "size_bytes": 163974272,
+        "sha256": "59b7134d93ebc46c31194753ae5bf610dde9531f2290345915913525af6ad30d",
         "supported_product_hosts": ["ubuntu-glibc-arm64"],
     },
     "linux-x64": {
         "filename": "kimi-code-linux-x64",
         "url": f"{KIMI_BINARY_BASE}/{KIMI_PACKAGE_VERSION}/kimi-code-linux-x64",
-        "size_bytes": 164236480,
-        "sha256": "a6928c6a08a4beabeeca1a43985cec5c1a5fbe893b8f8ed427c7dd8e67e63850",
+        "size_bytes": 166333632,
+        "sha256": "8f6b024adc26c8634cf742e625aa8fa77e3bcade26e293eaba03683acccaca6b",
         "supported_product_hosts": ["ubuntu-glibc-x64"],
     },
 }
