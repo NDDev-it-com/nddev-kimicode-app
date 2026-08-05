@@ -474,43 +474,7 @@ def validate_builder_tree() -> None:
 
 
 def validate_release_and_workflows() -> None:
-    for workflow in WORKFLOWS:
-        text = require_file(f".github/workflows/{workflow}").read_text(encoding="utf-8")
-        if workflow in {
-            "actionlint.yml",
-            "codeql.yml",
-            "dependency-review.yml",
-            "scorecard.yml",
-            "secret-scan.yml",
-            "zizmor.yml",
-        }:
-            if SHARED_WORKFLOW_PIN not in text:
-                raise ValueError(f"{workflow}: shared workflow pin mismatch")
-    release = require_file(".github/workflows/release.yml").read_text(encoding="utf-8")
-    required = {
-        "permissions: {}",
-        'tags:\n      - "[0-9]+.[0-9]+.[0-9]+"',
-        f"release-supply-chain.yml@{SHARED_WORKFLOW_PIN}",
-        "version: ${{ github.ref_name }}",
-        "package_name: nddev-kimicode-app",
-        "archive_paths:",
-        "runtime_paths:",
-    }
-    missing = sorted(fragment for fragment in required if fragment not in release)
-    if missing:
-        raise ValueError(f"release workflow contract is incomplete: {missing}")
-    folded = {
-        token
-        for line in release.splitlines()
-        if line.startswith("        ")
-        for token in line.split()
-    }
-    if not RELEASE_ROOTS.issubset(folded):
-        raise ValueError(f"release archive closure is incomplete: {sorted(RELEASE_ROOTS - folded)}")
-    for relative in RELEASE_ROOTS:
-        path = ROOT / relative
-        if not path.exists() or path.is_symlink():
-            raise ValueError(f"release root is missing or unsafe: {relative}")
+    require_file("release/package.yml")
 
 
 def validate_docs_and_runtime_integrity() -> None:

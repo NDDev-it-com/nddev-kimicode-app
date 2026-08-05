@@ -1,0 +1,9 @@
+schema_version: 1
+package_name: nddev-kimicode-app
+version_source: VERSION
+archive_paths: >-
+  .claude .gds .github AGENTS.md CHANGELOG.md LICENSE README.md VERSION build builder
+  cli-tools config docs profiles references setups release
+runtime_paths: >-
+  .claude .gds .github AGENTS.md CHANGELOG.md LICENSE README.md VERSION build builder
+  cli-tools config docs profiles references setups
