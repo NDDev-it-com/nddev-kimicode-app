@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## [0.3.3] - 2026-08-05
+
+### Changed
+
+- Pin Kimi Code CLI `0.33.0` and refresh the exact official manifest identity,
+  supported binary URLs, content lengths, and SHA-256 digests.
+
 ## [0.3.2] - 2026-08-05
 
 ### Changed

@@ -91,38 +91,38 @@ CONTENT_MANAGED_BASE_PATHS = (
 MERGED_MARKER_PATHS = {"config.toml", "tui.toml", "AGENTS.md"}
 ID_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 
-KIMI_PACKAGE_VERSION = "0.32.0"
+KIMI_PACKAGE_VERSION = "0.33.0"
 KIMI_COMMAND = "kimi"
 KIMI_BINARY_BASE = "https://code.kimi.com/kimi-code/binaries"
 KIMI_BINARY_MANIFEST_URL = f"{KIMI_BINARY_BASE}/{KIMI_PACKAGE_VERSION}/manifest.json"
-KIMI_BINARY_MANIFEST_SHA256 = "8084e851c478425af583b6b85f717abce03f07295507ff21b368eadc07b18a03"
+KIMI_BINARY_MANIFEST_SHA256 = "7c2dc5362e0b2781981db847013ac8e23cf546af45857d3499108b1d787c6bad"
 KIMI_BINARY_ARTIFACTS = {
     "darwin-arm64": {
         "filename": "kimi-code-darwin-arm64",
         "url": f"{KIMI_BINARY_BASE}/{KIMI_PACKAGE_VERSION}/kimi-code-darwin-arm64",
-        "size_bytes": 163519552,
-        "sha256": "c3009019e0f8f0e6c30550643b78ebd0c91815423b915352fcd0914945950a42",
+        "size_bytes": 176663104,
+        "sha256": "befb752584de4be1e7fb5a6ec28dbc153fef19da8787a2ceb134039b5579063f",
         "supported_product_hosts": ["macos-arm64"],
     },
     "darwin-x64": {
         "filename": "kimi-code-darwin-x64",
         "url": f"{KIMI_BINARY_BASE}/{KIMI_PACKAGE_VERSION}/kimi-code-darwin-x64",
-        "size_bytes": 165853120,
-        "sha256": "cc5a0c113d59dd5cfd68c2a2c40e5a892cdec87f58ce7cea8e14d4b7379cd587",
+        "size_bytes": 179013184,
+        "sha256": "36ac0e1ed5ef6f125e1dfc2fdad07dee6201270503f88e8bfe128e7cb4cc0896",
         "supported_product_hosts": ["macos-x64"],
     },
     "linux-arm64": {
         "filename": "kimi-code-linux-arm64",
         "url": f"{KIMI_BINARY_BASE}/{KIMI_PACKAGE_VERSION}/kimi-code-linux-arm64",
-        "size_bytes": 163974272,
-        "sha256": "59b7134d93ebc46c31194753ae5bf610dde9531f2290345915913525af6ad30d",
+        "size_bytes": 177015936,
+        "sha256": "63c42bbf09bfa79f581775f49f1632839311f15e357e5581e89ad0977fc5f180",
         "supported_product_hosts": ["ubuntu-glibc-arm64"],
     },
     "linux-x64": {
         "filename": "kimi-code-linux-x64",
         "url": f"{KIMI_BINARY_BASE}/{KIMI_PACKAGE_VERSION}/kimi-code-linux-x64",
-        "size_bytes": 166333632,
-        "sha256": "8f6b024adc26c8634cf742e625aa8fa77e3bcade26e293eaba03683acccaca6b",
+        "size_bytes": 179375296,
+        "sha256": "10a955774869102f6fede446f8e5651da20a12327881e28760f5a41aea3d80b7",
         "supported_product_hosts": ["ubuntu-glibc-x64"],
     },
 }
@@ -167,9 +167,15 @@ SOFTWARE_CURRENT_NAME = "current"
 SOFTWARE_STAGE_FRAGMENT = ".nddev-kimicode-software-stage"
 CURRENT_SOFTWARE_SCHEMA = 2
 LEGACY_SOFTWARE_SCHEMA = 1
-SOFTWARE_MAX_BYTES = 160 * 1024 * 1024
 SOFTWARE_MAX_PATHS = 128
 DOWNLOAD_MAX_BYTES = max(int(artifact["size_bytes"]) for artifact in KIMI_BINARY_ARTIFACTS.values())
+# The managed software tree must admit the largest exact pinned executable plus
+# a small, bounded allowance for manager-owned metadata.  Deriving this from
+# the canonical artifact table prevents a vendor size increase from making the
+# rollback path reject the manager's own staged tree while preserving a strict
+# upper bound for foreign content.
+SOFTWARE_METADATA_HEADROOM_BYTES = 1024 * 1024
+SOFTWARE_MAX_BYTES = DOWNLOAD_MAX_BYTES + SOFTWARE_METADATA_HEADROOM_BYTES
 PROCESS_OUTPUT_MAX_BYTES = 64 * 1024
 PROCESS_TIMEOUT_SECONDS = 120
 SOFTWARE_STAMP_KEYS_V2 = {

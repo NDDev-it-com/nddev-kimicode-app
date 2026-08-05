@@ -1,8 +1,8 @@
 {
   "schema_version": 3,
   "product_name": "nddev-kimicode-app",
-  "build_version": "0.3.2",
-  "kimi_code_cli_tested": "0.32.0",
+  "build_version": "0.3.3",
+  "kimi_code_cli_tested": "0.33.0",
   "kimi_code_cli_command": "kimi",
   "content_setup_ids": [
     "nddev-builder"
@@ -29,8 +29,8 @@
   },
   "software_install": {
     "channel": "official-binary",
-    "manifest_url": "https://code.kimi.com/kimi-code/binaries/0.32.0/manifest.json",
-    "manifest_sha256": "8084e851c478425af583b6b85f717abce03f07295507ff21b368eadc07b18a03",
+    "manifest_url": "https://code.kimi.com/kimi-code/binaries/0.33.0/manifest.json",
+    "manifest_sha256": "7c2dc5362e0b2781981db847013ac8e23cf546af45857d3499108b1d787c6bad",
     "target_owned": true,
     "status_executes_binary": false,
     "remove_absent_noop": true
@@ -71,27 +71,27 @@
     "supported_binary_artifacts": {
       "darwin-arm64": {
         "filename": "kimi-code-darwin-arm64",
-        "url": "https://code.kimi.com/kimi-code/binaries/0.32.0/kimi-code-darwin-arm64",
-        "size_bytes": 163519552,
-        "sha256": "c3009019e0f8f0e6c30550643b78ebd0c91815423b915352fcd0914945950a42"
+        "url": "https://code.kimi.com/kimi-code/binaries/0.33.0/kimi-code-darwin-arm64",
+        "size_bytes": 176663104,
+        "sha256": "befb752584de4be1e7fb5a6ec28dbc153fef19da8787a2ceb134039b5579063f"
       },
       "darwin-x64": {
         "filename": "kimi-code-darwin-x64",
-        "url": "https://code.kimi.com/kimi-code/binaries/0.32.0/kimi-code-darwin-x64",
-        "size_bytes": 165853120,
-        "sha256": "cc5a0c113d59dd5cfd68c2a2c40e5a892cdec87f58ce7cea8e14d4b7379cd587"
+        "url": "https://code.kimi.com/kimi-code/binaries/0.33.0/kimi-code-darwin-x64",
+        "size_bytes": 179013184,
+        "sha256": "36ac0e1ed5ef6f125e1dfc2fdad07dee6201270503f88e8bfe128e7cb4cc0896"
       },
       "linux-arm64": {
         "filename": "kimi-code-linux-arm64",
-        "url": "https://code.kimi.com/kimi-code/binaries/0.32.0/kimi-code-linux-arm64",
-        "size_bytes": 163974272,
-        "sha256": "59b7134d93ebc46c31194753ae5bf610dde9531f2290345915913525af6ad30d"
+        "url": "https://code.kimi.com/kimi-code/binaries/0.33.0/kimi-code-linux-arm64",
+        "size_bytes": 177015936,
+        "sha256": "63c42bbf09bfa79f581775f49f1632839311f15e357e5581e89ad0977fc5f180"
       },
       "linux-x64": {
         "filename": "kimi-code-linux-x64",
-        "url": "https://code.kimi.com/kimi-code/binaries/0.32.0/kimi-code-linux-x64",
-        "size_bytes": 166333632,
-        "sha256": "8f6b024adc26c8634cf742e625aa8fa77e3bcade26e293eaba03683acccaca6b"
+        "url": "https://code.kimi.com/kimi-code/binaries/0.33.0/kimi-code-linux-x64",
+        "size_bytes": 179375296,
+        "sha256": "10a955774869102f6fede446f8e5651da20a12327881e28760f5a41aea3d80b7"
       }
     }
   },
@@ -129,6 +129,6 @@
   "manager": "cli-tools/nddev_kimicode.py",
   "contract": "config/nddev-contract.json",
   "runtime_baseline": "references/kimi-code-baseline.json",
-  "nddev_builder_projection_version": "0.3.2",
+  "nddev_builder_projection_version": "0.3.3",
   "public_validator": "cli-tools/validate_public_contracts.py"
 }
