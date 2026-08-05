@@ -5440,6 +5440,11 @@ def remove_setup(target: Path) -> dict[str, Any]:
         cleanup_drained = drain_cleanup_journal(target)
         stamp = read_stamp(target)
         if stamp is None:
+            # A process can be interrupted after committed rollback sidecars
+            # are removed but before now-empty managed directories are pruned.
+            # ``remove`` is a mutation, so it may safely finish that bounded,
+            # ownership-checked cleanup even when the stamp is already absent.
+            prune_empty_managed_dirs(target)
             return {
                 "removed": None,
                 "cleanup_pending": False,
@@ -5479,6 +5484,11 @@ def remove_setup(target: Path) -> dict[str, Any]:
             if read_stamp(target) is not None:
                 fail("remove postcondition failed for setup stamp")
             file_transaction.commit()
+            # Rollback sidecars live beside the managed files and deliberately
+            # keep their parents non-empty until commit. Prune again after the
+            # sidecars are durably gone so managed directory skeletons do not
+            # survive a successful removal.
+            prune_empty_managed_dirs(target, remove_paths)
         except BaseException:
             if file_transaction is not None:
                 file_transaction.rollback()
