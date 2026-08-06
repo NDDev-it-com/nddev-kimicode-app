@@ -91,38 +91,38 @@ CONTENT_MANAGED_BASE_PATHS = (
 MERGED_MARKER_PATHS = {"config.toml", "tui.toml", "AGENTS.md"}
 ID_PATTERN = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 
-KIMI_PACKAGE_VERSION = "0.33.0"
+KIMI_PACKAGE_VERSION = "0.34.0"
 KIMI_COMMAND = "kimi"
 KIMI_BINARY_BASE = "https://code.kimi.com/kimi-code/binaries"
 KIMI_BINARY_MANIFEST_URL = f"{KIMI_BINARY_BASE}/{KIMI_PACKAGE_VERSION}/manifest.json"
-KIMI_BINARY_MANIFEST_SHA256 = "7c2dc5362e0b2781981db847013ac8e23cf546af45857d3499108b1d787c6bad"
+KIMI_BINARY_MANIFEST_SHA256 = "91bba9e4f59d9a2243ba36e6c60af1d94fe69e43da5c1427b59d1323f973e5f7"
 KIMI_BINARY_ARTIFACTS = {
     "darwin-arm64": {
         "filename": "kimi-code-darwin-arm64",
         "url": f"{KIMI_BINARY_BASE}/{KIMI_PACKAGE_VERSION}/kimi-code-darwin-arm64",
-        "size_bytes": 176663104,
-        "sha256": "befb752584de4be1e7fb5a6ec28dbc153fef19da8787a2ceb134039b5579063f",
+        "size_bytes": 176894272,
+        "sha256": "9f4337e10da47843f6b550474012a53ba8b30dd665f83b176a5cd479c5f7e859",
         "supported_product_hosts": ["macos-arm64"],
     },
     "darwin-x64": {
         "filename": "kimi-code-darwin-x64",
         "url": f"{KIMI_BINARY_BASE}/{KIMI_PACKAGE_VERSION}/kimi-code-darwin-x64",
-        "size_bytes": 179013184,
-        "sha256": "36ac0e1ed5ef6f125e1dfc2fdad07dee6201270503f88e8bfe128e7cb4cc0896",
+        "size_bytes": 179240224,
+        "sha256": "2fa6b3e2248f9edee0b05aa2d62120f67c9ab0fe16fc05a4dc4a26c176b286a3",
         "supported_product_hosts": ["macos-x64"],
     },
     "linux-arm64": {
         "filename": "kimi-code-linux-arm64",
         "url": f"{KIMI_BINARY_BASE}/{KIMI_PACKAGE_VERSION}/kimi-code-linux-arm64",
-        "size_bytes": 177015936,
-        "sha256": "63c42bbf09bfa79f581775f49f1632839311f15e357e5581e89ad0977fc5f180",
+        "size_bytes": 177278080,
+        "sha256": "db9c88d0f44420f1245cf745eadb569de18ecd83019ecab888b3028eddf36e87",
         "supported_product_hosts": ["ubuntu-glibc-arm64"],
     },
     "linux-x64": {
         "filename": "kimi-code-linux-x64",
         "url": f"{KIMI_BINARY_BASE}/{KIMI_PACKAGE_VERSION}/kimi-code-linux-x64",
-        "size_bytes": 179375296,
-        "sha256": "10a955774869102f6fede446f8e5651da20a12327881e28760f5a41aea3d80b7",
+        "size_bytes": 179571904,
+        "sha256": "1e05b9b78c4fc69abb7f9c3ade7e6e774daa87cc4a31773cdbd72f047d2e732e",
         "supported_product_hosts": ["ubuntu-glibc-x64"],
     },
 }
@@ -165,6 +165,7 @@ SOFTWARE_STAMP_NAME = "NDDEV-KIMICODE-SOFTWARE.json"
 SOFTWARE_DIR_NAME = ".nddev-kimicode-software"
 SOFTWARE_CURRENT_NAME = "current"
 SOFTWARE_STAGE_FRAGMENT = ".nddev-kimicode-software-stage"
+LAUNCH_RUNTIME_DIR_NAME = ".nddev-kimicode-runtime"
 CURRENT_SOFTWARE_SCHEMA = 2
 LEGACY_SOFTWARE_SCHEMA = 1
 SOFTWARE_MAX_PATHS = 128
@@ -176,6 +177,8 @@ DOWNLOAD_MAX_BYTES = max(int(artifact["size_bytes"]) for artifact in KIMI_BINARY
 # upper bound for foreign content.
 SOFTWARE_METADATA_HEADROOM_BYTES = 1024 * 1024
 SOFTWARE_MAX_BYTES = DOWNLOAD_MAX_BYTES + SOFTWARE_METADATA_HEADROOM_BYTES
+LAUNCH_RUNTIME_MAX_FILE_BYTES = 64 * 1024 * 1024
+LAUNCH_RUNTIME_MAX_PATHS = 4096
 PROCESS_OUTPUT_MAX_BYTES = 64 * 1024
 PROCESS_TIMEOUT_SECONDS = 120
 SOFTWARE_STAMP_KEYS_V2 = {
@@ -2499,6 +2502,17 @@ def cleanup_operation_kind_for_source(
         return "software-root-tree-rollback"
     if (
         path.parent == target
+        and label == "Kimi Code launch runtime"
+        and max_file_bytes == LAUNCH_RUNTIME_MAX_FILE_BYTES
+        and max_paths <= LAUNCH_RUNTIME_MAX_PATHS
+        and re.fullmatch(
+            rf"\.{re.escape(LAUNCH_RUNTIME_DIR_NAME)}\.nddev-kimicode-software-rollback\.[0-9]+\.[0-9]+\Z",
+            name,
+        )
+    ):
+        return "launch-runtime-tree-rollback"
+    if (
+        path.parent == target
         and label == "Kimi Code bin parent"
         and max_file_bytes == SOFTWARE_MAX_BYTES
         and max_paths <= 16
@@ -2562,7 +2576,7 @@ def cleanup_tombstone_is_allowed(target: Path, path: Path) -> bool:
             + r"|"
             + rf"\.{re.escape(target.name)}{re.escape(SOFTWARE_STAGE_FRAGMENT)}\.[0-9]+\.[0-9]+"
             + r"|"
-            + rf"\.(?:{re.escape(SOFTWARE_CURRENT_NAME)}|{re.escape(SOFTWARE_DIR_NAME)}|bin)\.nddev-kimicode-software-rollback\.[0-9]+\.[0-9]+"
+            + rf"\.(?:{re.escape(SOFTWARE_CURRENT_NAME)}|{re.escape(SOFTWARE_DIR_NAME)}|{re.escape(LAUNCH_RUNTIME_DIR_NAME)}|bin)\.nddev-kimicode-software-rollback\.[0-9]+\.[0-9]+"
             + r")\Z",
             path.name,
         )
@@ -5679,6 +5693,10 @@ def software_entrypoint(target: Path) -> Path:
     return target / "bin" / KIMI_COMMAND
 
 
+def launch_runtime_root(target: Path) -> Path:
+    return target / LAUNCH_RUNTIME_DIR_NAME
+
+
 def existing_path_label(path: Path, label: str) -> str | None:
     try:
         path.lstat()
@@ -6703,6 +6721,7 @@ def verify_removed_software_postcondition(target: Path) -> None:
         (software_root(target), SOFTWARE_DIR_NAME),
         (software_stamp_path(target), SOFTWARE_STAMP_NAME),
         (software_entrypoint(target), "bin/kimi"),
+        (launch_runtime_root(target), LAUNCH_RUNTIME_DIR_NAME),
     ):
         if path_exists_no_follow(path):
             fail(f"remove-cli postcondition failed: {label} remains")
@@ -6824,7 +6843,8 @@ def remove_software(target: Path) -> dict[str, Any]:
         cleanup_drained = drain_cleanup_journal(target)
         validate_safe_partial_software_presence(target)
         status = _software_status_payload_locked(target)
-        if not status["present"]:
+        runtime_present = path_exists_no_follow(launch_runtime_root(target))
+        if not status["present"] and not runtime_present:
             return {
                 "changed": cleanup_drained,
                 "version": None,
@@ -6852,6 +6872,12 @@ def remove_software(target: Path) -> dict[str, Any]:
                 label="software root",
                 max_file_bytes=SOFTWARE_MAX_BYTES,
                 max_paths=SOFTWARE_MAX_PATHS,
+            )
+            tree_transaction.stage_remove_tree(
+                launch_runtime_root(target),
+                label="Kimi Code launch runtime",
+                max_file_bytes=LAUNCH_RUNTIME_MAX_FILE_BYTES,
+                max_paths=LAUNCH_RUNTIME_MAX_PATHS,
             )
             if remove_bin_parent:
                 tree_transaction.stage_remove_tree(
@@ -6917,7 +6943,7 @@ def reject_managed_launch_overrides(child_args: list[str]) -> None:
 
 
 def ensure_launch_runtime_directories(canonical: Path) -> tuple[Path, Path, Path]:
-    runtime = canonical / ".nddev-kimicode-runtime"
+    runtime = launch_runtime_root(canonical)
     home = runtime / "home"
     tmp = runtime / "tmp"
     ensure_private_directory(runtime, "runtime root")

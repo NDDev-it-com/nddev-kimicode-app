@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## [0.3.4] - 2026-08-06
+
+### Changed
+
+- Pin Kimi Code CLI `0.34.0` and refresh the exact official manifest identity,
+  supported binary URLs, content lengths, and SHA-256 digests.
+- Make `remove-cli` transactionally remove the dedicated manager-owned launch
+  runtime cache while preserving credentials, sessions, and unmanaged state.
+
 ## [0.3.3] - 2026-08-05
 
 ### Changed

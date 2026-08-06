@@ -6,11 +6,11 @@
     "official_site": "https://www.kimi.com/code/"
   },
   "release": {
-    "version": "0.33.0"
+    "version": "0.34.0"
   },
   "official_binary_install": {
-    "manifest_url": "https://code.kimi.com/kimi-code/binaries/0.33.0/manifest.json",
-    "manifest_sha256": "7c2dc5362e0b2781981db847013ac8e23cf546af45857d3499108b1d787c6bad",
+    "manifest_url": "https://code.kimi.com/kimi-code/binaries/0.34.0/manifest.json",
+    "manifest_sha256": "91bba9e4f59d9a2243ba36e6c60af1d94fe69e43da5c1427b59d1323f973e5f7",
     "supported_hosts": [
       "macos-arm64",
       "macos-x64",
@@ -32,27 +32,27 @@
     "platforms": {
       "darwin-arm64": {
         "filename": "kimi-code-darwin-arm64",
-        "url": "https://code.kimi.com/kimi-code/binaries/0.33.0/kimi-code-darwin-arm64",
-        "size_bytes": 176663104,
-        "sha256": "befb752584de4be1e7fb5a6ec28dbc153fef19da8787a2ceb134039b5579063f"
+        "url": "https://code.kimi.com/kimi-code/binaries/0.34.0/kimi-code-darwin-arm64",
+        "size_bytes": 176894272,
+        "sha256": "9f4337e10da47843f6b550474012a53ba8b30dd665f83b176a5cd479c5f7e859"
       },
       "darwin-x64": {
         "filename": "kimi-code-darwin-x64",
-        "url": "https://code.kimi.com/kimi-code/binaries/0.33.0/kimi-code-darwin-x64",
-        "size_bytes": 179013184,
-        "sha256": "36ac0e1ed5ef6f125e1dfc2fdad07dee6201270503f88e8bfe128e7cb4cc0896"
+        "url": "https://code.kimi.com/kimi-code/binaries/0.34.0/kimi-code-darwin-x64",
+        "size_bytes": 179240224,
+        "sha256": "2fa6b3e2248f9edee0b05aa2d62120f67c9ab0fe16fc05a4dc4a26c176b286a3"
       },
       "linux-arm64": {
         "filename": "kimi-code-linux-arm64",
-        "url": "https://code.kimi.com/kimi-code/binaries/0.33.0/kimi-code-linux-arm64",
-        "size_bytes": 177015936,
-        "sha256": "63c42bbf09bfa79f581775f49f1632839311f15e357e5581e89ad0977fc5f180"
+        "url": "https://code.kimi.com/kimi-code/binaries/0.34.0/kimi-code-linux-arm64",
+        "size_bytes": 177278080,
+        "sha256": "db9c88d0f44420f1245cf745eadb569de18ecd83019ecab888b3028eddf36e87"
       },
       "linux-x64": {
         "filename": "kimi-code-linux-x64",
-        "url": "https://code.kimi.com/kimi-code/binaries/0.33.0/kimi-code-linux-x64",
-        "size_bytes": 179375296,
-        "sha256": "10a955774869102f6fede446f8e5651da20a12327881e28760f5a41aea3d80b7"
+        "url": "https://code.kimi.com/kimi-code/binaries/0.34.0/kimi-code-linux-x64",
+        "size_bytes": 179571904,
+        "sha256": "1e05b9b78c4fc69abb7f9c3ade7e6e774daa87cc4a31773cdbd72f047d2e732e"
       }
     }
   },
