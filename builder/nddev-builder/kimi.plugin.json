@@ -1,6 +1,6 @@
 {
   "name": "nddev-builder",
-  "version": "0.3.3",
+  "version": "0.3.4",
   "description": "NDDev setup artifact builder for Kimi Code CLI",
   "interface": {
     "displayName": "NDDev Builder",
