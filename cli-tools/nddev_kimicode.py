@@ -244,6 +244,10 @@ class KimicodeSetupError(Exception):
     """Safe user-facing lifecycle failure."""
 
 
+class TreeSnapshotChanged(KimicodeSetupError):
+    """Internal signal that a tree changed while its snapshot was being read."""
+
+
 class KimicodeArgumentError(KimicodeSetupError):
     """Safe JSON-facing parser failure."""
 
@@ -1266,11 +1270,8 @@ def external_lifecycle_lock(target: Path):
         system_root,
         "system bootstrap root",
     )
-    pre_product_external_snapshot = snapshot_tree(
+    pre_product_external_snapshot = snapshot_external_lock_root(
         external_lock_root,
-        "external lifecycle lock root",
-        max_file_bytes=METADATA_MAX_BYTES,
-        max_paths=128,
     )
     try:
         external_lock_root = ensure_external_lock_root()
@@ -2364,7 +2365,7 @@ def snapshot_tree(root: Path, label: str, *, max_file_bytes: int, max_paths: int
         relative = tree_relative(path, root)
         info = stat_existing(path, f"{label} entry {relative}")
         if info is None:
-            fail(f"{label} entry disappeared while snapshotting: {relative}")
+            raise TreeSnapshotChanged(f"{label} entry disappeared while snapshotting: {relative}")
         if stat.S_ISDIR(info.st_mode):
             entries[relative] = tree_entry_from_stat(relative, "dir", info)
             continue
@@ -2380,11 +2381,27 @@ def snapshot_tree(root: Path, label: str, *, max_file_bytes: int, max_paths: int
         with os.fdopen(fd, "rb") as handle:
             data = handle.read(max_file_bytes + 1)
         if opened.st_size != info.st_size:
-            fail(f"{label} entry changed while snapshotting: {relative}")
+            raise TreeSnapshotChanged(f"{label} entry changed while snapshotting: {relative}")
         if len(data) > max_file_bytes:
             fail(f"{label} entry is too large: {relative}")
         entries[relative] = tree_entry_from_stat(relative, "file", opened, data)
     return TreeSnapshot(entries=entries)
+
+
+def snapshot_external_lock_root(root: Path) -> TreeSnapshot:
+    last_change: TreeSnapshotChanged | None = None
+    for _attempt in range(3):
+        try:
+            return snapshot_tree(
+                root,
+                "external lifecycle lock root",
+                max_file_bytes=METADATA_MAX_BYTES,
+                max_paths=128,
+            )
+        except TreeSnapshotChanged as exc:
+            last_change = exc
+    assert last_change is not None
+    fail(f"external lifecycle lock root did not stabilize while snapshotting: {last_change}")
 
 
 def verify_tree_snapshot(

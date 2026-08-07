@@ -1,7 +1,7 @@
 {
   "schema_version": 3,
   "product_name": "nddev-kimicode-app",
-  "build_version": "0.3.4",
+  "build_version": "0.3.5",
   "kimi_code_cli_tested": "0.34.0",
   "kimi_code_cli_command": "kimi",
   "content_setup_ids": [
@@ -129,6 +129,6 @@
   "manager": "cli-tools/nddev_kimicode.py",
   "contract": "config/nddev-contract.json",
   "runtime_baseline": "references/kimi-code-baseline.json",
-  "nddev_builder_projection_version": "0.3.4",
+  "nddev_builder_projection_version": "0.3.5",
   "public_validator": "cli-tools/validate_public_contracts.py"
 }
