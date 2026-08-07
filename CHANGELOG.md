@@ -2,6 +2,14 @@
 
 ## Unreleased
 
+## [0.3.5] - 2026-08-07
+
+### Fixed
+
+- Retry a bounded external lock-root snapshot when another Kimi lifecycle
+  process atomically publishes a lock entry during bootstrap, while preserving
+  fail-closed handling for persistent namespace changes and unsafe entries.
+
 ## [0.3.4] - 2026-08-06
 
 ### Changed
